@@ -11,9 +11,9 @@ if {[file exists work]} {
 
 vlib work
 
-vlog -work work price_level_store.v
-vlog -work work -sv price_level_store_sva.sv
-vlog -work work matching_engine.v
+vlog -sv -work work price_level_store.v
+# vlog -work work -sv price_level_store_sva.sv
+vlog -sv -work work matching_engine.v
 vlog -work work -sv tb_matching_engine.v
 
 if {[catch {vsim -t 1ns -novopt work.tb_matching_engine} err]} {
