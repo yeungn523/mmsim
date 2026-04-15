@@ -12,6 +12,7 @@ if {[file exists work]} {
 vlib work
 
 vlog -work work price_level_store.v
+vlog -work work -sv price_level_store_sva.sv
 vlog -work work -sv tb_price_level_store.v
 
 if {[catch {vsim -t 1ns -novopt work.tb_price_level_store} err]} {

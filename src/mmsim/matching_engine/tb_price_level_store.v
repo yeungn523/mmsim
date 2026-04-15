@@ -45,6 +45,23 @@ module tb_price_level_store;
     integer fail_count;
     integer test_number;
 
+    // Ask-side (ascending sort) DUT and its dedicated signals for kIsBid=0 coverage.
+    reg                        ask_command;
+    reg  [2:0]                 ask_cmd;
+    reg  [kPriceWidth-1:0]     ask_command_price;
+    reg  [kQuantityWidth-1:0]  ask_command_quantity;
+    reg  [kOrderIdWidth-1:0]   ask_command_order_id;
+    reg                        ask_command_valid;
+    wire                       ask_command_ready;
+    wire [kOrderIdWidth-1:0]   ask_response_order_id;
+    wire [kQuantityWidth-1:0]  ask_response_quantity;
+    wire                       ask_response_valid;
+    wire                       ask_response_found;
+    wire [kPriceWidth-1:0]     ask_best_price;
+    wire [kQuantityWidth-1:0]  ask_best_quantity;
+    wire                       ask_best_valid;
+    wire                       ask_full;
+
     price_level_store #(
         .kDepth         (kDepth),
         .kMaxOrders     (kMaxOrders),
@@ -71,6 +88,32 @@ module tb_price_level_store;
         .full              (full)
     );
 
+    price_level_store #(
+        .kDepth         (kDepth),
+        .kMaxOrders     (kMaxOrders),
+        .kPriceWidth    (kPriceWidth),
+        .kQuantityWidth (kQuantityWidth),
+        .kOrderIdWidth  (kOrderIdWidth),
+        .kIsBid         (0)
+    ) dut_ask (
+        .clk               (clock),
+        .rst_n             (reset_n),
+        .command           (ask_cmd),
+        .command_price     (ask_command_price),
+        .command_quantity  (ask_command_quantity),
+        .command_order_id  (ask_command_order_id),
+        .command_valid     (ask_command_valid),
+        .command_ready     (ask_command_ready),
+        .response_order_id (ask_response_order_id),
+        .response_quantity (ask_response_quantity),
+        .response_valid    (ask_response_valid),
+        .response_found    (ask_response_found),
+        .best_price        (ask_best_price),
+        .best_quantity     (ask_best_quantity),
+        .best_valid        (ask_best_valid),
+        .full              (ask_full)
+    );
+
     initial clock = 0;
     always #(kClockPeriod / 2) clock = ~clock;
 
@@ -88,15 +131,51 @@ module tb_price_level_store;
 
     task do_reset;
         begin
-            reset_n          <= 1'b0;
-            command_valid    <= 1'b0;
-            command          <= kCommandNop;
-            command_price    <= 0;
-            command_quantity <= 0;
-            command_order_id <= 0;
+            reset_n              <= 1'b0;
+            command_valid        <= 1'b0;
+            command              <= kCommandNop;
+            command_price        <= 0;
+            command_quantity     <= 0;
+            command_order_id     <= 0;
+            ask_command_valid    <= 1'b0;
+            ask_cmd              <= kCommandNop;
+            ask_command_price    <= 0;
+            ask_command_quantity <= 0;
+            ask_command_order_id <= 0;
             tick_n(4);
             reset_n <= 1'b1;
             tick_n(2);
+        end
+    endtask
+
+    /// Submits a command to the ask-side DUT and waits for completion.
+    task submit_ask_command;
+        input [2:0]                target_command;
+        input [kPriceWidth-1:0]    target_price;
+        input [kQuantityWidth-1:0] target_quantity;
+        input [kOrderIdWidth-1:0]  target_order_id;
+        integer timeout;
+        begin
+            timeout = 0;
+            while (!ask_command_ready && timeout < 200) begin
+                tick;
+                timeout = timeout + 1;
+            end
+
+            ask_cmd              <= target_command;
+            ask_command_price    <= target_price;
+            ask_command_quantity <= target_quantity;
+            ask_command_order_id <= target_order_id;
+            ask_command_valid    <= 1'b1;
+            tick;
+            ask_command_valid <= 1'b0;
+
+            timeout = 0;
+            while (!ask_command_ready && timeout < 200) begin
+                tick;
+                timeout = timeout + 1;
+            end
+            tick;
         end
     endtask
 
@@ -294,6 +373,102 @@ module tb_price_level_store;
             PASS("After FIFO consume: quantity=50 remaining");
         else
             FAIL("FIFO remaining quantity", best_quantity, 50);
+
+        // Test 16: Cancels an order in the *middle* of a FIFO (exercises previous_pointer
+        // linkage when cancel_is_head=0 and the node is neither head nor tail).
+        test_number = 16;
+        do_reset;
+        submit_command(kCommandInsert, 32'd500, 16'd10, 16'd301);
+        submit_command(kCommandInsert, 32'd500, 16'd20, 16'd302);
+        submit_command(kCommandInsert, 32'd500, 16'd30, 16'd303);
+        submit_command(kCommandInsert, 32'd500, 16'd40, 16'd304);
+        // Cancels the 2nd order (middle): FIFO becomes 301 -> 303 -> 304
+        submit_command(kCommandCancel, 32'd0, 16'd0, 16'd302);
+        if (response_found && best_quantity == 16'd80)
+            PASS("FIFO middle cancel: quantity=80 (10+30+40)");
+        else
+            FAIL("FIFO middle cancel", best_quantity, 80);
+
+        // Test 17: Verifies that after middle cancel, FIFO ordering is preserved
+        // (next consume should return 301, then 303 — not 304).
+        test_number = 17;
+        submit_command(kCommandConsume, 32'd0, 16'd10, 16'd0);
+        if (response_order_id == 16'd301)
+            PASS("FIFO middle cancel preserves head order: 301 first");
+        else
+            FAIL("FIFO middle cancel head", response_order_id, 301);
+
+        // Test 18: Cancels the *tail* order of a FIFO (cancel_is_head=0,
+        // level_tail_pointer update path).
+        test_number = 18;
+        do_reset;
+        submit_command(kCommandInsert, 32'd700, 16'd5,  16'd401);
+        submit_command(kCommandInsert, 32'd700, 16'd15, 16'd402);
+        submit_command(kCommandInsert, 32'd700, 16'd25, 16'd403);
+        submit_command(kCommandCancel, 32'd0, 16'd0, 16'd403);
+        if (response_found && best_quantity == 16'd20)
+            PASS("FIFO tail cancel: quantity=20 (5+15)");
+        else
+            FAIL("FIFO tail cancel", best_quantity, 20);
+
+        // Test 19: Confirms a new insert after tail cancel reuses the freed slot and
+        // appends at the correct tail (exercises free-list reuse + tail linkage).
+        test_number = 19;
+        submit_command(kCommandInsert, 32'd700, 16'd50, 16'd404);
+        submit_command(kCommandConsume, 32'd0, 16'd5, 16'd0);  // should return 401
+        if (response_order_id == 16'd401 && best_quantity == 16'd65)
+            PASS("Free-slot reuse: new tail 404 appended, FIFO intact");
+        else
+            FAIL("Free-slot reuse head", response_order_id, 401);
+
+        // Test 20: Inserts *between* two existing levels (insert_position not at the
+        // boundary — exercises the shift-block with a non-zero, non-end index).
+        test_number = 20;
+        do_reset;
+        submit_command(kCommandInsert, 32'd100, 16'd10, 16'd501);
+        submit_command(kCommandInsert, 32'd300, 16'd10, 16'd502);
+        // For bids, 200 is between 100 and 300; sorted array becomes [300, 200, 100]
+        submit_command(kCommandInsert, 32'd200, 16'd10, 16'd503);
+        submit_command(kCommandConsume, 32'd0, 16'd10, 16'd0);  // consumes 300 level
+        if (best_price == 32'd200 && best_quantity == 16'd10)
+            PASS("Insert between levels: sort order [300,200,100] preserved");
+        else
+            FAIL("Insert between levels", best_price, 200);
+
+        // Test 21: Fills all kMaxOrders slots at a single price to exercise the
+        // free_pointer==0 reject path (distinct from the kDepth-full reject in Test 13).
+        test_number = 21;
+        do_reset;
+        begin : fill_orders_block
+            integer order_index;
+            for (order_index = 0; order_index < kMaxOrders; order_index = order_index + 1) begin
+                submit_command(kCommandInsert, 32'd1000, 16'd1, order_index[15:0] + 16'd600);
+            end
+        end
+        // Next insert must be rejected (free_pointer==0)
+        submit_command(kCommandInsert, 32'd1000, 16'd1, 16'd999);
+        if (full && best_quantity == kMaxOrders && !response_found)
+            PASS("kMaxOrders exhaustion: insert rejected, full asserted");
+        else
+            FAIL("kMaxOrders exhaustion", best_quantity, kMaxOrders);
+
+        // Test 22: Ask-side DUT — verifies ascending sort (lower price = better).
+        test_number = 22;
+        submit_ask_command(kCommandInsert, 32'd200, 16'd10, 16'd701);
+        submit_ask_command(kCommandInsert, 32'd100, 16'd20, 16'd702);  // better (lower)
+        submit_ask_command(kCommandInsert, 32'd300, 16'd30, 16'd703);  // worse
+        if (ask_best_price == 32'd100 && ask_best_quantity == 16'd20)
+            PASS("Ask side: lowest price=100 is best");
+        else
+            FAIL("Ask side best", ask_best_price, 100);
+
+        // Test 23: Ask-side consume promotes the next-lowest (ascending) level.
+        test_number = 23;
+        submit_ask_command(kCommandConsume, 32'd0, 16'd20, 16'd0);
+        if (ask_best_price == 32'd200 && ask_best_quantity == 16'd10)
+            PASS("Ask side consume: next best=200");
+        else
+            FAIL("Ask side promotion", ask_best_price, 200);
 
         $display("");
         $display("=========================================");
