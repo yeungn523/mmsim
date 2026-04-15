@@ -130,7 +130,18 @@ module price_level_store #(
 
     integer i;
 
-    always @(posedge clk or negedge rst_n) begin
+    always @(posedge clk or negedge rst_n) begin : main_proc
+        // Local variables used across multiple states (declared once at top of named block).
+        integer                  k;
+        reg                      found_local;
+        reg [kDepthWidth:0]      insert_local;
+        reg [kDepthWidth:0]      match_local;
+        reg [kPointerWidth-1:0]  slot;
+        reg [kPointerWidth-1:0]  head_slot;
+        reg [kQuantityWidth-1:0] head_order_quantity;
+        reg [kQuantityWidth-1:0] cancelled_quantity;
+        reg [kQuantityWidth-1:0] new_level_quantity;
+
         if (!rst_n) begin
             state            <= kStateIdle;
             command_ready    <= 1'b1;
@@ -186,31 +197,37 @@ module price_level_store #(
 
                 // Searches for an existing price level or determines the insertion position
                 kStateFindLevel: begin
-                    level_found     <= 1'b0;
-                    insert_position <= level_count;
+                    // Uses blocking assignments to local variables so each loop iteration
+                    // sees the updated state from the previous iteration.
+                    found_local  = 1'b0;
+                    insert_local = level_count;
+                    match_local  = 0;
 
-                    begin : find_block
-                        integer k;
-                        // Scans for an exact price match
-                        for (k = 0; k < kDepth; k = k + 1) begin
-                            if (k[kDepthWidth:0] < level_count) begin
-                                if (level_price[k] == working_price) begin
-                                    level_found <= 1'b1;
-                                    level_index <= k[kDepthWidth:0];
-                                end
+                    // Scans for an exact price match
+                    for (k = 0; k < kDepth; k = k + 1) begin
+                        if (k[kDepthWidth:0] < level_count) begin
+                            if (level_price[k] == working_price && !found_local) begin
+                                found_local = 1'b1;
+                                match_local = k[kDepthWidth:0];
                             end
                         end
+                    end
 
-                        // Identifies the first level with a less competitive price for insertion
+                    // Identifies the first level with a less competitive price for insertion
+                    if (!found_local) begin
                         for (k = 0; k < kDepth; k = k + 1) begin
-                            if (k[kDepthWidth:0] < level_count && !level_found) begin
-                                if (is_better_price(working_price, level_price[k])) begin
-                                    if (insert_position == level_count)
-                                        insert_position <= k[kDepthWidth:0];
+                            if (k[kDepthWidth:0] < level_count) begin
+                                if (is_better_price(working_price, level_price[k])
+                                    && insert_local == level_count) begin
+                                    insert_local = k[kDepthWidth:0];
                                 end
                             end
                         end
                     end
+
+                    level_found     <= found_local;
+                    insert_position <= insert_local;
+                    level_index     <= match_local;
 
                     if (free_pointer == 0) begin
                         // Rejects the insertion when no free order slots remain
@@ -229,16 +246,13 @@ module price_level_store #(
                         state <= kStateUpdateFifo;
                     end else if (level_count < kDepth[kDepthWidth:0]) begin
                         // Shifts existing levels downward to make room for the new price level
-                        begin : shift_block
-                            integer k;
-                            for (k = kDepth - 1; k > 0; k = k - 1) begin
-                                if (k[kDepthWidth:0] > insert_position && k[kDepthWidth:0] <= level_count) begin
-                                    level_price[k]        <= level_price[k-1];
-                                    level_quantity[k]     <= level_quantity[k-1];
-                                    level_head_pointer[k] <= level_head_pointer[k-1];
-                                    level_tail_pointer[k] <= level_tail_pointer[k-1];
-                                    level_valid[k]        <= level_valid[k-1];
-                                end
+                        for (k = kDepth - 1; k > 0; k = k - 1) begin
+                            if (k[kDepthWidth:0] > insert_position && k[kDepthWidth:0] <= level_count) begin
+                                level_price[k]        <= level_price[k-1];
+                                level_quantity[k]     <= level_quantity[k-1];
+                                level_head_pointer[k] <= level_head_pointer[k-1];
+                                level_tail_pointer[k] <= level_tail_pointer[k-1];
+                                level_valid[k]        <= level_valid[k-1];
                             end
                         end
 
@@ -262,29 +276,27 @@ module price_level_store #(
                 end
 
                 kStateUpdateFifo: begin
-                    // Allocates a free slot and appends the order to the target level's FIFO
-                    begin
-                        reg [kPointerWidth-1:0] slot;
-                        slot = free_stack[free_pointer - 1];
+                    // Allocates a free slot and appends the order to the target level's FIFO.
+                    // Uses a blocking-assigned local 'slot' so the index is stable in this cycle.
+                    slot = free_stack[free_pointer - 1];
 
-                        order_id[slot]       <= working_order_id;
-                        order_quantity[slot]  <= working_quantity;
-                        order_next[slot]     <= {kPointerWidth{1'b0}};
-                        order_valid[slot]    <= 1'b1;
+                    order_id[slot]       <= working_order_id;
+                    order_quantity[slot]  <= working_quantity;
+                    order_next[slot]     <= {kPointerWidth{1'b0}};
+                    order_valid[slot]    <= 1'b1;
 
-                        if (level_quantity[level_index] == 0) begin
-                            // Sets the head pointer when this is the first order at the level
-                            level_head_pointer[level_index] <= slot;
-                        end else begin
-                            // Links the previous tail node to the newly allocated slot
-                            order_next[level_tail_pointer[level_index]] <= slot;
-                        end
-                        level_tail_pointer[level_index] <= slot;
-
-                        level_quantity[level_index] <= level_quantity[level_index] + working_quantity;
-
-                        free_pointer <= free_pointer - 1;
+                    if (level_quantity[level_index] == 0) begin
+                        // Sets the head pointer when this is the first order at the level
+                        level_head_pointer[level_index] <= slot;
+                    end else begin
+                        // Links the previous tail node to the newly allocated slot
+                        order_next[level_tail_pointer[level_index]] <= slot;
                     end
+                    level_tail_pointer[level_index] <= slot;
+
+                    level_quantity[level_index] <= level_quantity[level_index] + working_quantity;
+
+                    free_pointer <= free_pointer - 1;
 
                     response_valid     <= 1'b1;
                     response_quantity  <= working_quantity;
@@ -303,62 +315,55 @@ module price_level_store #(
                         response_found    <= (remaining_quantity != working_quantity);
                         state             <= kStateDone;
                     end else begin
-                        begin
-                            reg [kPointerWidth-1:0]  head_slot;
-                            reg [kQuantityWidth-1:0] head_order_quantity;
-                            head_slot           = level_head_pointer[0];
-                            head_order_quantity = order_quantity[head_slot];
+                        head_slot           = level_head_pointer[0];
+                        head_order_quantity = order_quantity[head_slot];
 
-                            response_order_id <= order_id[head_slot];
+                        response_order_id <= order_id[head_slot];
 
-                            if (remaining_quantity >= head_order_quantity) begin
-                                // Fully consumes the head order and frees its slot
-                                level_quantity[0]  <= level_quantity[0] - head_order_quantity;
-                                remaining_quantity <= remaining_quantity - head_order_quantity;
-                                response_quantity  <= head_order_quantity;
+                        if (remaining_quantity >= head_order_quantity) begin
+                            // Fully consumes the head order and frees its slot
+                            new_level_quantity = level_quantity[0] - head_order_quantity;
 
-                                level_head_pointer[0]            <= order_next[head_slot];
-                                order_valid[head_slot]           <= 1'b0;
-                                free_stack[free_pointer]         <= head_slot;
-                                free_pointer                     <= free_pointer + 1;
+                            level_quantity[0]  <= new_level_quantity;
+                            remaining_quantity <= remaining_quantity - head_order_quantity;
+                            response_quantity  <= head_order_quantity;
 
-                                if (level_quantity[0] - head_order_quantity == 0) begin
-                                    // Transitions to level removal when the level becomes empty
-                                    state <= kStateConsumeShift;
-                                end else begin
-                                    // Emits a fill response and continues consuming from the next order
-                                    response_valid <= 1'b1;
-                                    state          <= kStateConsumePop;
-                                end
+                            level_head_pointer[0]            <= order_next[head_slot];
+                            order_valid[head_slot]           <= 1'b0;
+                            free_stack[free_pointer]         <= head_slot;
+                            free_pointer                     <= free_pointer + 1;
+
+                            if (new_level_quantity == 0) begin
+                                // Transitions to level removal when the level becomes empty
+                                state <= kStateConsumeShift;
                             end else begin
-                                // Partially fills the head order and completes the consume operation
-                                order_quantity[head_slot] <= head_order_quantity - remaining_quantity;
-                                level_quantity[0]         <= level_quantity[0] - remaining_quantity;
-                                response_quantity         <= remaining_quantity;
-                                remaining_quantity        <= 0;
-
+                                // Emits a fill response and continues consuming from the next order
                                 response_valid <= 1'b1;
-                                response_found <= 1'b1;
-                                state          <= kStateDone;
+                                state          <= kStateConsumePop;
                             end
+                        end else begin
+                            // Partially fills the head order and completes the consume operation
+                            order_quantity[head_slot] <= head_order_quantity - remaining_quantity;
+                            level_quantity[0]         <= level_quantity[0] - remaining_quantity;
+                            response_quantity         <= remaining_quantity;
+                            remaining_quantity        <= 0;
+
+                            response_valid <= 1'b1;
+                            response_found <= 1'b1;
+                            state          <= kStateDone;
                         end
                     end
                 end
 
                 kStateConsumeShift: begin
                     // Removes the empty level at index 0 and shifts all remaining levels upward
-                    level_valid[0] <= 1'b0;
-
-                    begin : consume_shift_block
-                        integer k;
-                        for (k = 0; k < kDepth - 1; k = k + 1) begin
-                            if (k[kDepthWidth:0] < level_count - 1) begin
-                                level_price[k]        <= level_price[k+1];
-                                level_quantity[k]     <= level_quantity[k+1];
-                                level_head_pointer[k] <= level_head_pointer[k+1];
-                                level_tail_pointer[k] <= level_tail_pointer[k+1];
-                                level_valid[k]        <= level_valid[k+1];
-                            end
+                    for (k = 0; k < kDepth - 1; k = k + 1) begin
+                        if (k[kDepthWidth:0] < level_count - 1) begin
+                            level_price[k]        <= level_price[k+1];
+                            level_quantity[k]     <= level_quantity[k+1];
+                            level_head_pointer[k] <= level_head_pointer[k+1];
+                            level_tail_pointer[k] <= level_tail_pointer[k+1];
+                            level_valid[k]        <= level_valid[k+1];
                         end
                     end
 
@@ -406,48 +411,42 @@ module price_level_store #(
                         state              <= kStateCancelScan;
                     end else if (order_id[scan_pointer] == working_order_id) begin
                         // Unlinks the matched order from its FIFO and frees the slot
-                        begin
-                            reg [kQuantityWidth-1:0] cancelled_quantity;
-                            cancelled_quantity = order_quantity[scan_pointer];
+                        cancelled_quantity = order_quantity[scan_pointer];
 
-                            if (cancel_is_head) begin
-                                level_head_pointer[cancel_level_index] <= order_next[scan_pointer];
-                            end else begin
-                                order_next[previous_pointer] <= order_next[scan_pointer];
-                            end
-
-                            if (level_tail_pointer[cancel_level_index] == scan_pointer) begin
-                                if (cancel_is_head)
-                                    level_tail_pointer[cancel_level_index] <= level_head_pointer[cancel_level_index];
-                                else
-                                    level_tail_pointer[cancel_level_index] <= previous_pointer;
-                            end
-
-                            order_valid[scan_pointer]    <= 1'b0;
-                            free_stack[free_pointer]     <= scan_pointer;
-                            free_pointer                 <= free_pointer + 1;
-
-                            level_quantity[cancel_level_index] <= level_quantity[cancel_level_index] - cancelled_quantity;
-
-                            response_order_id <= working_order_id;
-                            response_quantity <= cancelled_quantity;
-                            response_found    <= 1'b1;
-                            response_valid    <= 1'b1;
+                        if (cancel_is_head) begin
+                            level_head_pointer[cancel_level_index] <= order_next[scan_pointer];
+                        end else begin
+                            order_next[previous_pointer] <= order_next[scan_pointer];
                         end
 
+                        if (level_tail_pointer[cancel_level_index] == scan_pointer) begin
+                            if (cancel_is_head)
+                                level_tail_pointer[cancel_level_index] <= level_head_pointer[cancel_level_index];
+                            else
+                                level_tail_pointer[cancel_level_index] <= previous_pointer;
+                        end
+
+                        order_valid[scan_pointer]    <= 1'b0;
+                        free_stack[free_pointer]     <= scan_pointer;
+                        free_pointer                 <= free_pointer + 1;
+
+                        level_quantity[cancel_level_index] <= level_quantity[cancel_level_index] - cancelled_quantity;
+
+                        response_order_id <= working_order_id;
+                        response_quantity <= cancelled_quantity;
+                        response_found    <= 1'b1;
+                        response_valid    <= 1'b1;
+
                         // Removes the price level entirely when the cancelled order was the last one
-                        if (level_quantity[cancel_level_index] == order_quantity[scan_pointer]) begin
-                            begin : cancel_shift_block
-                                integer k;
-                                for (k = 0; k < kDepth - 1; k = k + 1) begin
-                                    if (k[kDepthWidth:0] >= cancel_level_index
-                                        && k[kDepthWidth:0] < level_count - 1) begin
-                                        level_price[k]        <= level_price[k+1];
-                                        level_quantity[k]     <= level_quantity[k+1];
-                                        level_head_pointer[k] <= level_head_pointer[k+1];
-                                        level_tail_pointer[k] <= level_tail_pointer[k+1];
-                                        level_valid[k]        <= level_valid[k+1];
-                                    end
+                        if (level_quantity[cancel_level_index] == cancelled_quantity) begin
+                            for (k = 0; k < kDepth - 1; k = k + 1) begin
+                                if (k[kDepthWidth:0] >= cancel_level_index
+                                    && k[kDepthWidth:0] < level_count - 1) begin
+                                    level_price[k]        <= level_price[k+1];
+                                    level_quantity[k]     <= level_quantity[k+1];
+                                    level_head_pointer[k] <= level_head_pointer[k+1];
+                                    level_tail_pointer[k] <= level_tail_pointer[k+1];
+                                    level_valid[k]        <= level_valid[k+1];
                                 end
                             end
                             if (level_count > 0) begin
