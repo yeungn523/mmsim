@@ -143,14 +143,14 @@ module price_level_store #(
         reg [kQuantityWidth-1:0] new_level_quantity;
 
         if (!rst_n) begin
-            state            <= kStateIdle;
-            command_ready    <= 1'b1;
-            response_valid   <= 1'b0;
-            response_found   <= 1'b0;
+            state             <= kStateIdle;
+            command_ready     <= 1'b1;
+            response_valid    <= 1'b0;
+            response_found    <= 1'b0;
             response_order_id <= {kOrderIdWidth{1'b0}};
             response_quantity <= {kQuantityWidth{1'b0}};
-            level_count      <= 0;
-            free_pointer     <= kMaxOrders[kPointerWidth:0];
+            level_count       <= 0;
+            free_pointer      <= kMaxOrders[kPointerWidth:0];
 
             for (i = 0; i < kDepth; i = i + 1) begin
                 level_valid[i]        <= 1'b0;
@@ -232,6 +232,7 @@ module price_level_store #(
                     if (free_pointer == 0) begin
                         // Rejects the insertion when no free order slots remain
                         response_valid    <= 1'b1;
+                        response_order_id <= {kOrderIdWidth{1'b0}};
                         response_quantity <= {kQuantityWidth{1'b0}};
                         response_found    <= 1'b0;
                         state             <= kStateDone;
@@ -269,6 +270,7 @@ module price_level_store #(
                     end else begin
                         // Rejects the insertion when all price level slots are occupied
                         response_valid    <= 1'b1;
+                        response_order_id <= {kOrderIdWidth{1'b0}};
                         response_quantity <= {kQuantityWidth{1'b0}};
                         response_found    <= 1'b0;
                         state             <= kStateDone;
@@ -280,10 +282,10 @@ module price_level_store #(
                     // Uses a blocking-assigned local 'slot' so the index is stable in this cycle.
                     slot = free_stack[free_pointer - 1];
 
-                    order_id[slot]       <= working_order_id;
+                    order_id[slot]        <= working_order_id;
                     order_quantity[slot]  <= working_quantity;
-                    order_next[slot]     <= {kPointerWidth{1'b0}};
-                    order_valid[slot]    <= 1'b1;
+                    order_next[slot]      <= {kPointerWidth{1'b0}};
+                    order_valid[slot]     <= 1'b1;
 
                     if (level_quantity[level_index] == 0) begin
                         // Sets the head pointer when this is the first order at the level
@@ -298,17 +300,17 @@ module price_level_store #(
 
                     free_pointer <= free_pointer - 1;
 
-                    response_valid     <= 1'b1;
-                    response_quantity  <= working_quantity;
-                    response_order_id  <= working_order_id;
-                    response_found     <= 1'b1;
-                    state              <= kStateDone;
+                    response_valid    <= 1'b1;
+                    response_quantity <= working_quantity;
+                    response_order_id <= working_order_id;
+                    response_found    <= 1'b1;
+                    state             <= kStateDone;
                 end
 
-            // Removes quantity from the best price level by popping orders from the FIFO head
+                // Removes quantity from the best price level by popping orders from the FIFO head
                 kStateConsumePop: begin
                     if (level_count == 0 || remaining_quantity == 0) begin
-                        // Reports the total consumed quantity when no more can be removed. Preserves response_order_id 
+                        // Reports the total consumed quantity when no more can be removed. Preserves response_order_id
                         // from the last fill iteration; only zeroes it when the book was empty.
                         response_valid    <= 1'b1;
                         response_quantity <= working_quantity - remaining_quantity;
@@ -330,10 +332,10 @@ module price_level_store #(
                             remaining_quantity <= remaining_quantity - head_order_quantity;
                             response_quantity  <= head_order_quantity;
 
-                            level_head_pointer[0]            <= order_next[head_slot];
-                            order_valid[head_slot]           <= 1'b0;
-                            free_stack[free_pointer]         <= head_slot;
-                            free_pointer                     <= free_pointer + 1;
+                            level_head_pointer[0]    <= order_next[head_slot];
+                            order_valid[head_slot]   <= 1'b0;
+                            free_stack[free_pointer] <= head_slot;
+                            free_pointer             <= free_pointer + 1;
 
                             if (new_level_quantity == 0) begin
                                 // Transitions to level removal when the level becomes empty
@@ -372,6 +374,7 @@ module price_level_store #(
                     if (level_count > 0) begin
                         level_valid[level_count - 1]    <= 1'b0;
                         level_quantity[level_count - 1] <= {kQuantityWidth{1'b0}};
+                        level_price[level_count - 1]    <= {kPriceWidth{1'b0}};
                     end
 
                     level_count <= level_count - 1;
@@ -454,6 +457,7 @@ module price_level_store #(
                             if (level_count > 0) begin
                                 level_valid[level_count - 1]    <= 1'b0;
                                 level_quantity[level_count - 1] <= {kQuantityWidth{1'b0}};
+                                level_price[level_count - 1]    <= {kPriceWidth{1'b0}};
                             end
                             level_count <= level_count - 1;
                         end
