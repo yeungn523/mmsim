@@ -113,6 +113,11 @@ module matching_engine #(
     reg                        cancel_ask_done;
     reg                        cancel_bid_found;
 
+    // Set when a command is issued, cleared when command_ready transitions from low back to high (signaling the book 
+    // has finished processing).
+    reg                        bid_in_flight;
+    reg                        ask_in_flight;
+
     // Bid book (descending price sort, highest at index 0)
     price_level_store #(
         .kDepth         (kDepth),
@@ -194,11 +199,20 @@ module matching_engine #(
             cancel_bid_done   <= 1'b0;
             cancel_ask_done   <= 1'b0;
             cancel_bid_found  <= 1'b0;
+
+            bid_in_flight     <= 1'b0;
+            ask_in_flight     <= 1'b0;
         end else begin
             // Deasserts single-cycle pulses
             trade_valid       <= 1'b0;
             bid_command_valid <= 1'b0;
             ask_command_valid <= 1'b0;
+
+            // Clears the in-flight flag when the book's command_ready reasserts
+            if (bid_in_flight && bid_command_ready)
+                bid_in_flight <= 1'b0;
+            if (ask_in_flight && ask_command_ready)
+                ask_in_flight <= 1'b0;
 
             case (state)
                 kStateIdle: begin
@@ -294,6 +308,7 @@ module matching_engine #(
                             ask_command          <= kCommandConsume;
                             ask_command_quantity  <= fill_quantity;
                             ask_command_valid     <= 1'b1;
+                            ask_in_flight         <= 1'b1;
 
                             trade_price <= best_ask_price;
                         end else begin
@@ -304,6 +319,7 @@ module matching_engine #(
                             bid_command          <= kCommandConsume;
                             bid_command_quantity  <= fill_quantity;
                             bid_command_valid     <= 1'b1;
+                            bid_in_flight         <= 1'b1;
 
                             trade_price <= best_bid_price;
                         end
@@ -315,9 +331,10 @@ module matching_engine #(
                     state <= kStateMatchWait;
                 end
 
-                // Waits for the opposite book's consume to complete, then emits the trade
+                // Waits for the opposite book's consume to complete, then emits the trade.
+                // The in-flight flag is cleared when command_ready reasserts (see top of always).
                 kStateMatchWait: begin
-                    if (working_is_buy && ask_command_ready) begin
+                    if (working_is_buy && !ask_in_flight && ask_command_ready) begin
                         trade_resting_id  <= ask_response_order_id;
                         trade_valid       <= 1'b1;
                         working_remaining <= working_remaining - trade_quantity;
@@ -326,7 +343,7 @@ module matching_engine #(
 
                         // Loops back to check for more matches at the next price level
                         state <= kStateMatchCheck;
-                    end else if (!working_is_buy && bid_command_ready) begin
+                    end else if (!working_is_buy && !bid_in_flight && bid_command_ready) begin
                         trade_resting_id  <= bid_response_order_id;
                         trade_valid       <= 1'b1;
                         working_remaining <= working_remaining - trade_quantity;
@@ -339,29 +356,32 @@ module matching_engine #(
 
                 // Inserts the unmatched remainder into the same-side book
                 kStateInsert: begin
-                    if (working_is_buy && bid_command_ready) begin
+                    if (working_is_buy && !bid_in_flight && bid_command_ready) begin
                         bid_command          <= kCommandInsert;
                         bid_command_price    <= working_price;
                         bid_command_quantity <= working_remaining;
                         bid_command_order_id <= working_id;
                         bid_command_valid    <= 1'b1;
+                        bid_in_flight        <= 1'b1;
                         state                <= kStateInsertWait;
-                    end else if (!working_is_buy && ask_command_ready) begin
+                    end else if (!working_is_buy && !ask_in_flight && ask_command_ready) begin
                         ask_command          <= kCommandInsert;
                         ask_command_price    <= working_price;
                         ask_command_quantity <= working_remaining;
                         ask_command_order_id <= working_id;
                         ask_command_valid    <= 1'b1;
+                        ask_in_flight        <= 1'b1;
                         state                <= kStateInsertWait;
                     end
                 end
 
-                // Waits for the insert to complete
+                // Waits for the insert to complete. The in-flight flag ensures we actually see
+                // command_ready transition low then high rather than the pre-command high state.
                 kStateInsertWait: begin
-                    if (working_is_buy && bid_command_ready) begin
+                    if (working_is_buy && !bid_in_flight && bid_command_ready) begin
                         order_ready <= 1'b1;
                         state       <= kStateIdle;
-                    end else if (!working_is_buy && ask_command_ready) begin
+                    end else if (!working_is_buy && !ask_in_flight && ask_command_ready) begin
                         order_ready <= 1'b1;
                         state       <= kStateIdle;
                     end
@@ -369,14 +389,17 @@ module matching_engine #(
 
                 // Sends cancel commands to both book sides simultaneously
                 kStateCancel: begin
-                    if (bid_command_ready && ask_command_ready) begin
+                    if (!bid_in_flight && !ask_in_flight
+                        && bid_command_ready && ask_command_ready) begin
                         bid_command          <= kCommandCancel;
                         bid_command_order_id <= working_id;
                         bid_command_valid    <= 1'b1;
+                        bid_in_flight        <= 1'b1;
 
                         ask_command          <= kCommandCancel;
                         ask_command_order_id <= working_id;
                         ask_command_valid    <= 1'b1;
+                        ask_in_flight        <= 1'b1;
 
                         cancel_bid_done  <= 1'b0;
                         cancel_ask_done  <= 1'b0;
@@ -386,18 +409,19 @@ module matching_engine #(
                     end
                 end
 
-                // Waits for both cancel operations to report completion
+                // Waits for both cancel operations to report completion. Exits only after both
+                // sides have cleared their in-flight flag (meaning the store dropped ready to
+                // work and brought it back up) and their done flags are set.
                 kStateCancelWait: begin
-                    if (bid_command_ready && !cancel_bid_done) begin
+                    if (!bid_in_flight && bid_command_ready && !cancel_bid_done) begin
                         cancel_bid_done  <= 1'b1;
                         cancel_bid_found <= bid_response_found;
                     end
-                    if (ask_command_ready && !cancel_ask_done) begin
+                    if (!ask_in_flight && ask_command_ready && !cancel_ask_done) begin
                         cancel_ask_done <= 1'b1;
                     end
 
-                    if ((cancel_bid_done || bid_command_ready)
-                        && (cancel_ask_done || ask_command_ready)) begin
+                    if (cancel_bid_done && cancel_ask_done) begin
                         order_ready <= 1'b1;
                         state       <= kStateIdle;
                     end
