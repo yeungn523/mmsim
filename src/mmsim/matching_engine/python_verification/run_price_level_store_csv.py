@@ -38,14 +38,12 @@ def run_stage(description: str, command: list[str], working_directory: Path) -> 
     )
 
     if result.stdout.strip():
-        for line in result.stdout.strip().splitlines():
-            console.log(message=f"  {line}")
+        print(result.stdout.rstrip())  # noqa: T201
 
     if result.returncode != 0:
         console.error(message=f"Stage failed with exit code {result.returncode}", exit_code=0)
         if result.stderr.strip():
-            for line in result.stderr.strip().splitlines():
-                console.warning(message=f"  {line}")
+            print(result.stderr.rstrip())  # noqa: T201
         return False
 
     console.success(message=f"  {description} complete")

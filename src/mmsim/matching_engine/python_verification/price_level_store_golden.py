@@ -515,7 +515,10 @@ def run_golden_model(commands: list[dict[str, int]], depth: int = 8, max_orders:
             })
         elif command_code == _COMMAND_CONSUME:
             responses = store.consume(quantity=quantity)
-            # Records the final response (after all fills complete) for Verilog comparison
+            # Records the last order touched and the total quantity consumed. The book-state
+            # fields are read from the store after the full consume completes so that any
+            # emptied levels have already been removed, matching the Verilog testbench that
+            # samples best_price after the FSM returns to idle.
             final_response = responses[-1]
             total_consumed = sum(response.quantity for response in responses)
             results.append({
@@ -526,9 +529,9 @@ def run_golden_model(commands: list[dict[str, int]], depth: int = 8, max_orders:
                 "response_order_id": final_response.order_id,
                 "response_quantity": total_consumed,
                 "response_found": int(final_response.found),
-                "best_price": final_response.best_price,
-                "best_quantity": final_response.best_quantity,
-                "best_valid": int(final_response.best_valid),
+                "best_price": store.best_price,
+                "best_quantity": store.best_quantity,
+                "best_valid": int(store.best_valid),
             })
         elif command_code == _COMMAND_CANCEL:
             response = store.cancel(order_id=order_id)
