@@ -29,6 +29,10 @@ htmlcov/
 # Jupyter
 .ipynb_checkpoints/
 
+# Output Log Files 
+*.csv
+*.json
+
 # ---- ModelSim / Questa ----
 work/
 transcript
