@@ -154,10 +154,7 @@ module tb_matching_engine_csv;
         $fwrite(trades_file,
             "step,aggressor_id,resting_id,trade_price,trade_quantity\n");
         $fwrite(book_state_file,
-            "step,order_type,order_id,order_price,order_quantity,"
-            "best_bid_price,best_bid_quantity,best_bid_valid,"
-            "best_ask_price,best_ask_quantity,best_ask_valid,"
-            "total_trades,total_volume\n");
+            "step,order_type,order_id,order_price,order_quantity,best_bid_price,best_bid_quantity,best_bid_valid,best_ask_price,best_ask_quantity,best_ask_valid,total_trades,total_volume\n");
 
         scan_result = $fgets(header_line, input_file);
 
