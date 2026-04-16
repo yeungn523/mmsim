@@ -603,34 +603,62 @@ def verify_against_verilog(expected_path: Path, actual_path: Path) -> dict[str, 
     total = min(len(expected_rows), len(actual_rows))
     matches = 0
     mismatches = 0
-    first_mismatch_index: int | None = None
 
     comparison_fields = [
         "response_order_id", "response_quantity", "response_found",
         "best_price", "best_quantity", "best_valid",
     ]
 
-    for index in range(total):
-        expected = expected_rows[index]
-        actual = actual_rows[index]
-        row_matches = all(
-            str(expected[field_name]) == str(actual[field_name])
-            for field_name in comparison_fields
-        )
+    command_names = {"0": "NOP", "1": "INSERT", "2": "CONSUME", "3": "CANCEL"}
 
-        if row_matches:
-            matches += 1
-        else:
+    # Writes a detailed diff CSV beside the actual CSV for offline analysis
+    diff_path = actual_path.parent / "lob_diff.csv"
+    with open(diff_path, "w", newline="") as diff_file:
+        diff_writer = csv.writer(diff_file)
+        diff_writer.writerow([
+            "row", "command", "price", "quantity", "order_id", "field",
+            "expected", "actual",
+        ])
+
+        for index in range(total):
+            expected = expected_rows[index]
+            actual = actual_rows[index]
+            mismatched_fields = [
+                field_name for field_name in comparison_fields
+                if str(expected[field_name]) != str(actual[field_name])
+            ]
+
+            if not mismatched_fields:
+                matches += 1
+                continue
+
             mismatches += 1
-            if first_mismatch_index is None:
-                first_mismatch_index = index
-                console.warning(f"First mismatch at command {index}:")
-                for field_name in comparison_fields:
-                    if str(expected[field_name]) != str(actual[field_name]):
-                        console.warning(
-                            f"  {field_name}: expected={expected[field_name]}, "
-                            f"actual={actual[field_name]}"
-                        )
+            command_name = command_names.get(expected["command"], "???")
+            header = (
+                f"Row {index} ({command_name} price={expected['price']} "
+                f"quantity={expected['quantity']} order_id={expected['order_id']}):"
+            )
+            console.warning(message=header)
+            for field_name in mismatched_fields:
+                console.warning(
+                    message=(
+                        f"  {field_name}: expected={expected[field_name]}, "
+                        f"actual={actual[field_name]}"
+                    ),
+                )
+                diff_writer.writerow([
+                    index,
+                    expected["command"],
+                    expected["price"],
+                    expected["quantity"],
+                    expected["order_id"],
+                    field_name,
+                    expected[field_name],
+                    actual[field_name],
+                ])
+
+    if mismatches > 0:
+        console.log(message=f"Detailed diff written to {diff_path}")
 
     if len(expected_rows) != len(actual_rows):
         console.warning(

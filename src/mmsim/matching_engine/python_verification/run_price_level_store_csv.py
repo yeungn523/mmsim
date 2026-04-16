@@ -61,7 +61,11 @@ if __name__ == "__main__":
 
     stage_one_pass = run_stage(
         description="Generate golden model CSVs",
-        command=[sys.executable, "-m", "mmsim.matching_engine.golden.price_level_store_golden"],
+        command=[
+            sys.executable,
+            "-m",
+            "mmsim.matching_engine.python_verification.price_level_store_golden",
+        ],
         working_directory=project_root,
     )
     if not stage_one_pass:
@@ -107,7 +111,7 @@ if __name__ == "__main__":
         command=[
             sys.executable,
             "-m",
-            "mmsim.matching_engine.golden.price_level_store_golden",
+            "mmsim.matching_engine.python_verification.price_level_store_golden",
             "--verify",
         ],
         working_directory=project_root,
