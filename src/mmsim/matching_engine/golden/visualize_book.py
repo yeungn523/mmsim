@@ -11,7 +11,7 @@ import html
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ..utilities import console, LogLevel
+from ...utilities import console, LogLevel
 from .price_level_store_golden import PriceLevelStore, generate_deterministic_sweep
 
 
@@ -193,7 +193,7 @@ def _render_level_html(level: VisualizerLevel, index: int) -> str:
         )
 
     if not level.orders:
-        order_cells = '<span class="empty-fifo">empty</span>'
+        order_cells = "<span class='empty-fifo'>empty</span>"
 
     return (
         f'<tr class="level-row">'
@@ -247,7 +247,7 @@ def _render_snapshot_html(snapshot: BookSnapshot) -> str:
             f"{rows}</table>"
         )
     else:
-        table = '<div class="empty-book">Book is empty</div>'
+        table = "<div class='empty-book'>Book is empty</div>"
 
     return f"{header}{status_bar}{table}</div>"
 

@@ -11,10 +11,11 @@ from __future__ import annotations
 import csv
 import json
 import random
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ..utilities import console, LogLevel
+from ...utilities import console, LogLevel
 
 
 # Maximum number of distinct price levels per book side.
@@ -645,8 +646,35 @@ def verify_against_verilog(expected_path: Path, actual_path: Path) -> dict[str, 
 
 
 if __name__ == "__main__":
-    output_directory = Path(__file__).parent
+    # CSVs are written to the sim/ directory so ModelSim and Python share the same location.
+    output_directory = Path(__file__).resolve().parent.parent / "sim"
+    output_directory.mkdir(exist_ok=True)
+    actual_path = output_directory / "lob_actual.csv"
+    expected_path = output_directory / "lob_expected.csv"
+    commands_path = output_directory / "lob_commands.csv"
 
+    # When --verify is passed, skip generation and just compare expected vs actual.
+    if len(sys.argv) > 1 and sys.argv[1] == "--verify":
+        console.log("Comparing lob_expected.csv vs lob_actual.csv...")
+
+        if not expected_path.exists():
+            console.error(message="lob_expected.csv not found. Run without --verify first.", error=FileNotFoundError)
+        if not actual_path.exists():
+            console.error(message="lob_actual.csv not found. Run the Verilog CSV testbench first.", error=FileNotFoundError)
+
+        summary = verify_against_verilog(expected_path=expected_path, actual_path=actual_path)
+        console.log(
+            f"  Total: {summary['total_commands']} commands, "
+            f"{summary['matches']} matches, {summary['mismatches']} mismatches"
+        )
+        if summary["all_passed"]:
+            console.success("All rows match -- hardware matches golden model")
+        else:
+            console.error("Mismatches detected between hardware and golden model", exit_code=0)
+
+        sys.exit(0 if summary["all_passed"] else 1)
+
+    # Default mode: generate CSVs and run self-verification.
     console.log("Generating deterministic command sweep...")
     commands = generate_deterministic_sweep(depth=8, max_orders=16, seed=42)
     console.log(f"  Generated {len(commands)} commands")
@@ -654,9 +682,6 @@ if __name__ == "__main__":
     console.log("Running golden model...")
     results = run_golden_model(commands=commands, depth=8, max_orders=16, is_bid=True)
     console.log(f"  Processed {len(results)} responses")
-
-    commands_path = output_directory / "lob_commands.csv"
-    expected_path = output_directory / "lob_expected.csv"
 
     write_commands_csv(commands=commands, file_path=commands_path)
     write_expected_csv(results=results, file_path=expected_path)

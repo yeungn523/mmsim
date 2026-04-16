@@ -2,7 +2,7 @@
 # ModelSim simulation script for the matching_engine unit testbench.
 #
 # Run from ModelSim transcript:
-#   cd <path_to_matching_engine>
+#   cd <path_to_matching_engine>/sim
 #   do run_matching_engine.tcl
 
 if {[file exists work]} {
@@ -11,10 +11,10 @@ if {[file exists work]} {
 
 vlib work
 
-vlog -sv -work work price_level_store.v
-# vlog -work work -sv price_level_store_sva.sv
-vlog -sv -work work matching_engine.v
-vlog -work work -sv tb_matching_engine.v
+vlog -sv -work work ../rtl/price_level_store.v
+# vlog -sv -work work ../sva/price_level_store_sva.sv
+vlog -sv -work work ../rtl/matching_engine.v
+vlog -sv -work work ../tb/tb_matching_engine.v
 
 if {[catch {vsim -t 1ns -novopt work.tb_matching_engine} err]} {
     puts "Error: vsim failed: $err"

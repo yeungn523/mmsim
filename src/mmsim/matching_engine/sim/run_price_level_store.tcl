@@ -2,7 +2,7 @@
 # ModelSim simulation script for the price_level_store unit testbench.
 #
 # Run from ModelSim transcript:
-#   cd <path_to_matching_engine>
+#   cd <path_to_matching_engine>/sim
 #   do run_price_level_store.tcl
 
 if {[file exists work]} {
@@ -11,9 +11,9 @@ if {[file exists work]} {
 
 vlib work
 
-vlog -sv -work work price_level_store.v
-# vlog -work work -sv price_level_store_sva.sv
-vlog -work work -sv tb_price_level_store.v
+vlog -sv -work work ../rtl/price_level_store.v
+# vlog -sv -work work ../sva/price_level_store_sva.sv
+vlog -sv -work work ../tb/tb_price_level_store.v
 
 if {[catch {vsim -t 1ns -novopt work.tb_price_level_store} err]} {
     puts "Error: vsim failed: $err"

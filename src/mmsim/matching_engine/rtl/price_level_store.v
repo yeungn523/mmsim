@@ -305,14 +305,16 @@ module price_level_store #(
                     state              <= kStateDone;
                 end
 
-                // Removes quantity from the best price level by popping orders from the FIFO head
+            // Removes quantity from the best price level by popping orders from the FIFO head
                 kStateConsumePop: begin
                     if (level_count == 0 || remaining_quantity == 0) begin
-                        // Reports the total consumed quantity when no more can be removed
+                        // Reports the total consumed quantity when no more can be removed. Preserves response_order_id 
+                        // from the last fill iteration; only zeroes it when the book was empty.
                         response_valid    <= 1'b1;
                         response_quantity <= working_quantity - remaining_quantity;
-                        response_order_id <= {kOrderIdWidth{1'b0}};
                         response_found    <= (remaining_quantity != working_quantity);
+                        if (remaining_quantity == working_quantity)
+                            response_order_id <= {kOrderIdWidth{1'b0}};
                         state             <= kStateDone;
                     end else begin
                         head_slot           = level_head_pointer[0];

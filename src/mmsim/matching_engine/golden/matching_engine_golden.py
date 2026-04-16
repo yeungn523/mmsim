@@ -12,7 +12,7 @@ import random
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ..utilities import console, LogLevel
+from ...utilities import console, LogLevel
 from .price_level_store_golden import PriceLevelStore
 
 
