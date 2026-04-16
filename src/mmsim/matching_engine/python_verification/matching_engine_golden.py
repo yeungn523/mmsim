@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import csv
 import random
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -419,31 +420,201 @@ def write_book_state_csv(records: list[StepRecord], file_path: Path) -> None:
             })
 
 
+def verify_against_verilog(
+    expected_trades_path: Path,
+    actual_trades_path: Path,
+    expected_book_state_path: Path,
+    actual_book_state_path: Path,
+) -> dict[str, int | bool]:
+    """Compares golden model expectations against Verilog simulation CSV output.
+
+    Diffs the trades CSV and the book-state CSV row-by-row, emitting a warning per mismatched
+    field and writing detailed diff CSVs for offline inspection.
+
+    Args:
+        expected_trades_path: Path to the golden model expected trades CSV.
+        actual_trades_path: Path to the Verilog simulation actual trades CSV.
+        expected_book_state_path: Path to the golden model expected book-state CSV.
+        actual_book_state_path: Path to the Verilog simulation actual book-state CSV.
+
+    Returns:
+        A summary dictionary with trade_matches, trade_mismatches, book_matches,
+        book_mismatches, and all_passed.
+    """
+    trade_fields = ["aggressor_id", "resting_id", "trade_price", "trade_quantity"]
+    book_fields = [
+        "best_bid_price", "best_bid_quantity", "best_bid_valid",
+        "best_ask_price", "best_ask_quantity", "best_ask_valid",
+        "total_trades", "total_volume",
+    ]
+
+    trade_matches, trade_mismatches = _compare_csv(
+        expected_path=expected_trades_path,
+        actual_path=actual_trades_path,
+        comparison_fields=trade_fields,
+        diff_path=actual_trades_path.parent / "matching_engine_trades_diff.csv",
+        label="trade",
+    )
+    book_matches, book_mismatches = _compare_csv(
+        expected_path=expected_book_state_path,
+        actual_path=actual_book_state_path,
+        comparison_fields=book_fields,
+        diff_path=actual_book_state_path.parent / "matching_engine_book_state_diff.csv",
+        label="book",
+    )
+
+    return {
+        "trade_matches": trade_matches,
+        "trade_mismatches": trade_mismatches,
+        "book_matches": book_matches,
+        "book_mismatches": book_mismatches,
+        "all_passed": trade_mismatches == 0 and book_mismatches == 0,
+    }
+
+
+def _compare_csv(
+    expected_path: Path,
+    actual_path: Path,
+    comparison_fields: list[str],
+    diff_path: Path,
+    label: str,
+) -> tuple[int, int]:
+    """Compares two CSVs row-by-row on the specified fields and writes a diff CSV.
+
+    Args:
+        expected_path: Path to the expected CSV.
+        actual_path: Path to the actual CSV.
+        comparison_fields: The field names to compare on each row.
+        diff_path: Path to the diff CSV that will be written.
+        label: A short label for console output (such as "trade" or "book").
+
+    Returns:
+        A tuple of (match_count, mismatch_count).
+    """
+    with open(expected_path, "r") as expected_file:
+        expected_rows = list(csv.DictReader(expected_file))
+    with open(actual_path, "r") as actual_file:
+        actual_rows = list(csv.DictReader(actual_file))
+
+    total = min(len(expected_rows), len(actual_rows))
+    matches = 0
+    mismatches = 0
+
+    with open(diff_path, "w", newline="") as diff_file:
+        diff_writer = csv.writer(diff_file)
+        diff_writer.writerow(["row", "field", "expected", "actual"])
+
+        for index in range(total):
+            expected = expected_rows[index]
+            actual = actual_rows[index]
+            mismatched_fields = [
+                field_name for field_name in comparison_fields
+                if str(expected[field_name]) != str(actual[field_name])
+            ]
+
+            if not mismatched_fields:
+                matches += 1
+                continue
+
+            mismatches += 1
+            console.warning(message=f"{label.capitalize()} row {index} mismatch:")
+            for field_name in mismatched_fields:
+                console.warning(
+                    message=(
+                        f"  {field_name}: expected={expected[field_name]}, "
+                        f"actual={actual[field_name]}"
+                    ),
+                )
+                diff_writer.writerow([
+                    index, field_name, expected[field_name], actual[field_name],
+                ])
+
+    if len(expected_rows) != len(actual_rows):
+        console.warning(
+            message=(
+                f"{label.capitalize()} row count mismatch: "
+                f"expected={len(expected_rows)}, actual={len(actual_rows)}"
+            ),
+        )
+
+    if mismatches > 0:
+        console.log(message=f"  Detailed {label} diff written to {diff_path}")
+
+    return matches, mismatches
+
+
 if __name__ == "__main__":
-    output_directory = Path(__file__).parent
+    # CSVs are written to the sim/ directory so ModelSim and Python share the same location.
+    output_directory = Path(__file__).resolve().parent.parent / "sim"
+    output_directory.mkdir(exist_ok=True)
 
-    console.log("Generating test order sequence...")
+    orders_path = output_directory / "matching_engine_orders.csv"
+    expected_trades_path = output_directory / "matching_engine_trades_expected.csv"
+    expected_book_state_path = output_directory / "matching_engine_book_state_expected.csv"
+    actual_trades_path = output_directory / "matching_engine_trades_actual.csv"
+    actual_book_state_path = output_directory / "matching_engine_book_state_actual.csv"
+
+    if len(sys.argv) > 1 and sys.argv[1] == "--verify":
+        console.log(message="Comparing expected vs actual matching engine CSVs...")
+
+        for required_path in (
+            expected_trades_path, actual_trades_path,
+            expected_book_state_path, actual_book_state_path,
+        ):
+            if not required_path.exists():
+                message = (
+                    f"Unable to verify matching engine output. The file {required_path.name} "
+                    f"was not found in {output_directory}."
+                )
+                console.error(message=message, error=FileNotFoundError)
+
+        summary = verify_against_verilog(
+            expected_trades_path=expected_trades_path,
+            actual_trades_path=actual_trades_path,
+            expected_book_state_path=expected_book_state_path,
+            actual_book_state_path=actual_book_state_path,
+        )
+        console.log(
+            message=(
+                f"  Trades: {summary['trade_matches']} matches, "
+                f"{summary['trade_mismatches']} mismatches"
+            ),
+        )
+        console.log(
+            message=(
+                f"  Book state: {summary['book_matches']} matches, "
+                f"{summary['book_mismatches']} mismatches"
+            ),
+        )
+
+        if summary["all_passed"]:
+            console.success(message="All rows match. The hardware matches the golden model.")
+            sys.exit(0)
+        else:
+            console.error(
+                message="Mismatches detected between hardware and golden model.", exit_code=0,
+            )
+            sys.exit(1)
+
+    # Default mode: generate CSVs
+    console.log(message="Generating test order sequence...")
     orders = generate_test_sequence(seed=42)
-    console.log(f"  Generated {len(orders)} orders")
+    console.log(message=f"  Generated {len(orders)} orders")
 
-    console.log("Running matching engine golden model...")
+    console.log(message="Running matching engine golden model...")
     engine = MatchingEngine(depth=8, max_orders=16)
     records = engine.run_sequence(orders=orders)
 
     total_trade_count = sum(len(record.trades) for record in records)
-    console.log(f"  Processed {len(records)} orders, {total_trade_count} trades")
-
-    orders_path = output_directory / "matching_engine_orders.csv"
-    trades_path = output_directory / "matching_engine_trades.csv"
-    book_state_path = output_directory / "matching_engine_book_state.csv"
+    console.log(message=f"  Processed {len(records)} orders, {total_trade_count} trades")
 
     write_orders_csv(orders=orders, file_path=orders_path)
-    write_trades_csv(records=records, file_path=trades_path)
-    write_book_state_csv(records=records, file_path=book_state_path)
+    write_trades_csv(records=records, file_path=expected_trades_path)
+    write_book_state_csv(records=records, file_path=expected_book_state_path)
 
-    console.success(f"Wrote {orders_path}")
-    console.success(f"Wrote {trades_path}")
-    console.success(f"Wrote {book_state_path}")
+    console.success(message=f"Wrote {orders_path}")
+    console.success(message=f"Wrote {expected_trades_path}")
+    console.success(message=f"Wrote {expected_book_state_path}")
 
     # Prints a trace summary
     console.log("Trade trace:", level=LogLevel.DEBUG)
