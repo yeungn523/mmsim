@@ -285,19 +285,17 @@ module price_level_store #(
                                 level_count                   <= level_count - 1'b1;
                             end
 
-                            response_valid <= 1'b1;
-                            state          <= kStateConsumePop;
+                            state <= kStateConsumePop;
                         end else begin
-                            // Partially fills the head order, completes the consume, and accumulates
-                            // the final partial fill into consumed_so_far.
+                            // Partially fills the head order and loops back so the terminating
+                            // branch at the top of the state emits a single final response with
+                            // the correct aggregate consumed_so_far.
                             order_quantity[head_slot]        <= head_order_quantity - remaining_quantity;
                             level_quantity[best_price_index] <= level_quantity[best_price_index] - remaining_quantity;
                             consumed_so_far                  <= consumed_so_far + remaining_quantity;
                             remaining_quantity               <= {kQuantityWidth{1'b0}};
 
-                            response_valid <= 1'b1;
-                            response_found <= 1'b1;
-                            state          <= kStateDone;
+                            state <= kStateConsumePop;
                         end
                     end
                 end
