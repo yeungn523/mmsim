@@ -29,6 +29,7 @@ module tb_price_level_store_csv;
     localparam kPriceWidth     = 32;
     localparam kQuantityWidth  = 16;
     localparam kOrderIdWidth   = 16;
+    localparam kOrderIdWidth   = 16;
 
     reg                        clock;
     reg                        reset_n;
@@ -55,7 +56,8 @@ module tb_price_level_store_csv;
         .kPriceWidth    (kPriceWidth),
         .kQuantityWidth (kQuantityWidth),
         .kOrderIdWidth  (kOrderIdWidth),
-        .kIsBid         (1)
+        .kIsBid         (1),
+        .kPriceRange    (16)
     ) dut (
         .clk               (clock),
         .rst_n             (reset_n),
@@ -179,15 +181,41 @@ module tb_price_level_store_csv;
                 tick;
                 command_valid <= 1'b0;
 
-                // Waits for the command to complete
+                // Waits for response_valid to pulse and latches the response fields
+                timeout = 0;
+                while (!response_valid && timeout < 500) begin
+                    tick;
+                    timeout = timeout + 1;
+                end
+                if (timeout >= 500) begin
+                    $display("[ERROR] response_valid timeout at row %0d", row_count);
+                    $finish;
+                end
+
+                // Writes the DUT's actual response to the output CSV
+                $fwrite(output_file, "%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d\n",
+                    read_command,
+                    read_price,
+                    read_quantity,
+                    read_order_id,
+                    response_order_id,
+                    response_quantity,
+                    response_found,
+                    best_price,
+                    best_quantity,
+                    best_valid
+                );
+
+                row_count = row_count + 1;
+
+                // Waits for command_ready before accepting the next command
                 timeout = 0;
                 while (!command_ready && timeout < 500) begin
                     tick;
                     timeout = timeout + 1;
                 end
-
                 if (timeout >= 500) begin
-                    $display("[ERROR] Completion timeout at row %0d", row_count);
+                    $display("[ERROR] command_ready timeout at row %0d", row_count);
                     $finish;
                 end
                 tick;

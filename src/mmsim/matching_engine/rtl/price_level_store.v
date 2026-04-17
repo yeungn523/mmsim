@@ -91,7 +91,7 @@ module price_level_store #(
     // single-pass scan with last-write-wins semantics; synthesis collapses it into a tree of
     // comparators.
     reg [kPriceIndexWidth-1:0] best_price_index;  ///< Stores the combinational best-price index.
-    integer                    encoder_index;    ///< Iterates over the occupancy bitmap during encoding.
+    integer                    encoder_index;     ///< Iterates over the occupancy bitmap during encoding.
 
     always @(*) begin : best_price_encoder
         best_price_index = {kPriceIndexWidth{1'b0}};
@@ -129,6 +129,7 @@ module price_level_store #(
     reg [kQuantityWidth-1:0]   working_quantity;   ///< Latches the active order's quantity.
     reg [kOrderIdWidth-1:0]    working_order_id;   ///< Latches the active order's identifier.
     reg [kQuantityWidth-1:0]   remaining_quantity; ///< Tracks unconsumed quantity during consume.
+    reg [kQuantityWidth-1:0]   consumed_so_far;    ///< Accumulates total quantity consumed across all orders touched.
     reg [kPriceIndexWidth-1:0] cancel_level_index; ///< Holds the price index being scanned for cancel.
     reg [kPointerWidth-1:0]    scan_pointer;       ///< Points to the current FIFO node during cancel.
     reg [kPointerWidth-1:0]    previous_pointer;   ///< Points to the preceding FIFO node during cancel.
@@ -154,6 +155,7 @@ module price_level_store #(
             response_quantity <= {kQuantityWidth{1'b0}};
             level_count       <= {kLevelCountWidth{1'b0}};
             free_pointer      <= kMaxOrders[kPointerWidth:0];
+            consumed_so_far   <= {kQuantityWidth{1'b0}};
 
             for (i = 0; i < kPriceRange; i = i + 1) begin
                 level_valid[i]        <= 1'b0;
@@ -186,6 +188,7 @@ module price_level_store #(
                             kCommandInsert: state <= kStateInsert;
                             kCommandConsume: begin
                                 remaining_quantity <= command_quantity;
+                                consumed_so_far    <= {kQuantityWidth{1'b0}};
                                 state              <= kStateConsumePop;
                             end
                             kCommandCancel: begin
@@ -244,16 +247,17 @@ module price_level_store #(
                 // Removes quantity from the best price level by popping orders from the FIFO head.
                 // When a level's aggregate quantity reaches zero, the level is deactivated in-place;
                 // the priority encoder surfaces the next best level on the following cycle with no
-                // shift required.
+                // shift required. consumed_so_far accumulates the total filled quantity across all
+                // orders touched so the final response reports the true aggregate consumed amount.
                 kStateConsumePop: begin
                     if (level_count == 0 || remaining_quantity == 0) begin
                         // Reports the total consumed quantity when no more can be removed. Preserves
                         // response_order_id from the final fill iteration; zeroes it only when the
                         // book was empty at the start of the consume.
                         response_valid    <= 1'b1;
-                        response_quantity <= working_quantity - remaining_quantity;
-                        response_found    <= (remaining_quantity != working_quantity);
-                        if (remaining_quantity == working_quantity)
+                        response_quantity <= consumed_so_far;
+                        response_found    <= (consumed_so_far != {kQuantityWidth{1'b0}});
+                        if (consumed_so_far == {kQuantityWidth{1'b0}})
                             response_order_id <= {kOrderIdWidth{1'b0}};
                         state             <= kStateDone;
                     end else begin
@@ -263,32 +267,33 @@ module price_level_store #(
                         response_order_id <= order_id[head_slot];
 
                         if (remaining_quantity >= head_order_quantity) begin
-                            // Fully consumes the head order and frees its slot.
+                            // Fully consumes the head order, frees its slot, and accumulates the fill.
                             new_level_quantity = level_quantity[best_price_index] - head_order_quantity;
 
                             level_quantity[best_price_index] <= new_level_quantity;
-                            remaining_quantity              <= remaining_quantity - head_order_quantity;
-                            response_quantity               <= head_order_quantity;
+                            remaining_quantity               <= remaining_quantity - head_order_quantity;
+                            consumed_so_far                  <= consumed_so_far + head_order_quantity;
 
                             level_head_pointer[best_price_index] <= order_next[head_slot];
-                            order_valid[head_slot]              <= 1'b0;
-                            free_stack[free_pointer]            <= head_slot;
-                            free_pointer                        <= free_pointer + 1'b1;
+                            order_valid[head_slot]               <= 1'b0;
+                            free_stack[free_pointer]             <= head_slot;
+                            free_pointer                         <= free_pointer + 1'b1;
 
                             if (new_level_quantity == 0) begin
                                 // Deactivates the level in place; no array shifting is required.
                                 level_valid[best_price_index] <= 1'b0;
-                                level_count                  <= level_count - 1'b1;
+                                level_count                   <= level_count - 1'b1;
                             end
 
                             response_valid <= 1'b1;
                             state          <= kStateConsumePop;
                         end else begin
-                            // Partially fills the head order and completes the consume operation.
-                            order_quantity[head_slot]       <= head_order_quantity - remaining_quantity;
+                            // Partially fills the head order, completes the consume, and accumulates
+                            // the final partial fill into consumed_so_far.
+                            order_quantity[head_slot]        <= head_order_quantity - remaining_quantity;
                             level_quantity[best_price_index] <= level_quantity[best_price_index] - remaining_quantity;
-                            response_quantity               <= remaining_quantity;
-                            remaining_quantity              <= {kQuantityWidth{1'b0}};
+                            consumed_so_far                  <= consumed_so_far + remaining_quantity;
+                            remaining_quantity               <= {kQuantityWidth{1'b0}};
 
                             response_valid <= 1'b1;
                             response_found <= 1'b1;

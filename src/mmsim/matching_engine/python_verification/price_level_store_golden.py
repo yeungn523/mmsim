@@ -341,6 +341,9 @@ def generate_deterministic_sweep(depth: int = 8, max_orders: int = 16,
     and equal prices; FIFO ordering within a level; partial and full consumption across levels;
     cancellation of head, middle, tail, and nonexistent orders; and full-book rejection.
 
+    Prices are scaled to fit within kPriceRange=16 (valid range 1..15). Quantities are scaled
+    down proportionally to match the smaller price increments.
+
     Args:
         depth: The maximum number of price levels for the store under test.
         max_orders: The maximum number of orders for the store under test.
@@ -354,10 +357,10 @@ def generate_deterministic_sweep(depth: int = 8, max_orders: int = 16,
     next_order_id = 1
     issued_order_ids: list[int] = []
 
-    # Phase 1: Fills the book with orders at distinct price levels
+    # Phase 1: Fills the book with orders at distinct price levels (prices 1..depth, step 1)
     for level_index in range(depth):
-        price = (level_index + 1) * 100
-        quantity = rng.randint(1, 50)
+        price = level_index + 1
+        quantity = rng.randint(1, 8)
         commands.append({
             "command": _COMMAND_INSERT,
             "price": price,
@@ -369,8 +372,8 @@ def generate_deterministic_sweep(depth: int = 8, max_orders: int = 16,
 
     # Phase 2: Inserts duplicate orders at existing price levels (tests FIFO aggregation)
     for _ in range(4):
-        price = rng.choice([(i + 1) * 100 for i in range(depth)])
-        quantity = rng.randint(1, 30)
+        price = rng.choice([i + 1 for i in range(depth)])
+        quantity = rng.randint(1, 5)
         commands.append({
             "command": _COMMAND_INSERT,
             "price": price,
@@ -380,10 +383,10 @@ def generate_deterministic_sweep(depth: int = 8, max_orders: int = 16,
         issued_order_ids.append(next_order_id)
         next_order_id += 1
 
-    # Phase 3: Attempts to insert at a new price when all levels are full
+    # Phase 3: Attempts to insert at a price outside kPriceRange=16 (tests out-of-range rejection)
     commands.append({
         "command": _COMMAND_INSERT,
-        "price": 9999,
+        "price": 20,
         "quantity": 5,
         "order_id": next_order_id,
     })
@@ -401,7 +404,7 @@ def generate_deterministic_sweep(depth: int = 8, max_orders: int = 16,
     commands.append({
         "command": _COMMAND_CONSUME,
         "price": 0,
-        "quantity": 200,
+        "quantity": 30,
         "order_id": 0,
     })
 
@@ -428,8 +431,8 @@ def generate_deterministic_sweep(depth: int = 8, max_orders: int = 16,
         action = rng.choice(["insert", "consume", "cancel"])
 
         if action == "insert":
-            price = rng.randint(1, 20) * 50
-            quantity = rng.randint(1, 40)
+            price = rng.randint(1, 15)
+            quantity = rng.randint(1, 8)
             commands.append({
                 "command": _COMMAND_INSERT,
                 "price": price,
@@ -439,7 +442,7 @@ def generate_deterministic_sweep(depth: int = 8, max_orders: int = 16,
             issued_order_ids.append(next_order_id)
             next_order_id += 1
         elif action == "consume":
-            quantity = rng.randint(1, 60)
+            quantity = rng.randint(1, 10)
             commands.append({
                 "command": _COMMAND_CONSUME,
                 "price": 0,
@@ -460,7 +463,7 @@ def generate_deterministic_sweep(depth: int = 8, max_orders: int = 16,
         commands.append({
             "command": _COMMAND_CONSUME,
             "price": 0,
-            "quantity": 1000,
+            "quantity": 50,
             "order_id": 0,
         })
 
@@ -793,3 +796,4 @@ if __name__ == "__main__":
     with open(summary_path, "w") as summary_file:
         json.dump(summary, summary_file, indent=2)
     console.success(f"Saved {summary_path}")
+    
