@@ -29,7 +29,6 @@ module tb_price_level_store_csv;
     localparam kPriceWidth     = 32;
     localparam kQuantityWidth  = 16;
     localparam kOrderIdWidth   = 16;
-    localparam kOrderIdWidth   = 16;
 
     reg                        clock;
     reg                        reset_n;
@@ -57,7 +56,7 @@ module tb_price_level_store_csv;
         .kQuantityWidth (kQuantityWidth),
         .kOrderIdWidth  (kOrderIdWidth),
         .kIsBid         (1),
-        .kPriceRange    (16)
+        .kPriceRange    (256)
     ) dut (
         .clk               (clock),
         .rst_n             (reset_n),
@@ -107,6 +106,12 @@ module tb_price_level_store_csv;
     integer row_count;
     integer timeout;
 
+    // Latency tracking
+    integer latency;
+    integer total_latency;
+    integer max_latency;
+    integer max_latency_row;
+
     // Temporary string for skipping the header line
     reg [8*256-1:0] header_line;
 
@@ -147,7 +152,10 @@ module tb_price_level_store_csv;
         reset_n <= 1'b1;
         tick_n(2);
 
-        row_count = 0;
+        row_count       = 0;
+        total_latency   = 0;
+        max_latency     = 0;
+        max_latency_row = 0;
 
         // Reads and replays each command from the CSV
         while (!$feof(input_file)) begin
@@ -182,14 +190,26 @@ module tb_price_level_store_csv;
                 command_valid <= 1'b0;
 
                 // Waits for response_valid to pulse and latches the response fields
+                latency = 1;  // Already spent one tick driving command_valid
                 timeout = 0;
                 while (!response_valid && timeout < 500) begin
                     tick;
                     timeout = timeout + 1;
+                    latency = latency + 1;
                 end
                 if (timeout >= 500) begin
                     $display("[ERROR] response_valid timeout at row %0d", row_count);
                     $finish;
+                end
+
+                $display("[ROW %0d] cmd=%0d  price=%0d  qty=%0d  id=%0d  latency=%0d cycles",
+                    row_count, read_command, read_price, read_quantity, read_order_id, latency);
+
+                // Accumulates latency statistics
+                total_latency = total_latency + latency;
+                if (latency > max_latency) begin
+                    max_latency     = latency;
+                    max_latency_row = row_count;
                 end
 
                 // Writes the DUT's actual response to the output CSV
@@ -219,22 +239,6 @@ module tb_price_level_store_csv;
                     $finish;
                 end
                 tick;
-
-                // Writes the DUT's actual response to the output CSV
-                $fwrite(output_file, "%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d\n",
-                    read_command,
-                    read_price,
-                    read_quantity,
-                    read_order_id,
-                    response_order_id,
-                    response_quantity,
-                    response_found,
-                    best_price,
-                    best_quantity,
-                    best_valid
-                );
-
-                row_count = row_count + 1;
             end
         end
 
@@ -245,6 +249,14 @@ module tb_price_level_store_csv;
         $display("CSV replay complete: %0d commands processed", row_count);
         $display("  Input:  lob_commands.csv");
         $display("  Output: lob_actual.csv");
+        $display("");
+        $display("Latency summary:");
+        $display("  Total cycles: %0d", total_latency);
+        if (row_count > 0) begin
+            $display("  Avg latency:  %0d cycles", total_latency / row_count);
+        end
+        $display("  Max latency:  %0d cycles (row %0d)", max_latency, max_latency_row);
+        $display("");
         $display("  Run the golden model to diff: verify_against_verilog(expected, actual)");
         $display("");
         $finish;

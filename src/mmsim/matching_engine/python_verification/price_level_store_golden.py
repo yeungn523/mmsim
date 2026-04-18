@@ -24,6 +24,9 @@ _DEFAULT_DEPTH: int = 16
 # Maximum number of individual orders stored per book side.
 _DEFAULT_MAX_ORDERS: int = 64
 
+# Number of addressable price ticks (must match kPriceRange in the Verilog DUT).
+_DEFAULT_PRICE_RANGE: int = 256
+
 # Command codes matching the Verilog localparam encoding.
 _COMMAND_NOP: int = 0
 _COMMAND_INSERT: int = 1
@@ -104,20 +107,23 @@ class PriceLevelStore:
         depth: The maximum number of distinct price levels.
         max_orders: The maximum number of individual orders stored.
         is_bid: Determines whether this store holds bids (descending) or asks (ascending).
+        price_range: The number of addressable price ticks; prices >= price_range are rejected.
 
     Attributes:
         _depth: Cached maximum price level count.
         _max_orders: Cached maximum order count.
         _is_bid: Cached side indicator.
+        _price_range: Cached addressable price range; inserts at or above this are rejected.
         _levels: The sorted array of active price levels.
         _order_count: Tracks the number of orders currently stored.
     """
 
     def __init__(self, depth: int = _DEFAULT_DEPTH, max_orders: int = _DEFAULT_MAX_ORDERS,
-                 is_bid: bool = True) -> None:
+                 is_bid: bool = True, price_range: int = _DEFAULT_PRICE_RANGE) -> None:
         self._depth: int = depth
         self._max_orders: int = max_orders
         self._is_bid: bool = is_bid
+        self._price_range: int = price_range
         self._levels: list[PriceLevel] = []
         self._order_count: int = 0
 
@@ -198,8 +204,8 @@ class PriceLevelStore:
         """Inserts a new order into the book at the specified price.
 
         Locates or creates the appropriate price level, then appends the order to that level's
-        FIFO tail. Rejects the insertion when the order store is full or all price level slots
-        are occupied.
+        FIFO tail. Rejects the insertion when the price is outside the addressable range, the
+        order store is full, or all price level slots are occupied.
 
         Args:
             price: The limit price in integer ticks.
@@ -209,7 +215,7 @@ class PriceLevelStore:
         Returns:
             The expected response including the inserted quantity and updated book state.
         """
-        if self._order_count >= self._max_orders:
+        if price >= self._price_range or self._order_count >= self._max_orders:
             return CommandResponse(
                 order_id=0, quantity=0, found=False,
                 best_price=self.best_price, best_quantity=self.best_quantity,
@@ -341,8 +347,8 @@ def generate_deterministic_sweep(depth: int = 8, max_orders: int = 16,
     and equal prices; FIFO ordering within a level; partial and full consumption across levels;
     cancellation of head, middle, tail, and nonexistent orders; and full-book rejection.
 
-    Prices are scaled to fit within kPriceRange=16 (valid range 1..15). Quantities are scaled
-    down proportionally to match the smaller price increments.
+    Prices are scaled as multiples of 10 within kPriceRange=256 (valid range 10..250).
+    Quantities are scaled down proportionally to match the smaller price increments.
 
     Args:
         depth: The maximum number of price levels for the store under test.
@@ -357,9 +363,9 @@ def generate_deterministic_sweep(depth: int = 8, max_orders: int = 16,
     next_order_id = 1
     issued_order_ids: list[int] = []
 
-    # Phase 1: Fills the book with orders at distinct price levels (prices 1..depth, step 1)
+    # Phase 1: Fills the book with orders at distinct price levels (prices 100..800, step 100)
     for level_index in range(depth):
-        price = level_index + 1
+        price = (level_index + 1) * 100
         quantity = rng.randint(1, 8)
         commands.append({
             "command": _COMMAND_INSERT,
@@ -372,7 +378,7 @@ def generate_deterministic_sweep(depth: int = 8, max_orders: int = 16,
 
     # Phase 2: Inserts duplicate orders at existing price levels (tests FIFO aggregation)
     for _ in range(4):
-        price = rng.choice([i + 1 for i in range(depth)])
+        price = rng.choice([(i + 1) * 100 for i in range(depth)])
         quantity = rng.randint(1, 5)
         commands.append({
             "command": _COMMAND_INSERT,
@@ -383,10 +389,10 @@ def generate_deterministic_sweep(depth: int = 8, max_orders: int = 16,
         issued_order_ids.append(next_order_id)
         next_order_id += 1
 
-    # Phase 3: Attempts to insert at a price outside kPriceRange=16 (tests out-of-range rejection)
+    # Phase 3: Attempts to insert at a price outside kPriceRange=256 (tests out-of-range rejection)
     commands.append({
         "command": _COMMAND_INSERT,
-        "price": 20,
+        "price": 300,
         "quantity": 5,
         "order_id": next_order_id,
     })
@@ -431,7 +437,7 @@ def generate_deterministic_sweep(depth: int = 8, max_orders: int = 16,
         action = rng.choice(["insert", "consume", "cancel"])
 
         if action == "insert":
-            price = rng.randint(1, 15)
+            price = rng.randint(1, 25) * 10
             quantity = rng.randint(1, 8)
             commands.append({
                 "command": _COMMAND_INSERT,
@@ -479,7 +485,8 @@ def generate_deterministic_sweep(depth: int = 8, max_orders: int = 16,
 
 
 def run_golden_model(commands: list[dict[str, int]], depth: int = 8, max_orders: int = 16,
-                     is_bid: bool = True) -> list[dict[str, int | bool]]:
+                     is_bid: bool = True,
+                     price_range: int = _DEFAULT_PRICE_RANGE) -> list[dict[str, int | bool]]:
     """Executes a command sequence against the golden model and records all responses.
 
     Args:
@@ -487,13 +494,15 @@ def run_golden_model(commands: list[dict[str, int]], depth: int = 8, max_orders:
         depth: The maximum number of price levels.
         max_orders: The maximum number of orders.
         is_bid: Determines whether the store holds bids (descending) or asks (ascending).
+        price_range: The number of addressable price ticks; prices >= price_range are rejected.
 
     Returns:
         A list of response dictionaries with keys: command, price, quantity, order_id,
         response_order_id, response_quantity, response_found, best_price, best_quantity,
         best_valid.
     """
-    store = PriceLevelStore(depth=depth, max_orders=max_orders, is_bid=is_bid)
+    store = PriceLevelStore(depth=depth, max_orders=max_orders, is_bid=is_bid,
+                            price_range=price_range)
     results: list[dict[str, int | bool]] = []
 
     for command_entry in commands:
@@ -714,7 +723,8 @@ if __name__ == "__main__":
     console.log(f"  Generated {len(commands)} commands")
 
     console.log("Running golden model...")
-    results = run_golden_model(commands=commands, depth=8, max_orders=16, is_bid=True)
+    results = run_golden_model(commands=commands, depth=8, max_orders=16, is_bid=True,
+                               price_range=_DEFAULT_PRICE_RANGE)
     console.log(f"  Processed {len(results)} responses")
 
     write_commands_csv(commands=commands, file_path=commands_path)
@@ -741,7 +751,7 @@ if __name__ == "__main__":
 
     # Self-verification: replays the same commands against a fresh store and checks invariants
     console.log("Running self-verification...")
-    store = PriceLevelStore(depth=8, max_orders=16, is_bid=True)
+    store = PriceLevelStore(depth=8, max_orders=16, is_bid=True, price_range=_DEFAULT_PRICE_RANGE)
     invariant_violations = 0
 
     for index, command_entry in enumerate(commands):
@@ -790,6 +800,7 @@ if __name__ == "__main__":
         "depth": 8,
         "max_orders": 16,
         "is_bid": True,
+        "price_range": _DEFAULT_PRICE_RANGE,
         "seed": 42,
     }
     summary_path = output_directory / "lob_golden_summary.json"
