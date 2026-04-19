@@ -17,7 +17,8 @@ module matching_engine #(
     parameter kMaxOrders     = 64,  ///< Maximum individual orders per book side.
     parameter kPriceWidth    = 32,  ///< Bit width of the price field (unsigned ticks).
     parameter kQuantityWidth = 16,  ///< Bit width of the quantity field.
-    parameter kOrderIdWidth  = 16   ///< Bit width of the order identifier field.
+    parameter kOrderIdWidth  = 16,  ///< Bit width of the order identifier field.
+    parameter kPriceRange    = 2048 ///< Index range of all possible price increments.
 )(
     input  wire                        clk,
     input  wire                        rst_n,
@@ -125,6 +126,7 @@ module matching_engine #(
         .kPriceWidth    (kPriceWidth),
         .kQuantityWidth (kQuantityWidth),
         .kOrderIdWidth  (kOrderIdWidth),
+        .kPriceRange    (kPriceRange),
         .kIsBid         (1)
     ) bid_book (
         .clk               (clk),
@@ -152,6 +154,7 @@ module matching_engine #(
         .kPriceWidth    (kPriceWidth),
         .kQuantityWidth (kQuantityWidth),
         .kOrderIdWidth  (kOrderIdWidth),
+        .kPriceRange    (kPriceRange),
         .kIsBid         (0)
     ) ask_book (
         .clk               (clk),

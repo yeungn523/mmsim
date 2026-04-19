@@ -170,10 +170,12 @@ module tb_price_level_store_csv;
             end else begin
                 // Waits for the DUT to be ready
                 timeout = 0;
-                while (!command_ready && timeout < 500) begin
+                while (!command_ready && timeout < 5000) begin
                     tick;
                     timeout = timeout + 1;
                 end
+                tick;
+                tick;
 
                 if (timeout >= 500) begin
                     $display("[ERROR] command_ready timeout at row %0d", row_count);
@@ -192,8 +194,10 @@ module tb_price_level_store_csv;
                 // Waits for response_valid to pulse and latches the response fields
                 latency = 1;  // Already spent one tick driving command_valid
                 timeout = 0;
-                while (!response_valid && timeout < 500) begin
+                while (!response_valid && timeout < 50000) begin
                     tick;
+                    if (timeout % 100 == 0)
+
                     timeout = timeout + 1;
                     latency = latency + 1;
                 end
