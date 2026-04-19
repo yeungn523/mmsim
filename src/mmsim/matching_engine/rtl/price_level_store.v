@@ -85,6 +85,17 @@ module price_level_store #(
     reg [kPointerWidth-1:0]  free_stack [0:kMaxOrders-1];  ///< Stores the indices of unoccupied order slots.
     reg [kPointerWidth:0]    free_pointer;                 ///< Points to the top of the free-list stack.
 
+    // Initializes the M10K-backed arrays at power-up so simulation sees defined values and
+    // synthesis emits the zero-filled memory-initialization image that Cyclone V supports.
+    integer init_iterator;
+    initial begin
+        for (init_iterator = 0; init_iterator < kPriceRange; init_iterator = init_iterator + 1) begin
+            level_quantity[init_iterator]     = {kQuantityWidth{1'b0}};
+            level_head_pointer[init_iterator] = {kPointerWidth{1'b0}};
+            level_tail_pointer[init_iterator] = {kPointerWidth{1'b0}};
+        end
+    end
+
     // Resolves best_price_index through a two-stage pipelined priority encoder over level_valid[].
     localparam kGroupSize        = (kPriceRange >= 64) ? 64 : kPriceRange;      ///< Stores the number of price slots per stage-1 group.
     localparam kGroupCount       = (kPriceRange + kGroupSize - 1) / kGroupSize; ///< Stores the number of stage-1 groups covering kPriceRange.
@@ -167,10 +178,13 @@ module price_level_store #(
     endgenerate
 
     // Registers the level_quantity read at best_price_index to let Quartus infer M10K for level_quantity.
-    reg [kQuantityWidth-1:0] best_quantity_reg;  ///< Stores the registered best-price aggregate quantity.
+    reg [kQuantityWidth-1:0] best_quantity_reg = {kQuantityWidth{1'b0}};  ///< Stores the registered best-price aggregate quantity.
 
     always @(posedge clk) begin : best_quantity_read
-        best_quantity_reg <= level_quantity[best_price_index];
+        if (!rst_n)
+            best_quantity_reg <= {kQuantityWidth{1'b0}};
+        else
+            best_quantity_reg <= level_quantity[best_price_index];
     end
 
     assign best_price    = {{(kPriceWidth - kPriceIndexWidth){1'b0}}, best_price_index};
