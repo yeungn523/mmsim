@@ -178,6 +178,8 @@ module price_level_store #(
     localparam kStateCancelScan   = 4'd3;  ///< Advances the scan index to the next occupied level.
     localparam kStateCancelUnlink = 4'd4;  ///< Traverses a level's FIFO to unlink the cancelled order.
     localparam kStateDone         = 4'd5;  ///< Signals command completion and returns to idle.
+    localparam kStateSettle       = 4'd6;  ///< Stalls one cycle for the pipelined encoder before pulsing response_valid.
+    localparam kStateRescan       = 4'd7;  ///< Stalls one cycle during the consume loop before re-reading best_price_index.
 
     reg [3:0] state;  ///< Stores the current FSM state.
 
@@ -292,11 +294,10 @@ module price_level_store #(
 
                         free_pointer <= free_pointer - 1'b1;
 
-                        response_valid    <= 1'b1;
                         response_quantity <= working_quantity;
                         response_order_id <= working_order_id;
                         response_found    <= 1'b1;
-                        state             <= kStateDone;
+                        state             <= kStateSettle;
                     end
                 end
 
@@ -330,12 +331,13 @@ module price_level_store #(
                             free_pointer                         <= free_pointer + 1'b1;
 
                             if (new_level_quantity == 0) begin
-                                // Deactivates the level in place; no array shifting is required.
+                                // Deactivates the level in place and stalls one cycle to let the encoder settle.
                                 level_valid[best_price_index] <= 1'b0;
                                 level_count                   <= level_count - 1'b1;
+                                state <= kStateRescan;
+                            end else begin
+                                state <= kStateConsumePop;
                             end
-
-                            state <= kStateConsumePop;
                         end else begin
                             // Partially fills the head order and loops back so the terminating branch emits the final response.
                             order_quantity[head_slot]        <= head_order_quantity - remaining_quantity;
@@ -420,8 +422,7 @@ module price_level_store #(
                         response_order_id <= working_order_id;
                         response_quantity <= cancelled_quantity;
                         response_found    <= 1'b1;
-                        response_valid    <= 1'b1;
-                        state             <= kStateDone;
+                        state             <= kStateSettle;
                     end else begin
                         // Advances to the next node in the FIFO.
                         previous_pointer <= scan_pointer;
@@ -434,6 +435,17 @@ module price_level_store #(
                 kStateDone: begin
                     command_ready <= 1'b1;
                     state         <= kStateIdle;
+                end
+
+                // Stalls one cycle for the pipelined encoder to settle, then pulses response_valid.
+                kStateSettle: begin
+                    response_valid <= 1'b1;
+                    state          <= kStateDone;
+                end
+
+                // Stalls one cycle for the pipelined encoder to settle, then resumes the consume loop.
+                kStateRescan: begin
+                    state <= kStateConsumePop;
                 end
 
                 default: state <= kStateIdle;
