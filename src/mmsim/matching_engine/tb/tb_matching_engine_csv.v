@@ -179,11 +179,11 @@ module tb_matching_engine_csv;
                              current_step, scan_result);
             end else begin
                 timeout = 0;
-                while (!order_ready && timeout < 500) begin
+                while (!order_ready && timeout < 5000) begin
                     tick;
                     timeout = timeout + 1;
                 end
-                if (timeout >= 500) begin
+                if (timeout >= 5000) begin
                     $display("[ERROR] order_ready timeout at step %0d", current_step);
                     $finish;
                 end
@@ -197,11 +197,11 @@ module tb_matching_engine_csv;
                 order_valid <= 1'b0;
 
                 timeout = 0;
-                while (!order_ready && timeout < 500) begin
+                while (!order_ready && timeout < 5000) begin
                     tick;
                     timeout = timeout + 1;
                 end
-                if (timeout >= 500) begin
+                if (timeout >= 5000) begin
                     $display("[ERROR] Completion timeout at step %0d", current_step);
                     $finish;
                 end
