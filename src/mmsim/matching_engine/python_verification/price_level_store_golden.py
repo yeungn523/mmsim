@@ -25,7 +25,7 @@ _DEFAULT_DEPTH: int = 16
 _DEFAULT_MAX_ORDERS: int = 64
 
 # Number of addressable price ticks (must match kPriceRange in the Verilog DUT).
-_DEFAULT_PRICE_RANGE: int = 256
+_DEFAULT_PRICE_RANGE: int = 2048
 
 # Command codes matching the Verilog localparam encoding.
 _COMMAND_NOP: int = 0
@@ -347,7 +347,7 @@ def generate_deterministic_sweep(depth: int = 8, max_orders: int = 16,
     and equal prices; FIFO ordering within a level; partial and full consumption across levels;
     cancellation of head, middle, tail, and nonexistent orders; and full-book rejection.
 
-    Prices are scaled as multiples of 10 within kPriceRange=256 (valid range 10..250).
+    Prices are scaled as multiples of 10 within kPriceRange=2048 (valid range 10..2040).
     Quantities are scaled down proportionally to match the smaller price increments.
 
     Args:
@@ -389,10 +389,10 @@ def generate_deterministic_sweep(depth: int = 8, max_orders: int = 16,
         issued_order_ids.append(next_order_id)
         next_order_id += 1
 
-    # Phase 3: Attempts to insert at a price outside kPriceRange=256 (tests out-of-range rejection)
+    # Phase 3: Attempts to insert at a price outside kPriceRange=2048 (tests out-of-range rejection)
     commands.append({
         "command": _COMMAND_INSERT,
-        "price": 300,
+        "price": 3000,
         "quantity": 5,
         "order_id": next_order_id,
     })

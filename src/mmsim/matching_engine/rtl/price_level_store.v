@@ -15,13 +15,13 @@
 `timescale 1ns/1ps
 
 module price_level_store #(
-    parameter kDepth         = 16,    ///< Provides the legacy depth parameter, retained for API compatibility.
+    parameter kDepth         = 16,    ///< Provides a depth parameter exposed for interface parity with the parent module.
     parameter kMaxOrders     = 64,    ///< Stores the maximum number of individual orders.
     parameter kPriceWidth    = 32,    ///< Stores the bit width of the price field (unsigned ticks).
     parameter kQuantityWidth = 16,    ///< Stores the bit width of the quantity field.
     parameter kOrderIdWidth  = 16,    ///< Stores the bit width of the order identifier field.
     parameter kIsBid         = 1,     ///< Determines whether this store holds bids (1) or asks (0).
-    parameter kPriceRange    = 4096   ///< Stores the number of addressable price ticks (direct-mapped depth).
+    parameter kPriceRange    = 2048   ///< Stores the number of addressable price ticks (direct-mapped depth).
 )(
     input  wire                        clk,
     input  wire                        rst_n,
@@ -68,8 +68,7 @@ module price_level_store #(
     /// Stores the highest valid price index (kPriceRange - 1).
     localparam kMaxPriceIndex   = kPriceRange - 1;
 
-    // Direct-mapped price level arrays (index = price). The sorted level_price[] array from the
-    // previous design has been removed because the array index itself is the price.
+    // Direct-mapped price level arrays where the array index itself encodes the price.
     reg [kQuantityWidth-1:0]    level_quantity     [0:kPriceRange-1];  ///< Stores the aggregate quantity at each price.
     reg [kPointerWidth-1:0]     level_head_pointer [0:kPriceRange-1];  ///< Stores the FIFO head pointer at each price.
     reg [kPointerWidth-1:0]     level_tail_pointer [0:kPriceRange-1];  ///< Stores the FIFO tail pointer at each price.
@@ -86,27 +85,86 @@ module price_level_store #(
     reg [kPointerWidth-1:0]  free_stack [0:kMaxOrders-1];  ///< Stores the indices of unoccupied order slots.
     reg [kPointerWidth:0]    free_pointer;                 ///< Points to the top of the free-list stack.
 
-    // Combinational best-price priority encoder over level_valid[]. For bids the highest occupied
-    // index wins (most competitive = highest price); for asks the lowest wins. Implemented as a
-    // single-pass scan with last-write-wins semantics; synthesis collapses it into a tree of
-    // comparators.
-    reg [kPriceIndexWidth-1:0] best_price_index;  ///< Stores the combinational best-price index.
-    integer                    encoder_index;     ///< Iterates over the occupancy bitmap during encoding.
+    // Resolves best_price_index through a two-stage pipelined priority encoder over level_valid[].
+    localparam kGroupSize        = (kPriceRange >= 64) ? 64 : kPriceRange;      ///< Stores the number of price slots per stage-1 group.
+    localparam kGroupCount       = (kPriceRange + kGroupSize - 1) / kGroupSize; ///< Stores the number of stage-1 groups covering kPriceRange.
+    localparam kGroupIndexWidth  = (kGroupSize  > 1) ? $clog2(kGroupSize)  : 1; ///< Stores the bit width of a within-group index.
+    localparam kGroupSelectWidth = (kGroupCount > 1) ? $clog2(kGroupCount) : 1; ///< Stores the bit width of the group-select index.
 
-    always @(*) begin : best_price_encoder
-        best_price_index = {kPriceIndexWidth{1'b0}};
-        if (kIsBid) begin
-            for (encoder_index = 0; encoder_index < kPriceRange; encoder_index = encoder_index + 1) begin
-                if (level_valid[encoder_index])
-                    best_price_index = encoder_index[kPriceIndexWidth-1:0];
-            end
-        end else begin
-            for (encoder_index = kPriceRange - 1; encoder_index >= 0; encoder_index = encoder_index - 1) begin
-                if (level_valid[encoder_index])
-                    best_price_index = encoder_index[kPriceIndexWidth-1:0];
+    // Computes the per-group best index and occupancy flag combinationally from level_valid[].
+    reg [kGroupIndexWidth-1:0] group_best_index_comb [0:kGroupCount-1];  ///< Stores the per-group best-index combinational output.
+    reg [kGroupCount-1:0]      group_nonempty_comb;                      ///< Stores the per-group occupancy combinational bitmap.
+    integer                    group_iterator;                           ///< Iterates over groups during stage-1 and stage-1-register passes.
+    integer                    slot_iterator;                            ///< Iterates over slots within a group during stage-1 encoding.
+
+    always @(*) begin : stage1_compute
+        for (group_iterator = 0; group_iterator < kGroupCount; group_iterator = group_iterator + 1) begin
+            group_best_index_comb[group_iterator] = {kGroupIndexWidth{1'b0}};
+            group_nonempty_comb[group_iterator]   = 1'b0;
+            if (kIsBid) begin
+                for (slot_iterator = 0; slot_iterator < kGroupSize; slot_iterator = slot_iterator + 1) begin
+                    if (level_valid[group_iterator * kGroupSize + slot_iterator]) begin
+                        group_best_index_comb[group_iterator] = slot_iterator[kGroupIndexWidth-1:0];
+                        group_nonempty_comb[group_iterator]   = 1'b1;
+                    end
+                end
+            end else begin
+                for (slot_iterator = kGroupSize - 1; slot_iterator >= 0; slot_iterator = slot_iterator - 1) begin
+                    if (level_valid[group_iterator * kGroupSize + slot_iterator]) begin
+                        group_best_index_comb[group_iterator] = slot_iterator[kGroupIndexWidth-1:0];
+                        group_nonempty_comb[group_iterator]   = 1'b1;
+                    end
+                end
             end
         end
     end
+
+    // Latches the stage-1 combinational outputs to shorten the critical path into stage 2.
+    reg [kGroupIndexWidth-1:0] group_best_index_reg [0:kGroupCount-1];  ///< Stores the registered per-group best index.
+    reg [kGroupCount-1:0]      group_nonempty_reg;                      ///< Stores the registered per-group occupancy bitmap.
+
+    always @(posedge clk) begin : stage1_register
+        if (!rst_n) begin
+            for (group_iterator = 0; group_iterator < kGroupCount; group_iterator = group_iterator + 1) begin
+                group_best_index_reg[group_iterator] <= {kGroupIndexWidth{1'b0}};
+            end
+            group_nonempty_reg <= {kGroupCount{1'b0}};
+        end else begin
+            for (group_iterator = 0; group_iterator < kGroupCount; group_iterator = group_iterator + 1) begin
+                group_best_index_reg[group_iterator] <= group_best_index_comb[group_iterator];
+            end
+            group_nonempty_reg <= group_nonempty_comb;
+        end
+    end
+
+    // Selects the winning group from the registered occupancy bitmap.
+    reg [kGroupSelectWidth-1:0] winning_group;            ///< Stores the stage-2 winning-group index.
+    integer                     group_select_iterator;   ///< Iterates over groups during stage-2 selection.
+
+    always @(*) begin : stage2_compute
+        winning_group = {kGroupSelectWidth{1'b0}};
+        if (kIsBid) begin
+            for (group_select_iterator = 0; group_select_iterator < kGroupCount; group_select_iterator = group_select_iterator + 1) begin
+                if (group_nonempty_reg[group_select_iterator])
+                    winning_group = group_select_iterator[kGroupSelectWidth-1:0];
+            end
+        end else begin
+            for (group_select_iterator = kGroupCount - 1; group_select_iterator >= 0; group_select_iterator = group_select_iterator - 1) begin
+                if (group_nonempty_reg[group_select_iterator])
+                    winning_group = group_select_iterator[kGroupSelectWidth-1:0];
+            end
+        end
+    end
+
+    wire [kPriceIndexWidth-1:0] best_price_index;  ///< Provides the pipelined best-price index.
+
+    generate
+        if (kGroupCount > 1) begin : hier_assemble
+            assign best_price_index = {winning_group, group_best_index_reg[winning_group]};
+        end else begin : flat_assemble
+            assign best_price_index = group_best_index_reg[0][kPriceIndexWidth-1:0];
+        end
+    endgenerate
 
     assign best_price    = {{(kPriceWidth - kPriceIndexWidth){1'b0}}, best_price_index};
     assign best_quantity = level_quantity[best_price_index];
@@ -137,7 +195,7 @@ module price_level_store #(
 
     integer i;
 
-    always @(posedge clk or negedge rst_n) begin : main_proc
+    always @(posedge clk) begin : main_proc
         // Declares local variables shared across multiple states at the top of the named block.
         reg [kPointerWidth-1:0]    slot;
         reg [kPointerWidth-1:0]    head_slot;
@@ -200,9 +258,7 @@ module price_level_store #(
                     end
                 end
 
-                // Performs a direct-mapped insert where the price itself serves as the storage
-                // index. Rejects the insert when the price exceeds the addressable range or no
-                // free order slots remain; both rejections use the same zero-quantity response path.
+                // Performs a direct-mapped insert; rejects when the price is out of range or the store is full.
                 kStateInsert: begin
                     if (working_price >= kPriceRange[kPriceWidth-1:0] || free_pointer == 0) begin
                         response_valid    <= 1'b1;
@@ -244,16 +300,10 @@ module price_level_store #(
                     end
                 end
 
-                // Removes quantity from the best price level by popping orders from the FIFO head.
-                // When a level's aggregate quantity reaches zero, the level is deactivated in-place;
-                // the priority encoder surfaces the next best level on the following cycle with no
-                // shift required. consumed_so_far accumulates the total filled quantity across all
-                // orders touched so the final response reports the true aggregate consumed amount.
+                // Pops orders from the best level's FIFO until remaining_quantity reaches zero or the book empties.
                 kStateConsumePop: begin
                     if (level_count == 0 || remaining_quantity == 0) begin
-                        // Reports the total consumed quantity when no more can be removed. Preserves
-                        // response_order_id from the final fill iteration; zeroes it only when the
-                        // book was empty at the start of the consume.
+                        // Emits the aggregate consumed quantity; zeroes response_order_id only when the book was empty.
                         response_valid    <= 1'b1;
                         response_quantity <= consumed_so_far;
                         response_found    <= (consumed_so_far != {kQuantityWidth{1'b0}});
@@ -287,9 +337,7 @@ module price_level_store #(
 
                             state <= kStateConsumePop;
                         end else begin
-                            // Partially fills the head order and loops back so the terminating
-                            // branch at the top of the state emits a single final response with
-                            // the correct aggregate consumed_so_far.
+                            // Partially fills the head order and loops back so the terminating branch emits the final response.
                             order_quantity[head_slot]        <= head_order_quantity - remaining_quantity;
                             level_quantity[best_price_index] <= level_quantity[best_price_index] - remaining_quantity;
                             consumed_so_far                  <= consumed_so_far + remaining_quantity;
@@ -300,9 +348,7 @@ module price_level_store #(
                     end
                 end
 
-                // Advances the cancel scan to the next occupied price index. Sparse occupancy in
-                // the direct-mapped layout means this may step over empty slots until an active
-                // level is reached, or until the scan runs off the end of the addressable range.
+                // Advances the cancel scan to the next occupied price index, skipping empty direct-mapped slots.
                 kStateCancelScan: begin
                     if (level_count == 0) begin
                         response_valid    <= 1'b1;
@@ -330,8 +376,7 @@ module price_level_store #(
                 // Traverses the FIFO at the current level to locate the cancelled order.
                 kStateCancelUnlink: begin
                     if (!order_valid[scan_pointer]) begin
-                        // Continues scanning from the next price index after exhausting the current
-                        // FIFO without a match, or terminates at the end of the addressable range.
+                        // Continues the scan at the next price index, or terminates at the end of the addressable range.
                         if (cancel_level_index == kMaxPriceIndex[kPriceIndexWidth-1:0]) begin
                             response_valid    <= 1'b1;
                             response_order_id <= working_order_id;

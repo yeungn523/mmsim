@@ -113,10 +113,10 @@ module matching_engine #(
     reg                        cancel_ask_done;
     reg                        cancel_bid_found;
 
-    // Set when a command is issued, cleared when command_ready transitions from low back to high (signaling the book 
-    // has finished processing).
-    reg                        bid_in_flight;
-    reg                        ask_in_flight;
+    // Tracks whether a command is awaiting book completion. Asserts when a command is issued and
+    // deasserts when command_ready transitions from low back to high.
+    reg                        bid_in_flight;  ///< Determines whether a bid-book command is in flight.
+    reg                        ask_in_flight;  ///< Determines whether an ask-book command is in flight.
 
     // Bid book (descending price sort, highest at index 0)
     price_level_store #(
@@ -172,7 +172,7 @@ module matching_engine #(
         .full              ()
     );
 
-    always @(posedge clk or negedge rst_n) begin
+    always @(posedge clk) begin
         if (!rst_n) begin
             state             <= kStateIdle;
             order_ready       <= 1'b1;
@@ -202,6 +202,7 @@ module matching_engine #(
 
             bid_in_flight     <= 1'b0;
             ask_in_flight     <= 1'b0;
+            
         end else begin
             // Deasserts single-cycle pulses
             trade_valid       <= 1'b0;
@@ -263,15 +264,15 @@ module matching_engine #(
                 // Checks whether the opposite book has a price that crosses the incoming order
                 kStateMatchCheck: begin
                     if (working_remaining == 0) begin
-                        // Fully filled by previous match iterations
+                        // Terminates when previous match iterations fully filled the order.
                         order_ready <= 1'b1;
                         state       <= kStateIdle;
                     end else if (working_is_buy) begin
-                        // Buy order: checks if the best ask is at or below the buy price
+                        // Checks whether the best ask crosses the buy order's price.
                         if (best_ask_valid && (working_is_market || best_ask_price <= working_price)) begin
                             state <= kStateMatchExec;
                         end else begin
-                            // No match available
+                            // Handles the no-match case.
                             if (working_is_market) begin
                                 // Discards unfilled market order remainder
                                 order_ready <= 1'b1;
@@ -281,7 +282,7 @@ module matching_engine #(
                             end
                         end
                     end else begin
-                        // Sell order: checks if the best bid is at or above the sell price
+                        // Checks whether the best bid crosses the sell order's price.
                         if (best_bid_valid && (working_is_market || best_bid_price >= working_price)) begin
                             state <= kStateMatchExec;
                         end else begin
@@ -375,8 +376,9 @@ module matching_engine #(
                     end
                 end
 
-                // Waits for the insert to complete. The in-flight flag ensures we actually see
-                // command_ready transition low then high rather than the pre-command high state.
+                // Waits for the insert to complete. The in-flight flag ensures command_ready is
+                // observed transitioning low then high rather than remaining in its pre-command
+                // high state.
                 kStateInsertWait: begin
                     if (working_is_buy && !bid_in_flight && bid_command_ready) begin
                         order_ready <= 1'b1;

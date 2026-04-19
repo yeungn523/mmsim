@@ -56,7 +56,7 @@ module tb_price_level_store_csv;
         .kQuantityWidth (kQuantityWidth),
         .kOrderIdWidth  (kOrderIdWidth),
         .kIsBid         (1),
-        .kPriceRange    (256)
+        .kPriceRange    (2048)
     ) dut (
         .clk               (clock),
         .rst_n             (reset_n),
