@@ -216,6 +216,8 @@ module tb_price_level_store_csv;
                     max_latency_row = row_count;
                 end
 
+                tick;
+                
                 // Writes the DUT's actual response to the output CSV
                 $fwrite(output_file, "%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d\n",
                     read_command,

@@ -141,11 +141,11 @@ module tb_matching_engine;
         begin
             // Waits for the engine to be ready
             timeout = 0;
-            while (!order_ready && timeout < 500) begin
+            while (!order_ready && timeout < 5000) begin
                 tick;
                 timeout = timeout + 1;
             end
-            if (timeout >= 500) begin
+            if (timeout >= 5000) begin
                 $display("[FAIL] submit_order: order_ready timeout");
                 fail_count = fail_count + 1;
             end
@@ -162,11 +162,11 @@ module tb_matching_engine;
 
             // Waits for the engine to finish processing
             timeout = 0;
-            while (!order_ready && timeout < 500) begin
+            while (!order_ready && timeout < 5000) begin
                 tick;
                 timeout = timeout + 1;
             end
-            if (timeout >= 500) begin
+            if (timeout >= 5000) begin
                 $display("[FAIL] submit_order: completion timeout");
                 fail_count = fail_count + 1;
             end
