@@ -1,6 +1,5 @@
 // ziggurat_gaussian.v
-// Ziggurat method Gaussian generator
-// Output format: Q4.12 signed fixed-point (16-bit)
+// Ziggurat-method Gaussian generator. Output format is Q4.12 signed fixed-point (16-bit).
 
 `timescale 1ns/1ps
 
@@ -14,10 +13,7 @@ module ziggurat_gaussian (
     output reg         valid_out
 );
 
-    // -----------------------------------------------------------------------
-    // LFSR (Galois, 32-bit)
-    // Using Koopman sparse primitive polynomials to match CLT-12
-    // -----------------------------------------------------------------------
+    // 32-bit Galois LFSR state. Uses Koopman sparse primitive polynomials matching CLT-12.
     reg [31:0] s0, s1, s2, s3;
 
     localparam [31:0] P0 = 32'h80000057;
@@ -25,6 +21,7 @@ module ziggurat_gaussian (
     localparam [31:0] P2 = 32'h8000007A;
     localparam [31:0] P3 = 32'h80000092;
 
+    // Advances one LFSR stream by a single Galois step.
     function [31:0] lfsr_tick;
         input [31:0] st;
         input [31:0] poly;
@@ -33,20 +30,18 @@ module ziggurat_gaussian (
         end
     endfunction
 
-    // -----------------------------------------------------------------------
-    // M10K ROM model
-    // -----------------------------------------------------------------------
+    // M10K ROM model. Synthesis uses an altsyncram instance; simulation uses a behavioral
+    // synchronous ROM backed by the generated tables.
     reg [8:0] rom_addr;
 
 `ifdef SYNTHESIS
-    // --- Synthesis: M10K altsyncram instance ---
+    // Synthesis: M10K altsyncram instance goes here.
     // altsyncram #( ... ) rom_inst ( ... );
 `else
-    // --- Simulation: behavioral synchronous ROM ---
     `include "ziggurat_tables.vh"
 
     reg [15:0] rom_data_out;
-    reg [8:0]  rom_addr_r;  // registered address (models M10K pipeline)
+    reg [8:0]  rom_addr_r;  // registered address to model the M10K pipeline delay
 
     always @(posedge clk) begin
         rom_addr_r <= rom_addr;
@@ -57,9 +52,7 @@ module ziggurat_gaussian (
     end
 `endif
 
-    // -----------------------------------------------------------------------
-    // FSM States & Registers
-    // -----------------------------------------------------------------------
+    // FSM states and registers
     localparam S_IDLE      = 4'd0;
     localparam S_DRAW      = 4'd1;
     localparam S_ROM_X     = 4'd2;
@@ -73,19 +66,18 @@ module ziggurat_gaussian (
 
     reg [3:0]  state;
 
-    reg [7:0]  layer;           
-    reg        sign_bit;        
-    reg [22:0] xi_bits;         
-    reg [15:0] x_layer;         
-    reg [15:0] x_layer_m1;      
-    reg [15:0] y_layer;         
-    reg [15:0] y_layer_m1;      
-    reg [31:0] u1;              
-    reg [15:0] x_candidate;     
+    reg [7:0]  layer;
+    reg        sign_bit;
+    reg [22:0] xi_bits;
+    reg [15:0] x_layer;
+    reg [15:0] x_layer_m1;
+    reg [15:0] y_layer;
+    reg [15:0] y_layer_m1;
+    reg [31:0] u1;
+    reg [15:0] x_candidate;
 
-    // -----------------------------------------------------------------------
-    // LUTs (Log approximation and PDF)
-    // -----------------------------------------------------------------------
+    // Logarithm approximation LUT. Used by the tail-draw path when replacing the behavioral
+    // $ln call for synthesis.
     function [15:0] log_lut;
         input [4:0] idx;
         case (idx)
@@ -106,11 +98,11 @@ module ziggurat_gaussian (
             5'd14: log_lut = 16'h0B0E; // |ln(15/32)| = 0.755
             5'd15: log_lut = 16'h09F9; // |ln(16/32)| = 0.693
             5'd16: log_lut = 16'h08F4; // |ln(17/32)| = 0.631
-            5'd17: log_lut = 16'h0803; // |ln(18/32)| = 0.575 
+            5'd17: log_lut = 16'h0803; // |ln(18/32)| = 0.575
             5'd18: log_lut = 16'h0726; // |ln(19/32)| = 0.522
-            5'd19: log_lut = 16'h0639; // |ln(20/32)| = 0.470 
+            5'd19: log_lut = 16'h0639; // |ln(20/32)| = 0.470
             5'd20: log_lut = 16'h055F; // |ln(21/32)| = 0.421
-            5'd21: log_lut = 16'h0557; // |ln(22/32)| = 0.375 
+            5'd21: log_lut = 16'h0557; // |ln(22/32)| = 0.375
             5'd22: log_lut = 16'h0474; // |ln(23/32)| = 0.330
             5'd23: log_lut = 16'h039C; // |ln(24/32)| = 0.288
             5'd24: log_lut = 16'h02CE; // |ln(25/32)| = 0.247
@@ -125,8 +117,10 @@ module ziggurat_gaussian (
         endcase
     endfunction
 
+    // Evaluates the unnormalized standard-normal PDF at x_q412 in Q4.12. Behavioral-only; for
+    // synthesis this is replaced by a small ROM or polynomial approximation.
     function [15:0] pdf_lut;
-        input [15:0] x_q412;  
+        input [15:0] x_q412;
         real xf, yf;
         begin
             xf = $itor(x_q412) / 4096.0;
@@ -135,9 +129,7 @@ module ziggurat_gaussian (
         end
     endfunction
 
-    // -----------------------------------------------------------------------
-    // Main FSM Logic
-    // -----------------------------------------------------------------------
+    // Main FSM logic
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             s0        <= 32'hDEADBEEF;
@@ -182,11 +174,11 @@ module ziggurat_gaussian (
 
                 S_FAST_CMP: begin
                     x_layer <= rom_data_out;
-                    
+
                     begin
                         reg [38:0] prod;
-                        prod = {23'd0, rom_data_out} * {16'd0, xi_bits}; 
-                        x_candidate <= prod[38:23];  // Native Q4.12
+                        prod = {23'd0, rom_data_out} * {16'd0, xi_bits};
+                        x_candidate <= prod[38:23];  // native Q4.12
                     end
                     state <= S_WEDGE_RD;
                 end
@@ -200,7 +192,7 @@ module ziggurat_gaussian (
                         if (layer == 8'd255) begin
                             state <= S_TAIL;
                         end else begin
-                            rom_addr <= {1'b1, layer}; 
+                            rom_addr <= {1'b1, layer};
                             state <= S_WEDGE_W1;
                         end
                         s2 <= lfsr_tick(s2, P2);
@@ -227,15 +219,15 @@ module ziggurat_gaussian (
                         reg [15:0] y_candidate;
                         reg [15:0] pdf_val;
 
-                        y_delta     = rom_data_out - y_layer;        
-                        y_prod      = u1[31:20] * y_delta;          
-                        y_candidate = y_layer + y_prod[27:12];      
-                        pdf_val     = pdf_lut(x_candidate);         
+                        y_delta     = rom_data_out - y_layer;
+                        y_prod      = u1[31:20] * y_delta;
+                        y_candidate = y_layer + y_prod[27:12];
+                        pdf_val     = pdf_lut(x_candidate);
 
                         if (y_candidate < pdf_val) begin
                             state <= S_OUTPUT;
                         end else begin
-                            state <= S_DRAW; 
+                            state <= S_DRAW;
                         end
                     end
                 end
@@ -250,15 +242,14 @@ module ziggurat_gaussian (
 
                         curr_tail_u = lfsr_tick(s2, P2);
 
-                        // Behavioral exact ln for simulation only
-                        // In synthesis: replace with log_lut approximation (see quartus file)
+                        // Behavioral-only exact ln. Synthesis replaces this with log_lut.
                         u_float = $itor(curr_tail_u + 1) / 4294967296.0;  // +1 avoids ln(0)
                         neg_ln_u = -$ln(u_float);
 
-                        // x_tail = r + neg_ln_u / r, in Q4.12
-                        // r = 3.6561, 1/r = 0.2735, Q4.12 = 0x0462
+                        // x_tail = r + neg_ln_u / r in Q4.12. r = 3.6561, 1/r = 0.2735
+                        // (Q4.12 = 0x0462); r in Q4.12 = 0x3A5C.
                         inv_r_prod = $rtoi(neg_ln_u * 16'h0462);
-                        x_tail_q412 = 16'h3A5C + inv_r_prod[15:0];  // r in Q4.12 = 0x3A5C
+                        x_tail_q412 = 16'h3A5C + inv_r_prod[15:0];
 
                         x_candidate <= x_tail_q412;
                     end
@@ -269,7 +260,7 @@ module ziggurat_gaussian (
                     begin
                         reg [15:0] x_q412;
                         x_q412 = x_candidate;
-                        
+
                         if (sign_bit)
                             gauss_out <= (~x_q412) + 1'b1;
                         else

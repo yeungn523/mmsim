@@ -1,37 +1,30 @@
 // tb_galois_lfsr.v
-// Self-checking testbench for galois_lfsr.v
-// Tests: reset, seed load, enable gating, period sanity,
-//        bit uniformity, no-zero-lock, autocorrelation
+// Self-checking testbench for galois_lfsr.v. Covers reset, seed load, enable gating, early
+// period sanity, bit uniformity, no-zero-lock, reproducibility, seed divergence, and exact
+// sequence match against a Python golden model.
 //
 // ModelSim:
 //   vlog galois_lfsr.v tb_galois_lfsr.v
 //   vsim -do run_lfsr.tcl
-// Or just: vsim tb_galois_lfsr then "run -all"
 
 `timescale 1ns/1ps
 
 module tb_galois_lfsr;
 
-// -------------------------------------------------------
 // Parameters
-// -------------------------------------------------------
-parameter CLK_PERIOD  = 20;          // 50 MHz
-parameter N_SAMPLES   = 100_000;     // samples for statistical tests
-parameter POLY_PRIM   = 32'hB4BCD35C; // primitive polynomial (maximal period)
-parameter POLY_BAD    = 32'h00000001; // non-primitive, short period
+parameter CLK_PERIOD  = 20;            // 50 MHz
+parameter N_SAMPLES   = 100_000;       // samples used by the statistical tests
+parameter POLY_PRIM   = 32'hB4BCD35C;  // primitive polynomial (maximal period)
+parameter POLY_BAD    = 32'h00000001;  // non-primitive, short period
 parameter SEED_A      = 32'hDEADBEEF;
 parameter SEED_B      = 32'hCAFEBABE;
 
-// -------------------------------------------------------
 // DUT signals
-// -------------------------------------------------------
 reg        clk, rst_n, en, seed_valid;
 reg [31:0] seed_load;
 wire[31:0] out;
 
-// -------------------------------------------------------
 // DUT
-// -------------------------------------------------------
 galois_lfsr #(
     .POLY(POLY_PRIM),
     .SEED(SEED_A)
@@ -44,15 +37,11 @@ galois_lfsr #(
     .out        (out)
 );
 
-// -------------------------------------------------------
 // Clock
-// -------------------------------------------------------
 initial clk = 0;
 always #(CLK_PERIOD/2) clk = ~clk;
 
-// -------------------------------------------------------
-// Tracking / bookkeeping
-// -------------------------------------------------------
+// Tracking and bookkeeping
 integer pass_count, fail_count;
 integer csv_file;
 
@@ -74,15 +63,14 @@ task FAIL;
     end
 endtask
 
-// -------------------------------------------------------
-// Helper: tick one clock
-// -------------------------------------------------------
+// Advances the simulation by a single clock cycle.
 task tick;
     begin
         @(posedge clk); #1;
     end
 endtask
 
+// Advances the simulation by n clock cycles.
 task tick_n;
     input integer n;
     integer i;
@@ -91,9 +79,7 @@ task tick_n;
     end
 endtask
 
-// -------------------------------------------------------
-// Helper: assert reset
-// -------------------------------------------------------
+// Asserts reset, drives inputs to a known state, then releases reset.
 task do_reset;
     begin
         rst_n      = 0;
@@ -106,26 +92,20 @@ task do_reset;
     end
 endtask
 
-// -------------------------------------------------------
-// Statistical helpers (computed in simulation)
-// -------------------------------------------------------
-integer  ones_count;
-integer  sample_idx;
+// Statistical helpers (computed during simulation)
+integer    ones_count;
+integer    sample_idx;
 reg [31:0] samples [0:N_SAMPLES-1];
 reg [31:0] prev_out;
 real       autocorr_sum, mean_val, var_val;
 integer    bit_i;
 
-// -------------------------------------------------------
-// Test storage for period check
-// -------------------------------------------------------
+// Storage for the period check
 reg [31:0] first_val;
 integer    period_count;
 integer    period_found;
 
-// -------------------------------------------------------
-//  MAIN TEST SEQUENCE
-// -------------------------------------------------------
+// Main test sequence
 initial begin
     pass_count = 0;
     fail_count = 0;
@@ -135,55 +115,43 @@ initial begin
     $display("  POLY=0x%08h  SEED=0x%08h", POLY_PRIM, SEED_A);
     $display("====================================================\n");
 
-    // CSV for Python cross-check / visualization
+    // CSV consumed by the Python cross-check and visualization script.
     csv_file = $fopen("lfsr_samples.csv", "w");
     $fdisplay(csv_file, "index,value,bits_set");
 
-    // --------------------------------------------------------
-    // TEST 1: Reset value
-    // --------------------------------------------------------
+    // TEST 1: Reset loads the SEED parameter.
     $display("TEST 1: Reset loads SEED parameter");
     do_reset;
-    // After reset, out should equal SEED (before any clock with en)
-    // The registered output is SEED on the cycle after rst_n goes high
     if (out === SEED_A)
         PASS("Reset to SEED_A");
     else
         FAIL("Reset to SEED_A", out, SEED_A);
 
-    // --------------------------------------------------------
-    // TEST 2: Enable gating — output must not change when en=0
-    // --------------------------------------------------------
+    // TEST 2: Enable gating holds the output when en=0.
     $display("\nTEST 2: Enable gating (en=0 holds output)");
     do_reset;
-    en = 1; tick; en = 0;                // advance one step
+    en = 1; tick; en = 0;                // advance one step before freezing
     prev_out = out;
-    tick_n(10);                          // 10 more clocks with en=0
+    tick_n(10);                          // ten more clocks with en=0
     if (out === prev_out)
         PASS("Enable gate holds output");
     else
         FAIL("Enable gate holds output", out, prev_out);
 
-    // --------------------------------------------------------
-    // TEST 3: Seed load mid-run
-    // --------------------------------------------------------
+    // TEST 3: seed_valid overrides the state mid-run.
     $display("\nTEST 3: Seed load overrides state mid-run");
     do_reset;
-    en = 1; tick_n(20);                  // run for 20 cycles
+    en = 1; tick_n(20);
     seed_load  = SEED_B;
     seed_valid = 1;
     tick;                                // seed loads on this edge
     seed_valid = 0;
-    // Next cycle after seed load, out should be SEED_B
-    // (seed_valid takes priority over en in the RTL)
     if (out === SEED_B)
         PASS("Seed load overrides to SEED_B");
     else
         FAIL("Seed load overrides to SEED_B", out, SEED_B);
 
-    // --------------------------------------------------------
-    // TEST 4: Seed load disables normal advance
-    // --------------------------------------------------------
+    // TEST 4: seed_valid suppresses the normal advance (seed wins over en).
     $display("\nTEST 4: seed_valid prevents LFSR advance (seed wins over en)");
     do_reset;
     en         = 1;
@@ -192,17 +160,13 @@ initial begin
     tick;
     seed_valid = 0;
     prev_out = out;                      // should be SEED_B
-    tick;                                // now normal advance
+    tick;                                // advance normally on the next clock
     if (out !== prev_out)
         PASS("LFSR advanced after seed loaded");
     else
         FAIL("LFSR advanced after seed loaded", out, prev_out + 1);
 
-    // --------------------------------------------------------
-    // TEST 5: No stuck-at-zero
-    // Check that 0x00000000 is never produced for N_SAMPLES
-    // (a primitive polynomial LFSR never visits 0)
-    // --------------------------------------------------------
+    // TEST 5: No stuck-at-zero over N_SAMPLES. A primitive LFSR never visits 0.
     $display("\nTEST 5: No stuck-at-zero over %0d samples", N_SAMPLES);
     do_reset;
     en = 1;
@@ -224,11 +188,8 @@ initial begin
             FAIL("No zero state in N_SAMPLES", 1, 0);
     end
 
-    // --------------------------------------------------------
-    // TEST 6: Collect samples + bit uniformity
-    // A primitive LFSR produces each bit with P(1)~=0.5
-    // Allow 1% tolerance over N_SAMPLES
-    // --------------------------------------------------------
+    // TEST 6: Bit uniformity across N_SAMPLES. A primitive LFSR produces each bit with P(1)~=0.5;
+    // allow 1% tolerance.
     $display("\nTEST 6: Bit uniformity over %0d samples", N_SAMPLES);
     do_reset;
     en = 1;
@@ -236,10 +197,8 @@ initial begin
     for (sample_idx = 0; sample_idx < N_SAMPLES; sample_idx = sample_idx + 1) begin
         tick;
         samples[sample_idx] = out;
-        // Count set bits across all 32 bits
         for (bit_i = 0; bit_i < 32; bit_i = bit_i + 1)
             if (out[bit_i]) ones_count = ones_count + 1;
-        // Write to CSV
         $fdisplay(csv_file, "%0d,%0d,%0d",
             sample_idx, out, $countones(out));
     end
@@ -249,23 +208,19 @@ initial begin
         real total_bits;
         total_bits = N_SAMPLES * 32.0;
         ratio = ones_count / total_bits;
-        $display("  Ones ratio: %.4f  (ideal 0.5000, tolerance ±0.01)", ratio);
+        $display("  Ones ratio: %.4f  (ideal 0.5000, tolerance +/-0.01)", ratio);
         if (ratio > 0.49 && ratio < 0.51)
             PASS("Bit uniformity within 1%");
         else
             FAIL("Bit uniformity", ones_count, N_SAMPLES * 16);
     end
 
-    // --------------------------------------------------------
-    // TEST 7: Early period check
-    // Run 1000 cycles from SEED_A, verify we don't return to SEED_A
-    // (Full period is 2^32-1, obviously can't simulate all of it,
-    //  but should not revisit start within 1000 steps)
-    // --------------------------------------------------------
+    // TEST 7: No early period repeat. The full period is 2^32 - 1, so the first 1000 cycles must
+    // not revisit the starting value.
     $display("\nTEST 7: No early period repeat within 1000 cycles");
     do_reset;
     en = 1;
-    tick;                                 // advance off SEED
+    tick;
     first_val    = out;
     period_found = 0;
     begin : period_check
@@ -284,10 +239,7 @@ initial begin
     else
         FAIL("No period repeat in 1000 cycles", period_found, 0);
 
-    // --------------------------------------------------------
-    // TEST 8: Reproducibility — same seed, same sequence
-    // Reset to SEED_A twice, compare first 16 outputs
-    // --------------------------------------------------------
+    // TEST 8: Reproducibility. The same seed must produce the same 16-sample sequence.
     $display("\nTEST 8: Reproducibility (same seed -> same sequence)");
     begin : repro
         reg [31:0] seq1 [0:15];
@@ -310,9 +262,7 @@ initial begin
             FAIL("Reproducibility", mismatch, 0);
     end
 
-    // --------------------------------------------------------
-    // TEST 9: Different seeds give different sequences
-    // --------------------------------------------------------
+    // TEST 9: Different seeds must produce different sequences.
     $display("\nTEST 9: Different seeds produce different sequences");
     begin : diff_seeds
         reg [31:0] seqA [0:15];
@@ -331,20 +281,17 @@ initial begin
         for (i = 0; i < 16; i = i + 1)
             if (seqA[i] === seqB[i]) match_count = match_count + 1;
 
-        // Extremely unlikely all 16 match by chance
+        // All 16 samples matching by chance is vanishingly unlikely.
         if (match_count < 4)
             PASS("Different seeds give different sequences");
         else
             FAIL("Different seeds give different sequences", match_count, 0);
     end
 
-    // --------------------------------------------------------
-    // TEST 10: Verify exact output sequence vs Python golden model
-    // First 8 values from SEED_A with POLY_PRIM, precomputed
-    // --------------------------------------------------------
+    // TEST 10: Exact sequence match against the Python golden model.
     $display("\nTEST 10: Exact sequence match vs Python golden model");
     begin : exact_seq
-        // Precomputed by golden_model.py galois_lfsr(SEED_A, POLY_PRIM)
+        // Precomputed by lfsr_verify.galois_lfsr_step(SEED_A, POLY_PRIM).
         reg [31:0] expected [0:7];
         integer i, mismatch;
         expected[0] = 32'hDBEA0C2B;
@@ -369,14 +316,12 @@ initial begin
         if (mismatch == 0)
             PASS("Exact 8-step sequence matches Python golden model");
         else begin
-            $display("  *** Update expected[] from golden_model.py output ***");
+            $display("  *** Update expected[] from lfsr_verify.py output ***");
             FAIL("Exact sequence match", mismatch, 0);
         end
     end
 
-    // --------------------------------------------------------
     // Results summary
-    // --------------------------------------------------------
     $fclose(csv_file);
     $display("\n====================================================");
     $display("  RESULTS:  %0d passed,  %0d failed", pass_count, fail_count);
@@ -390,9 +335,7 @@ initial begin
     $finish;
 end
 
-// -------------------------------------------------------
 // Waveform dump
-// -------------------------------------------------------
 initial begin
     $dumpfile("lfsr_tb.vcd");
     $dumpvars(0, tb_galois_lfsr);

@@ -1,5 +1,5 @@
 // tb_gaussian_comparison.v
-// ModelSim testbench: CLT-12 vs Ziggurat (real ROM-based implementation)
+// ModelSim testbench comparing the CLT-12 and Ziggurat (ROM-based) Gaussian generators.
 //
 // Outputs:
 //   clt12_samples.csv      - sample_index, raw_q115, float_value
@@ -9,17 +9,13 @@
 
 module tb_gaussian_comparison;
 
-    // -----------------------------------------------------------------------
     // Parameters
-    // -----------------------------------------------------------------------
     parameter N_SAMPLES  = 1000000;
     parameter CLK_PERIOD = 20;  // 50 MHz
 
-    // -----------------------------------------------------------------------
     // Signals
-    // -----------------------------------------------------------------------
     reg        clk, rst_n;
-    reg        en_clt, en_zig;  // separate enables: drive independently
+    reg        en_clt, en_zig;            // separate enables driven independently
     reg [31:0] seed0, seed1, seed2, seed3;
     reg        seed_valid;
 
@@ -28,9 +24,7 @@ module tb_gaussian_comparison;
     wire [15:0] zig_out;
     wire        zig_valid;
 
-    // -----------------------------------------------------------------------
     // DUTs
-    // -----------------------------------------------------------------------
     clt12_gaussian dut_clt (
         .clk        (clk),
         .rst_n      (rst_n),
@@ -57,38 +51,29 @@ module tb_gaussian_comparison;
         .valid_out  (zig_valid)
     );
 
-    // -----------------------------------------------------------------------
     // Clock
-    // -----------------------------------------------------------------------
     initial clk = 0;
     always #(CLK_PERIOD/2) clk = ~clk;
 
-    // -----------------------------------------------------------------------
-    // File handles & counters
-    // -----------------------------------------------------------------------
+    // File handles and counters
     integer clt_file, zig_file;
     integer clt_count, zig_count;
     integer t_start, t_clt_done, t_zig_done;
 
-    // -----------------------------------------------------------------------
-    // Ziggurat: re-enable after each valid output
-    // The FSM idles after each sample; pulse en_zig to request the next one.
-    // CLT-12 is pipelined and stays enabled continuously.
-    // -----------------------------------------------------------------------
+    // Re-enables the Ziggurat generator after each valid output. The FSM idles between samples,
+    // so en_zig is pulsed high for one cycle whenever the previous sample completes. CLT-12 is
+    // pipelined and stays enabled continuously.
     always @(posedge clk) begin
         if (!rst_n || seed_valid) begin
             en_zig <= 1'b0;
         end else if (zig_valid && zig_count < N_SAMPLES - 1) begin
-            // Pulse en for one cycle to request next sample
             en_zig <= 1'b1;
         end else if (en_zig) begin
-            en_zig <= 1'b0;  // de-assert after one cycle
+            en_zig <= 1'b0;
         end
     end
 
-    // -----------------------------------------------------------------------
     // Stimulus
-    // -----------------------------------------------------------------------
     initial begin
         clt_file = $fopen("clt12_samples.csv", "w");
         zig_file = $fopen("ziggurat_samples.csv", "w");
@@ -101,7 +86,6 @@ module tb_gaussian_comparison;
         $fdisplay(clt_file, "sample_index,raw_q115,float_value");
         $fdisplay(zig_file, "sample_index,raw_q115,float_value");
 
-        // Init
         rst_n      = 0;
         en_clt     = 0;
         en_zig     = 0;
@@ -117,7 +101,7 @@ module tb_gaussian_comparison;
         rst_n = 1;
         repeat(2) @(posedge clk);
 
-        // Load seeds into both DUTs simultaneously
+        // Loads seeds into both DUTs simultaneously.
         seed_valid = 1;
         @(posedge clk);
         seed_valid = 0;
@@ -154,22 +138,18 @@ module tb_gaussian_comparison;
         $finish;
     end
 
-    // -----------------------------------------------------------------------
-    // Sample capture: CLT-12
-    // -----------------------------------------------------------------------
+    // Captures CLT-12 samples into the CSV.
     always @(posedge clk) begin
         if (clt_valid && clt_count < N_SAMPLES && clt_file != 0) begin
             $fdisplay(clt_file, "%0d,%0d,%f",
                 clt_count,
                 $signed(clt_out),
-                $itor($signed(clt_out)) / 4096.0); 
+                $itor($signed(clt_out)) / 4096.0);
             clt_count = clt_count + 1;
         end
     end
 
-    // -----------------------------------------------------------------------
-    // Sample capture: Ziggurat
-    // -----------------------------------------------------------------------
+    // Captures Ziggurat samples into the CSV.
     always @(posedge clk) begin
         if (zig_valid && zig_count < N_SAMPLES && zig_file != 0) begin
             $fdisplay(zig_file, "%0d,%0d,%f",
@@ -180,9 +160,7 @@ module tb_gaussian_comparison;
         end
     end
 
-    // -----------------------------------------------------------------------
-    // Progress display every 1000 CLK cycles
-    // -----------------------------------------------------------------------
+    // Prints a progress summary every 1000 clock cycles.
     initial begin
         forever begin
             #(CLK_PERIOD * 1000);
@@ -191,9 +169,7 @@ module tb_gaussian_comparison;
         end
     end
 
-    // -----------------------------------------------------------------------
-    // Assertion: check for X propagation
-    // -----------------------------------------------------------------------
+    // Warns on X propagation in either generator output.
     always @(posedge clk) begin
         if (clt_valid && ^clt_out === 1'bx)
             $display("WARN: CLT-12 X output at t=%0t", $time);
@@ -201,11 +177,8 @@ module tb_gaussian_comparison;
             $display("WARN: Ziggurat X output at t=%0t", $time);
     end
 
-    // -----------------------------------------------------------------------
-    // Assertion: Ziggurat FSM stuck check
-    // If Ziggurat doesn't produce a valid output within 100 cycles of en,
-    // something is wrong.
-    // -----------------------------------------------------------------------
+    // Detects Ziggurat FSM stalls. If the generator does not produce a valid output within ~200
+    // cycles of being enabled, flags a likely hang.
     integer zig_stall_ctr;
     always @(posedge clk) begin
         if (!rst_n) begin
@@ -224,9 +197,7 @@ module tb_gaussian_comparison;
         end
     end
 
-    // -----------------------------------------------------------------------
     // Waveform dump
-    // -----------------------------------------------------------------------
     initial begin
         $dumpfile("gaussian_comparison.vcd");
         $dumpvars(0, tb_gaussian_comparison);
