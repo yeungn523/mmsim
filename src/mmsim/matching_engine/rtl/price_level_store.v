@@ -271,29 +271,41 @@ module price_level_store #(
         if (order_price_we) order_price[order_price_waddr] <= order_price_wdata;
     end
 
-    // FSM state encoding. Each path folds in wait states for the M10K read ports.
-    localparam kStateIdle                = 5'd0;   ///< Waits for a new command.
-    localparam kStateInsertFetch         = 5'd1;   ///< Issues level reads at insert_index.
-    localparam kStateInsertWait          = 5'd2;   ///< Holds one cycle for level port rdata.
-    localparam kStateInsertExec          = 5'd3;   ///< Performs the insert using the registered level reads.
-    localparam kStateConsumeFetchLevel   = 5'd4;   ///< Issues level reads at best_price_index or emits the terminating response.
-    localparam kStateConsumeWaitLevel    = 5'd5;   ///< Holds one cycle for level port rdata.
-    localparam kStateConsumeFetchOrder   = 5'd6;   ///< Uses level_head_pointer_rdata to issue order reads.
-    localparam kStateConsumeWaitOrder    = 5'd7;   ///< Holds one cycle for order port rdata.
-    localparam kStateConsumeExecute      = 5'd8;   ///< Consumes the head order using all registered reads.
-    localparam kStateCancelScan          = 5'd9;   ///< Advances the scan index to the next occupied price level.
-    localparam kStateCancelWaitHead      = 5'd10;  ///< Holds one cycle for level_head_pointer rdata.
-    localparam kStateCancelDispatchOrder = 5'd11;  ///< Uses level_head_pointer_rdata to issue order reads.
-    localparam kStateCancelWaitOrder     = 5'd12;  ///< Holds one cycle for order port rdata.
-    localparam kStateCancelFetchNode     = 5'd13;  ///< Evaluates the scan node and matches, advances, or skips.
-    localparam kStateCancelWaitMatch     = 5'd14;  ///< Holds one cycle for level port rdata after a match.
-    localparam kStateCancelUnlink        = 5'd15;  ///< Performs the unlink writes using registered level reads.
-    localparam kStateCancelCleanup       = 5'd16;  ///< Zeros the freed slot's order_next to preserve the reclaim invariant.
-    localparam kStateDone                = 5'd17;  ///< Signals command completion and returns to idle.
-    localparam kStateSettle              = 5'd18;  ///< Stalls one cycle for the pipelined encoder before pulsing response_valid.
-    localparam kStateRescan              = 5'd19;  ///< Stalls one cycle during consume for the encoder to settle.
+    // Top-level FSM dispatches each command to its sub-FSM and collects completions.
+    localparam kTopIdle         = 3'd0;  ///< Waits for a new command.
+    localparam kTopInsertBusy   = 3'd1;  ///< Insert sub-FSM is active.
+    localparam kTopConsumeBusy  = 3'd2;  ///< Consume sub-FSM is active.
+    localparam kTopCancelBusy   = 3'd3;  ///< Cancel sub-FSM is active.
+    localparam kTopSettle       = 3'd4;  ///< Waits one cycle for the encoder, then pulses response_valid.
+    localparam kTopDone         = 3'd5;  ///< Reasserts command_ready and returns to idle.
 
-    reg [4:0] state;  ///< Stores the current FSM state.
+    // Insert sub-FSM: fetch level reads, wait, execute.
+    localparam kInsertFetch     = 2'd0;
+    localparam kInsertWait      = 2'd1;
+    localparam kInsertExec      = 2'd2;
+
+    // Consume sub-FSM: fetch level, wait, fetch order, wait, execute, rescan after empty.
+    localparam kConsumeFetchLevel = 3'd0;
+    localparam kConsumeWaitLevel  = 3'd1;
+    localparam kConsumeFetchOrder = 3'd2;
+    localparam kConsumeWaitOrder  = 3'd3;
+    localparam kConsumeExecute    = 3'd4;
+    localparam kConsumeRescan     = 3'd5;
+
+    // Cancel sub-FSM: scan levels, fetch/walk FIFO, unlink on match, clean up freed slot.
+    localparam kCancelScan            = 4'd0;
+    localparam kCancelWaitHead        = 4'd1;
+    localparam kCancelDispatchOrder   = 4'd2;
+    localparam kCancelWaitOrder       = 4'd3;
+    localparam kCancelFetchNode       = 4'd4;
+    localparam kCancelWaitMatch       = 4'd5;
+    localparam kCancelUnlink          = 4'd6;
+    localparam kCancelCleanup         = 4'd7;
+
+    reg [2:0] top_state;      ///< Stores the top-level FSM state.
+    reg [1:0] insert_state;   ///< Stores the insert sub-FSM state.
+    reg [2:0] consume_state;  ///< Stores the consume sub-FSM state.
+    reg [3:0] cancel_state;   ///< Stores the cancel sub-FSM state.
 
     // Working registers (latched from the command interface for multi-cycle processing).
     reg [2:0]                  working_command;    ///< Latches the active command code.
@@ -320,7 +332,10 @@ module price_level_store #(
         reg [kPriceIndexWidth-1:0] insert_index;
 
         if (!rst_n) begin
-            state             <= kStateIdle;
+            top_state         <= kTopIdle;
+            insert_state      <= kInsertFetch;
+            consume_state     <= kConsumeFetchLevel;
+            cancel_state      <= kCancelScan;
             command_ready     <= 1'b1;
             response_valid    <= 1'b0;
             response_found    <= 1'b0;
@@ -367,8 +382,9 @@ module price_level_store #(
             level_head_pointer_we <= 1'b0;
             level_tail_pointer_we <= 1'b0;
 
-            case (state)
-                kStateIdle: begin
+            case (top_state)
+                // Waits for a command and dispatches it to the appropriate sub-FSM.
+                kTopIdle: begin
                     if (command_valid && command_ready) begin
                         working_command  <= command;
                         working_price    <= command_price;
@@ -377,329 +393,338 @@ module price_level_store #(
                         command_ready    <= 1'b0;
 
                         case (command)
-                            kCommandInsert: state <= kStateInsertFetch;
+                            kCommandInsert: begin
+                                insert_state <= kInsertFetch;
+                                top_state    <= kTopInsertBusy;
+                            end
                             kCommandConsume: begin
                                 remaining_quantity <= command_quantity;
                                 consumed_so_far    <= {kQuantityWidth{1'b0}};
-                                state              <= kStateConsumeFetchLevel;
+                                consume_state      <= kConsumeFetchLevel;
+                                top_state          <= kTopConsumeBusy;
                             end
                             kCommandCancel: begin
                                 cancel_level_index <= {kPriceIndexWidth{1'b0}};
-                                state              <= kStateCancelScan;
+                                cancel_state       <= kCancelScan;
+                                top_state          <= kTopCancelBusy;
                             end
                             default: command_ready <= 1'b1;
                         endcase
                     end
                 end
 
-                // Rejects out-of-range or full-store inserts, or issues level reads at insert_index.
-                kStateInsertFetch: begin
-                    if (working_price >= kPriceRange[kPriceWidth-1:0] || free_pointer == 0) begin
-                        response_valid    <= 1'b1;
-                        response_order_id <= {kOrderIdWidth{1'b0}};
-                        response_quantity <= {kQuantityWidth{1'b0}};
-                        response_found    <= 1'b0;
-                        state             <= kStateDone;
-                    end else begin
-                        level_tail_pointer_raddr <= working_price[kPriceIndexWidth-1:0];
-                        level_quantity_a_addr    <= working_price[kPriceIndexWidth-1:0];
-                        state                    <= kStateInsertWait;
-                    end
-                end
-
-                // Holds one cycle for level_tail_pointer_rdata and level_quantity_a_rdata to latch.
-                kStateInsertWait: begin
-                    state <= kStateInsertExec;
-                end
-
-                // Performs the direct-mapped insert using the registered level reads.
-                kStateInsertExec: begin
-                    insert_index = working_price[kPriceIndexWidth-1:0];
-                    slot         = free_stack[free_pointer - 1];
-
-                    order_id_we          <= 1'b1;
-                    order_id_waddr       <= slot;
-                    order_id_wdata       <= working_order_id;
-
-                    order_quantity_we    <= 1'b1;
-                    order_quantity_waddr <= slot;
-                    order_quantity_wdata <= working_quantity;
-
-                    order_price_we       <= 1'b1;
-                    order_price_waddr    <= slot;
-                    order_price_wdata    <= insert_index;
-
-                    order_valid[slot]    <= 1'b1;
-
-                    if (!level_valid[insert_index]) begin
-                        // Activates a new price level. order_next[slot] is already zero by
-                        // the freed-slot invariant, so no port cycle is spent here.
-                        level_valid[insert_index] <= 1'b1;
-
-                        level_head_pointer_we    <= 1'b1;
-                        level_head_pointer_waddr <= insert_index;
-                        level_head_pointer_wdata <= slot;
-
-                        level_tail_pointer_we    <= 1'b1;
-                        level_tail_pointer_waddr <= insert_index;
-                        level_tail_pointer_wdata <= slot;
-
-                        level_quantity_a_we      <= 1'b1;
-                        level_quantity_a_wdata   <= working_quantity;
-
-                        level_count              <= level_count + 1'b1;
-                    end else begin
-                        // Appends to the existing FIFO tail using the registered tail pointer.
-                        order_next_we            <= 1'b1;
-                        order_next_waddr         <= level_tail_pointer_rdata;
-                        order_next_wdata         <= slot;
-
-                        level_tail_pointer_we    <= 1'b1;
-                        level_tail_pointer_waddr <= insert_index;
-                        level_tail_pointer_wdata <= slot;
-
-                        level_quantity_a_we      <= 1'b1;
-                        level_quantity_a_wdata   <= level_quantity_a_rdata + working_quantity;
-                    end
-
-                    free_pointer      <= free_pointer - 1'b1;
-                    response_quantity <= working_quantity;
-                    response_order_id <= working_order_id;
-                    response_found    <= 1'b1;
-                    state             <= kStateSettle;
-                end
-
-                // Emits the terminating response or issues level reads at the current best price.
-                kStateConsumeFetchLevel: begin
-                    if (level_count == 0 || remaining_quantity == 0) begin
-                        response_valid    <= 1'b1;
-                        response_quantity <= consumed_so_far;
-                        response_found    <= (consumed_so_far != {kQuantityWidth{1'b0}});
-                        if (consumed_so_far == {kQuantityWidth{1'b0}})
-                            response_order_id <= {kOrderIdWidth{1'b0}};
-                        state <= kStateDone;
-                    end else begin
-                        level_head_pointer_raddr <= best_price_index;
-                        level_quantity_a_addr    <= best_price_index;
-                        state                    <= kStateConsumeWaitLevel;
-                    end
-                end
-
-                // Holds one cycle for level_head_pointer_rdata and level_quantity_a_rdata.
-                kStateConsumeWaitLevel: begin
-                    state <= kStateConsumeFetchOrder;
-                end
-
-                // Uses level_head_pointer_rdata to latch the head slot and issue order reads.
-                kStateConsumeFetchOrder: begin
-                    head_slot_reg        <= level_head_pointer_rdata;
-                    order_id_raddr       <= level_head_pointer_rdata;
-                    order_quantity_raddr <= level_head_pointer_rdata;
-                    order_next_raddr     <= level_head_pointer_rdata;
-                    state                <= kStateConsumeWaitOrder;
-                end
-
-                // Holds one cycle for the order port rdata at head_slot_reg.
-                kStateConsumeWaitOrder: begin
-                    state <= kStateConsumeExecute;
-                end
-
-                // Consumes the head order using the registered level and order reads.
-                kStateConsumeExecute: begin
-                    head_order_quantity = order_quantity_rdata;
-                    response_order_id   <= order_id_rdata;
-
-                    if (remaining_quantity >= head_order_quantity) begin
-                        // Fully consumes the head order and frees its slot.
-                        new_level_quantity = level_quantity_a_rdata - head_order_quantity;
-
-                        level_quantity_a_we    <= 1'b1;
-                        level_quantity_a_wdata <= new_level_quantity;
-
-                        remaining_quantity <= remaining_quantity - head_order_quantity;
-                        consumed_so_far    <= consumed_so_far + head_order_quantity;
-
-                        level_head_pointer_we    <= 1'b1;
-                        level_head_pointer_waddr <= best_price_index;
-                        level_head_pointer_wdata <= order_next_rdata;
-
-                        order_valid[head_slot_reg] <= 1'b0;
-                        free_stack[free_pointer]   <= head_slot_reg;
-                        free_pointer               <= free_pointer + 1'b1;
-
-                        // Preserves the freed-slot invariant.
-                        order_next_we    <= 1'b1;
-                        order_next_waddr <= head_slot_reg;
-                        order_next_wdata <= {kPointerWidth{1'b0}};
-
-                        if (new_level_quantity == 0) begin
-                            level_valid[best_price_index] <= 1'b0;
-                            level_count                   <= level_count - 1'b1;
-                            state <= kStateRescan;
-                        end else begin
-                            state <= kStateConsumeFetchLevel;
+                // Insert sub-FSM: issues level reads, waits, then performs the insert.
+                kTopInsertBusy: begin
+                    case (insert_state)
+                        kInsertFetch: begin
+                            if (working_price >= kPriceRange[kPriceWidth-1:0] || free_pointer == 0) begin
+                                response_valid    <= 1'b1;
+                                response_order_id <= {kOrderIdWidth{1'b0}};
+                                response_quantity <= {kQuantityWidth{1'b0}};
+                                response_found    <= 1'b0;
+                                top_state         <= kTopDone;
+                            end else begin
+                                level_tail_pointer_raddr <= working_price[kPriceIndexWidth-1:0];
+                                level_quantity_a_addr    <= working_price[kPriceIndexWidth-1:0];
+                                insert_state             <= kInsertWait;
+                            end
                         end
-                    end else begin
-                        // Partial fill; FetchLevel's terminator emits the response next iteration.
-                        order_quantity_we    <= 1'b1;
-                        order_quantity_waddr <= head_slot_reg;
-                        order_quantity_wdata <= head_order_quantity - remaining_quantity;
 
-                        level_quantity_a_we    <= 1'b1;
-                        level_quantity_a_wdata <= level_quantity_a_rdata - remaining_quantity;
+                        kInsertWait: begin
+                            insert_state <= kInsertExec;
+                        end
 
-                        consumed_so_far    <= consumed_so_far + remaining_quantity;
-                        remaining_quantity <= {kQuantityWidth{1'b0}};
-                        state              <= kStateConsumeFetchLevel;
-                    end
-                end
+                        kInsertExec: begin
+                            insert_index = working_price[kPriceIndexWidth-1:0];
+                            slot         = free_stack[free_pointer - 1];
 
-                // Advances the cancel scan to the next occupied price index.
-                kStateCancelScan: begin
-                    if (level_count == 0) begin
-                        response_valid    <= 1'b1;
-                        response_order_id <= working_order_id;
-                        response_quantity <= {kQuantityWidth{1'b0}};
-                        response_found    <= 1'b0;
-                        state             <= kStateDone;
-                    end else if (level_valid[cancel_level_index]) begin
-                        level_head_pointer_raddr <= cancel_level_index;
-                        state                    <= kStateCancelWaitHead;
-                    end else if (cancel_level_index == kMaxPriceIndex[kPriceIndexWidth-1:0]) begin
-                        response_valid    <= 1'b1;
-                        response_order_id <= working_order_id;
-                        response_quantity <= {kQuantityWidth{1'b0}};
-                        response_found    <= 1'b0;
-                        state             <= kStateDone;
-                    end else begin
-                        cancel_level_index <= cancel_level_index + 1'b1;
-                    end
-                end
+                            order_id_we          <= 1'b1;
+                            order_id_waddr       <= slot;
+                            order_id_wdata       <= working_order_id;
 
-                // Holds one cycle for level_head_pointer_rdata.
-                kStateCancelWaitHead: begin
-                    state <= kStateCancelDispatchOrder;
-                end
+                            order_quantity_we    <= 1'b1;
+                            order_quantity_waddr <= slot;
+                            order_quantity_wdata <= working_quantity;
 
-                // Uses level_head_pointer_rdata to latch scan_pointer and issue order reads.
-                kStateCancelDispatchOrder: begin
-                    scan_pointer         <= level_head_pointer_rdata;
-                    order_id_raddr       <= level_head_pointer_rdata;
-                    order_quantity_raddr <= level_head_pointer_rdata;
-                    order_next_raddr     <= level_head_pointer_rdata;
-                    previous_pointer     <= {kPointerWidth{1'b1}};
-                    cancel_is_head       <= 1'b1;
-                    state                <= kStateCancelWaitOrder;
-                end
+                            order_price_we       <= 1'b1;
+                            order_price_waddr    <= slot;
+                            order_price_wdata    <= insert_index;
 
-                // Holds one cycle for the order port rdata at scan_pointer.
-                kStateCancelWaitOrder: begin
-                    state <= kStateCancelFetchNode;
-                end
+                            order_valid[slot]    <= 1'b1;
 
-                // Evaluates the scan node: unlink on match, hop on mismatch, or skip to the next level.
-                kStateCancelFetchNode: begin
-                    if (!order_valid[scan_pointer]) begin
-                        if (cancel_level_index == kMaxPriceIndex[kPriceIndexWidth-1:0]) begin
-                            response_valid    <= 1'b1;
+                            if (!level_valid[insert_index]) begin
+                                // Activates a new price level. order_next[slot] is already zero by
+                                // the freed-slot invariant, so no port cycle is spent here.
+                                level_valid[insert_index] <= 1'b1;
+
+                                level_head_pointer_we    <= 1'b1;
+                                level_head_pointer_waddr <= insert_index;
+                                level_head_pointer_wdata <= slot;
+
+                                level_tail_pointer_we    <= 1'b1;
+                                level_tail_pointer_waddr <= insert_index;
+                                level_tail_pointer_wdata <= slot;
+
+                                level_quantity_a_we      <= 1'b1;
+                                level_quantity_a_wdata   <= working_quantity;
+
+                                level_count              <= level_count + 1'b1;
+                            end else begin
+                                // Appends to the existing FIFO tail using the registered tail.
+                                order_next_we            <= 1'b1;
+                                order_next_waddr         <= level_tail_pointer_rdata;
+                                order_next_wdata         <= slot;
+
+                                level_tail_pointer_we    <= 1'b1;
+                                level_tail_pointer_waddr <= insert_index;
+                                level_tail_pointer_wdata <= slot;
+
+                                level_quantity_a_we      <= 1'b1;
+                                level_quantity_a_wdata   <= level_quantity_a_rdata + working_quantity;
+                            end
+
+                            free_pointer      <= free_pointer - 1'b1;
+                            response_quantity <= working_quantity;
                             response_order_id <= working_order_id;
-                            response_quantity <= {kQuantityWidth{1'b0}};
-                            response_found    <= 1'b0;
-                            state             <= kStateDone;
-                        end else begin
-                            cancel_level_index <= cancel_level_index + 1'b1;
-                            state              <= kStateCancelScan;
+                            response_found    <= 1'b1;
+                            top_state         <= kTopSettle;
                         end
-                    end else if (order_id_rdata == working_order_id) begin
-                        // Match: fetch level_tail_pointer and level_quantity for the unlink writes.
-                        level_tail_pointer_raddr <= cancel_level_index;
-                        level_quantity_a_addr    <= cancel_level_index;
-                        state                    <= kStateCancelWaitMatch;
-                    end else begin
-                        // Hops to order_next_rdata and reissues the order reads.
-                        previous_pointer     <= scan_pointer;
-                        scan_pointer         <= order_next_rdata;
-                        order_id_raddr       <= order_next_rdata;
-                        order_quantity_raddr <= order_next_rdata;
-                        order_next_raddr     <= order_next_rdata;
-                        cancel_is_head       <= 1'b0;
-                        state                <= kStateCancelWaitOrder;
-                    end
+
+                        default: top_state <= kTopIdle;
+                    endcase
                 end
 
-                // Holds one cycle for level_tail_pointer_rdata and level_quantity_a_rdata.
-                kStateCancelWaitMatch: begin
-                    state <= kStateCancelUnlink;
+                // Consume sub-FSM: loops FetchLevel -> WaitLevel -> FetchOrder -> WaitOrder -> Execute.
+                kTopConsumeBusy: begin
+                    case (consume_state)
+                        kConsumeFetchLevel: begin
+                            if (level_count == 0 || remaining_quantity == 0) begin
+                                response_valid    <= 1'b1;
+                                response_quantity <= consumed_so_far;
+                                response_found    <= (consumed_so_far != {kQuantityWidth{1'b0}});
+                                if (consumed_so_far == {kQuantityWidth{1'b0}})
+                                    response_order_id <= {kOrderIdWidth{1'b0}};
+                                top_state <= kTopDone;
+                            end else begin
+                                level_head_pointer_raddr <= best_price_index;
+                                level_quantity_a_addr    <= best_price_index;
+                                consume_state            <= kConsumeWaitLevel;
+                            end
+                        end
+
+                        kConsumeWaitLevel: begin
+                            consume_state <= kConsumeFetchOrder;
+                        end
+
+                        kConsumeFetchOrder: begin
+                            head_slot_reg        <= level_head_pointer_rdata;
+                            order_id_raddr       <= level_head_pointer_rdata;
+                            order_quantity_raddr <= level_head_pointer_rdata;
+                            order_next_raddr     <= level_head_pointer_rdata;
+                            consume_state        <= kConsumeWaitOrder;
+                        end
+
+                        kConsumeWaitOrder: begin
+                            consume_state <= kConsumeExecute;
+                        end
+
+                        kConsumeExecute: begin
+                            head_order_quantity = order_quantity_rdata;
+                            response_order_id   <= order_id_rdata;
+
+                            if (remaining_quantity >= head_order_quantity) begin
+                                // Fully consumes the head order and frees its slot.
+                                new_level_quantity = level_quantity_a_rdata - head_order_quantity;
+
+                                level_quantity_a_we    <= 1'b1;
+                                level_quantity_a_wdata <= new_level_quantity;
+
+                                remaining_quantity <= remaining_quantity - head_order_quantity;
+                                consumed_so_far    <= consumed_so_far + head_order_quantity;
+
+                                level_head_pointer_we    <= 1'b1;
+                                level_head_pointer_waddr <= best_price_index;
+                                level_head_pointer_wdata <= order_next_rdata;
+
+                                order_valid[head_slot_reg] <= 1'b0;
+                                free_stack[free_pointer]   <= head_slot_reg;
+                                free_pointer               <= free_pointer + 1'b1;
+
+                                // Preserves the freed-slot invariant.
+                                order_next_we    <= 1'b1;
+                                order_next_waddr <= head_slot_reg;
+                                order_next_wdata <= {kPointerWidth{1'b0}};
+
+                                if (new_level_quantity == 0) begin
+                                    level_valid[best_price_index] <= 1'b0;
+                                    level_count                   <= level_count - 1'b1;
+                                    consume_state                 <= kConsumeRescan;
+                                end else begin
+                                    consume_state <= kConsumeFetchLevel;
+                                end
+                            end else begin
+                                // Partial fill; FetchLevel terminates on the next iteration.
+                                order_quantity_we    <= 1'b1;
+                                order_quantity_waddr <= head_slot_reg;
+                                order_quantity_wdata <= head_order_quantity - remaining_quantity;
+
+                                level_quantity_a_we    <= 1'b1;
+                                level_quantity_a_wdata <= level_quantity_a_rdata - remaining_quantity;
+
+                                consumed_so_far    <= consumed_so_far + remaining_quantity;
+                                remaining_quantity <= {kQuantityWidth{1'b0}};
+                                consume_state      <= kConsumeFetchLevel;
+                            end
+                        end
+
+                        // Stalls one cycle for the priority encoder to settle after a level empties.
+                        kConsumeRescan: begin
+                            consume_state <= kConsumeFetchLevel;
+                        end
+
+                        default: top_state <= kTopIdle;
+                    endcase
                 end
 
-                // Unlinks the matched order using all registered reads. order_quantity_rdata and
-                // order_next_rdata still reflect scan_pointer (their raddrs were not reassigned).
-                kStateCancelUnlink: begin
-                    cancelled_quantity = order_quantity_rdata;
+                // Cancel sub-FSM: scans levels, walks FIFOs, and unlinks on match.
+                kTopCancelBusy: begin
+                    case (cancel_state)
+                        kCancelScan: begin
+                            if (level_count == 0) begin
+                                response_valid    <= 1'b1;
+                                response_order_id <= working_order_id;
+                                response_quantity <= {kQuantityWidth{1'b0}};
+                                response_found    <= 1'b0;
+                                top_state         <= kTopDone;
+                            end else if (level_valid[cancel_level_index]) begin
+                                level_head_pointer_raddr <= cancel_level_index;
+                                cancel_state             <= kCancelWaitHead;
+                            end else if (cancel_level_index == kMaxPriceIndex[kPriceIndexWidth-1:0]) begin
+                                response_valid    <= 1'b1;
+                                response_order_id <= working_order_id;
+                                response_quantity <= {kQuantityWidth{1'b0}};
+                                response_found    <= 1'b0;
+                                top_state         <= kTopDone;
+                            end else begin
+                                cancel_level_index <= cancel_level_index + 1'b1;
+                            end
+                        end
 
-                    if (cancel_is_head) begin
-                        level_head_pointer_we    <= 1'b1;
-                        level_head_pointer_waddr <= cancel_level_index;
-                        level_head_pointer_wdata <= order_next_rdata;
-                    end else begin
-                        order_next_we    <= 1'b1;
-                        order_next_waddr <= previous_pointer;
-                        order_next_wdata <= order_next_rdata;
-                    end
+                        kCancelWaitHead: begin
+                            cancel_state <= kCancelDispatchOrder;
+                        end
 
-                    if (level_tail_pointer_rdata == scan_pointer) begin
-                        level_tail_pointer_we    <= 1'b1;
-                        level_tail_pointer_waddr <= cancel_level_index;
-                        if (cancel_is_head)
-                            level_tail_pointer_wdata <= order_next_rdata;
-                        else
-                            level_tail_pointer_wdata <= previous_pointer;
-                    end
+                        kCancelDispatchOrder: begin
+                            scan_pointer         <= level_head_pointer_rdata;
+                            order_id_raddr       <= level_head_pointer_rdata;
+                            order_quantity_raddr <= level_head_pointer_rdata;
+                            order_next_raddr     <= level_head_pointer_rdata;
+                            previous_pointer     <= {kPointerWidth{1'b1}};
+                            cancel_is_head       <= 1'b1;
+                            cancel_state         <= kCancelWaitOrder;
+                        end
 
-                    order_valid[scan_pointer] <= 1'b0;
-                    free_stack[free_pointer]  <= scan_pointer;
-                    free_pointer              <= free_pointer + 1'b1;
+                        kCancelWaitOrder: begin
+                            cancel_state <= kCancelFetchNode;
+                        end
 
-                    level_quantity_a_we    <= 1'b1;
-                    level_quantity_a_wdata <= level_quantity_a_rdata - cancelled_quantity;
+                        kCancelFetchNode: begin
+                            if (!order_valid[scan_pointer]) begin
+                                if (cancel_level_index == kMaxPriceIndex[kPriceIndexWidth-1:0]) begin
+                                    response_valid    <= 1'b1;
+                                    response_order_id <= working_order_id;
+                                    response_quantity <= {kQuantityWidth{1'b0}};
+                                    response_found    <= 1'b0;
+                                    top_state         <= kTopDone;
+                                end else begin
+                                    cancel_level_index <= cancel_level_index + 1'b1;
+                                    cancel_state       <= kCancelScan;
+                                end
+                            end else if (order_id_rdata == working_order_id) begin
+                                // Match: fetch level reads needed for the unlink writes.
+                                level_tail_pointer_raddr <= cancel_level_index;
+                                level_quantity_a_addr    <= cancel_level_index;
+                                cancel_state             <= kCancelWaitMatch;
+                            end else begin
+                                // Hop to the next FIFO node and reissue the order reads.
+                                previous_pointer     <= scan_pointer;
+                                scan_pointer         <= order_next_rdata;
+                                order_id_raddr       <= order_next_rdata;
+                                order_quantity_raddr <= order_next_rdata;
+                                order_next_raddr     <= order_next_rdata;
+                                cancel_is_head       <= 1'b0;
+                                cancel_state         <= kCancelWaitOrder;
+                            end
+                        end
 
-                    if (level_quantity_a_rdata == cancelled_quantity) begin
-                        level_valid[cancel_level_index] <= 1'b0;
-                        level_count                     <= level_count - 1'b1;
-                    end
+                        kCancelWaitMatch: begin
+                            cancel_state <= kCancelUnlink;
+                        end
 
-                    response_order_id <= working_order_id;
-                    response_quantity <= cancelled_quantity;
-                    response_found    <= 1'b1;
-                    state             <= kStateCancelCleanup;
+                        kCancelUnlink: begin
+                            cancelled_quantity = order_quantity_rdata;
+
+                            if (cancel_is_head) begin
+                                level_head_pointer_we    <= 1'b1;
+                                level_head_pointer_waddr <= cancel_level_index;
+                                level_head_pointer_wdata <= order_next_rdata;
+                            end else begin
+                                order_next_we    <= 1'b1;
+                                order_next_waddr <= previous_pointer;
+                                order_next_wdata <= order_next_rdata;
+                            end
+
+                            if (level_tail_pointer_rdata == scan_pointer) begin
+                                level_tail_pointer_we    <= 1'b1;
+                                level_tail_pointer_waddr <= cancel_level_index;
+                                if (cancel_is_head)
+                                    level_tail_pointer_wdata <= order_next_rdata;
+                                else
+                                    level_tail_pointer_wdata <= previous_pointer;
+                            end
+
+                            order_valid[scan_pointer] <= 1'b0;
+                            free_stack[free_pointer]  <= scan_pointer;
+                            free_pointer              <= free_pointer + 1'b1;
+
+                            level_quantity_a_we    <= 1'b1;
+                            level_quantity_a_wdata <= level_quantity_a_rdata - cancelled_quantity;
+
+                            if (level_quantity_a_rdata == cancelled_quantity) begin
+                                level_valid[cancel_level_index] <= 1'b0;
+                                level_count                     <= level_count - 1'b1;
+                            end
+
+                            response_order_id <= working_order_id;
+                            response_quantity <= cancelled_quantity;
+                            response_found    <= 1'b1;
+                            cancel_state      <= kCancelCleanup;
+                        end
+
+                        kCancelCleanup: begin
+                            order_next_we    <= 1'b1;
+                            order_next_waddr <= scan_pointer;
+                            order_next_wdata <= {kPointerWidth{1'b0}};
+                            top_state        <= kTopSettle;
+                        end
+
+                        default: top_state <= kTopIdle;
+                    endcase
                 end
 
-                // Zeros order_next at the freed slot to preserve the freed-slot invariant.
-                kStateCancelCleanup: begin
-                    order_next_we    <= 1'b1;
-                    order_next_waddr <= scan_pointer;
-                    order_next_wdata <= {kPointerWidth{1'b0}};
-                    state            <= kStateSettle;
-                end
-
-                // Signals command completion and re-enables command acceptance.
-                kStateDone: begin
-                    command_ready <= 1'b1;
-                    state         <= kStateIdle;
-                end
-
-                // Stalls one cycle for the pipelined encoder to settle, then pulses response_valid.
-                kStateSettle: begin
+                // Stalls one cycle for the priority encoder, then pulses response_valid.
+                kTopSettle: begin
                     response_valid <= 1'b1;
-                    state          <= kStateDone;
+                    top_state      <= kTopDone;
                 end
 
-                // Stalls one cycle for the pipelined encoder to settle, then resumes the consume loop.
-                kStateRescan: begin
-                    state <= kStateConsumeFetchLevel;
+                // Reasserts command_ready and returns to idle for the next command.
+                kTopDone: begin
+                    command_ready <= 1'b1;
+                    top_state     <= kTopIdle;
                 end
 
-                default: state <= kStateIdle;
+                default: top_state <= kTopIdle;
             endcase
         end
     end
