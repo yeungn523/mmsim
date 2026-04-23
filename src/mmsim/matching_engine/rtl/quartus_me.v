@@ -548,7 +548,7 @@ wire [31:0] matching_engine_total_volume;
 
 (* keep_hierarchy = "yes" *) matching_engine #(
     .kDepth         (16),
-    .kMaxOrders     (32),
+    .kMaxOrders     (256),
     .kPriceWidth    (32),
     .kQuantityWidth (16),
     .kOrderIdWidth  (16),

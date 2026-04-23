@@ -123,7 +123,7 @@ class MatchingEngine:
         _total_volume: The cumulative shares traded.
     """
 
-    def __init__(self, depth: int = 16, max_orders: int = 64) -> None:
+    def __init__(self, depth: int = 16, max_orders: int = 256) -> None:
         self._bid_book: PriceLevelStore = PriceLevelStore(
             depth=depth, max_orders=max_orders, is_bid=True,
         )

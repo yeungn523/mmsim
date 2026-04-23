@@ -14,7 +14,7 @@
 
 module matching_engine #(
     parameter kDepth         = 16,  ///< Maximum price levels per book side.
-    parameter kMaxOrders     = 64,  ///< Maximum individual orders per book side.
+    parameter kMaxOrders     = 256, ///< Maximum individual orders per book side.
     parameter kPriceWidth    = 32,  ///< Bit width of the price field (unsigned ticks).
     parameter kQuantityWidth = 16,  ///< Bit width of the quantity field.
     parameter kOrderIdWidth  = 16,  ///< Bit width of the order identifier field.
