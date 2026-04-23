@@ -22,7 +22,7 @@ from ...utilities import console, LogLevel
 _DEFAULT_DEPTH: int = 16
 
 # Maximum number of individual orders stored per book side.
-_DEFAULT_MAX_ORDERS: int = 64
+_DEFAULT_MAX_ORDERS: int = 256
 
 # Number of addressable price ticks (must match kPriceRange in the Verilog DUT).
 _DEFAULT_PRICE_RANGE: int = 2048

@@ -47,7 +47,7 @@ module quartus_price (
 
     (* keep_hierarchy = "yes" *) price_level_store #(
         .kDepth         (16),
-        .kMaxOrders     (32),
+        .kMaxOrders     (256),
         .kPriceWidth    (32),
         .kQuantityWidth (16),
         .kOrderIdWidth  (16),
