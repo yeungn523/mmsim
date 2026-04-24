@@ -1,10 +1,4 @@
-"""Provides a Python golden model for the market_maker Verilog module.
-
-Replicates the ten-state FSM, fair-price ladder, inventory skew arithmetic, and trade-snoop fill
-attribution implemented in ``src/mmsim/agents/rtl/market_maker.v``. Emits at most one order per
-tick to match the single-order-per-grant constraint of the shared order bus. Used by the
-inventory study harness and (future) the CSV-based DUT verification pipeline.
-"""
+"""Provides a Python golden model for the market_maker Verilog module."""
 
 from __future__ import annotations
 
@@ -47,21 +41,7 @@ class State(IntEnum):
 
 @dataclass
 class BookObservation:
-    """Captures the per-cycle inputs the market maker samples from the matching engine.
-
-    Attributes:
-        best_bid_price: The highest resting bid price in the engine.
-        best_bid_quantity: The aggregate quantity at the best bid.
-        best_bid_valid: Determines whether the bid book is nonempty.
-        best_ask_price: The lowest resting ask price in the engine.
-        best_ask_quantity: The aggregate quantity at the best ask.
-        best_ask_valid: Determines whether the ask book is nonempty.
-        trade_valid: Determines whether a trade snoop event is present this cycle.
-        trade_aggressor_id: The aggressive order's identifier for this trade event.
-        trade_resting_id: The resting order's identifier for this trade event.
-        trade_price: The execution price for this trade event.
-        trade_quantity: The number of shares executed in this trade event.
-    """
+    """Captures the per-cycle inputs the market maker samples from the matching engine."""
 
     best_bid_price: int = 0
     """The highest resting bid price in the engine."""
@@ -89,14 +69,7 @@ class BookObservation:
 
 @dataclass
 class OrderCommand:
-    """Captures a single order the market maker intends to submit to the matching engine.
-
-    Attributes:
-        order_type: The order type code (limit buy, limit sell, market buy, market sell, cancel).
-        order_id: The order's unique identifier.
-        order_price: The order's limit price in ticks (unused for market and cancel orders).
-        order_quantity: The order's share count (unused for cancel orders).
-    """
+    """Captures a single order the market maker intends to submit to the matching engine."""
 
     order_type: int
     """The order type code (limit buy, limit sell, market buy, market sell, cancel)."""
@@ -111,11 +84,8 @@ class OrderCommand:
 class MarketMakerGolden:
     """Replicates the market_maker Verilog module's FSM, fair-price ladder, and skew logic.
 
-    Advances one cycle per tick call and emits at most one order, matching the
-    single-order-per-grant constraint of the shared order bus. Tracks active quote identifiers
-    for trade-snoop fill attribution, maintains last-trade and last-quoted-fair registers that
-    drive the fair-price fallback and requote trigger, and optionally skews the half-spread by
-    accumulated inventory when the v2 logic is enabled.
+    Advances one cycle per tick and emits at most one order, matching the
+    single-order-per-grant constraint of the shared order bus.
 
     Args:
         skew_enable: Determines whether to skew quotes by accumulated inventory (v2 when True).
@@ -143,10 +113,10 @@ class MarketMakerGolden:
         _state: The current FSM state.
         _next_order_id: The identifier to use for the next emitted order.
         _active_bid_id: The identifier of the currently resting bid quote.
-        _active_bid_valid: Determines whether the bid quote is live.
+        _active_bid_remaining: The number of shares still resting on the active bid quote.
         _active_bid_price: The price of the currently resting bid quote.
         _active_ask_id: The identifier of the currently resting ask quote.
-        _active_ask_valid: Determines whether the ask quote is live.
+        _active_ask_remaining: The number of shares still resting on the active ask quote.
         _active_ask_price: The price of the currently resting ask quote.
         _net_inventory: The net position in shares (positive long, negative short).
         _last_trade_price: The most recent trade price observed on the snoop bus.
@@ -183,10 +153,10 @@ class MarketMakerGolden:
         self._next_order_id: int = order_id_base
 
         self._active_bid_id: int = 0
-        self._active_bid_valid: bool = False
+        self._active_bid_remaining: int = 0
         self._active_bid_price: int = 0
         self._active_ask_id: int = 0
-        self._active_ask_valid: bool = False
+        self._active_ask_remaining: int = 0
         self._active_ask_price: int = 0
 
         self._net_inventory: int = 0
@@ -199,14 +169,25 @@ class MarketMakerGolden:
         """Returns a string representation of the MarketMakerGolden instance."""
         return (
             f"MarketMakerGolden(skew_enable={self.skew_enable}, state={self._state.name}, "
-            f"net_inventory={self._net_inventory}, active_bid_valid={self._active_bid_valid}, "
-            f"active_ask_valid={self._active_ask_valid})"
+            f"net_inventory={self._net_inventory}, "
+            f"bid_remaining={self._active_bid_remaining}, "
+            f"ask_remaining={self._active_ask_remaining})"
         )
 
     @property
     def net_inventory(self) -> int:
         """Returns the current net position in shares (positive long, negative short)."""
         return self._net_inventory
+
+    @property
+    def active_bid_valid(self) -> bool:
+        """Returns True when at least one share of the posted bid quote is still resting."""
+        return self._active_bid_remaining > 0
+
+    @property
+    def active_ask_valid(self) -> bool:
+        """Returns True when at least one share of the posted ask quote is still resting."""
+        return self._active_ask_remaining > 0
 
     @property
     def state(self) -> State:
@@ -234,17 +215,23 @@ class MarketMakerGolden:
             self._last_trade_price = observation.trade_price
             self._last_trade_price_valid = True
             is_bid_fill = (
-                self._active_bid_valid and observation.trade_resting_id == self._active_bid_id
+                self.active_bid_valid and observation.trade_resting_id == self._active_bid_id
             )
             is_ask_fill = (
-                self._active_ask_valid and observation.trade_resting_id == self._active_ask_id
+                self.active_ask_valid and observation.trade_resting_id == self._active_ask_id
             )
             if is_bid_fill:
                 self._net_inventory += observation.trade_quantity
-                self._active_bid_valid = False
+                # Saturates to zero so the subtraction never underflows on a final fill, matching
+                # the saturating subtraction in the Verilog fill-attribution block.
+                self._active_bid_remaining = max(
+                    0, self._active_bid_remaining - observation.trade_quantity,
+                )
             elif is_ask_fill:
                 self._net_inventory -= observation.trade_quantity
-                self._active_ask_valid = False
+                self._active_ask_remaining = max(
+                    0, self._active_ask_remaining - observation.trade_quantity,
+                )
 
         fair = self._fair_price(observation=observation)
         new_bid_price, new_ask_price = self._quote_prices(fair=fair)
@@ -308,28 +295,28 @@ class MarketMakerGolden:
             return order
 
         if self._state == State.CANCEL_BID:
-            if self._active_bid_valid:
+            if self.active_bid_valid:
                 order = OrderCommand(
                     order_type=TYPE_CANCEL,
                     order_id=self._active_bid_id,
                     order_price=0,
                     order_quantity=0,
                 )
-                self._active_bid_valid = False
+                self._active_bid_remaining = 0
                 self._state = State.CANCEL_ASK
                 return order
             self._state = State.CANCEL_ASK
             return None
 
         if self._state == State.CANCEL_ASK:
-            if self._active_ask_valid:
+            if self.active_ask_valid:
                 order = OrderCommand(
                     order_type=TYPE_CANCEL,
                     order_id=self._active_ask_id,
                     order_price=0,
                     order_quantity=0,
                 )
-                self._active_ask_valid = False
+                self._active_ask_remaining = 0
                 self._state = State.POST_BID
                 return order
             self._state = State.POST_BID
@@ -396,9 +383,9 @@ class MarketMakerGolden:
 
     def _next_quoting_state(self, observation: BookObservation, fair: int) -> State:
         """Returns the next state when currently in QUOTING, using priority-ordered triggers."""
-        if not self._active_bid_valid:
+        if not self.active_bid_valid:
             return State.REPLENISH_BID
-        if not self._active_ask_valid:
+        if not self.active_ask_valid:
             return State.REPLENISH_ASK
         if not observation.best_bid_valid:
             return State.REPLENISH_BID
@@ -414,13 +401,13 @@ class MarketMakerGolden:
     def _latch_bid(self, order_id: int, price: int) -> None:
         """Records a newly posted bid quote for later fill attribution and cancellation."""
         self._active_bid_id = order_id
-        self._active_bid_valid = True
+        self._active_bid_remaining = self.order_quantity
         self._active_bid_price = price
 
     def _latch_ask(self, order_id: int, price: int) -> None:
         """Records a newly posted ask quote for later fill attribution and cancellation."""
         self._active_ask_id = order_id
-        self._active_ask_valid = True
+        self._active_ask_remaining = self.order_quantity
         self._active_ask_price = price
 
     def _advance_id(self) -> int:

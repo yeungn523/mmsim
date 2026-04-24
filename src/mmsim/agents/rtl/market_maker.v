@@ -66,11 +66,11 @@ module market_maker #(
     reg [kOrderIdWidth-1:0]     next_order_id;         ///< Monotonic counter within the reserved ID block.
 
     reg [kOrderIdWidth-1:0]     active_bid_id;         ///< Identifier of the currently resting bid.
-    reg                         active_bid_valid;      ///< Determines whether the bid quote is live.
+    reg [kQuantityWidth-1:0]    active_bid_remaining;  ///< Shares remaining on the currently resting bid.
     reg [kPriceWidth-1:0]       active_bid_price;      ///< Price of the currently resting bid.
 
     reg [kOrderIdWidth-1:0]     active_ask_id;         ///< Identifier of the currently resting ask.
-    reg                         active_ask_valid;      ///< Determines whether the ask quote is live.
+    reg [kQuantityWidth-1:0]    active_ask_remaining;  ///< Shares remaining on the currently resting ask.
     reg [kPriceWidth-1:0]       active_ask_price;      ///< Price of the currently resting ask.
 
     reg signed [15:0]           net_inventory;         ///< Positive = long, negative = short.
@@ -118,6 +118,12 @@ module market_maker #(
           last_quoted_fair_valid
        && (drift_abs >= {{(kPriceWidth-16){1'b0}}, kRequoteThreshold});
 
+    // Quote liveness derived from the remaining share count. A quote is live whenever at least one
+    // share of the posted quantity is still resting on the book; the flag deasserts only when the
+    // order is fully consumed or explicitly cancelled.
+    wire active_bid_valid = (active_bid_remaining != {kQuantityWidth{1'b0}});
+    wire active_ask_valid = (active_ask_remaining != {kQuantityWidth{1'b0}});
+
     // Own-fill detection from the trade snoop bus
     wire bid_fill_event = trade_valid && active_bid_valid && (trade_resting_id == active_bid_id);
     wire ask_fill_event = trade_valid && active_ask_valid && (trade_resting_id == active_ask_id);
@@ -134,10 +140,10 @@ module market_maker #(
             next_order_id          <= kOrderIdBase;
 
             active_bid_id          <= {kOrderIdWidth{1'b0}};
-            active_bid_valid       <= 1'b0;
+            active_bid_remaining   <= {kQuantityWidth{1'b0}};
             active_bid_price       <= {kPriceWidth{1'b0}};
             active_ask_id          <= {kOrderIdWidth{1'b0}};
-            active_ask_valid       <= 1'b0;
+            active_ask_remaining   <= {kQuantityWidth{1'b0}};
             active_ask_price       <= {kPriceWidth{1'b0}};
 
             net_inventory          <= 16'sd0;
@@ -159,12 +165,18 @@ module market_maker #(
                 last_trade_price       <= trade_price;
                 last_trade_price_valid <= 1'b1;
                 if (bid_fill_event) begin
-                    net_inventory    <= net_inventory + $signed({1'b0, trade_quantity});
-                    active_bid_valid <= 1'b0;
+                    net_inventory        <= net_inventory + $signed({1'b0, trade_quantity});
+                    // Saturates to zero when a trade consumes the whole remaining quantity so the
+                    // subtraction never underflows on a final fill.
+                    active_bid_remaining <= (trade_quantity >= active_bid_remaining)
+                                            ? {kQuantityWidth{1'b0}}
+                                            : (active_bid_remaining - trade_quantity);
                 end
                 if (ask_fill_event) begin
-                    net_inventory    <= net_inventory - $signed({1'b0, trade_quantity});
-                    active_ask_valid <= 1'b0;
+                    net_inventory        <= net_inventory - $signed({1'b0, trade_quantity});
+                    active_ask_remaining <= (trade_quantity >= active_ask_remaining)
+                                            ? {kQuantityWidth{1'b0}}
+                                            : (active_ask_remaining - trade_quantity);
                 end
             end
 
@@ -184,9 +196,9 @@ module market_maker #(
                     order_price    <= new_bid_price;
                     order_quantity <= kOrderQuantity;
                     if (order_grant) begin
-                        active_bid_id    <= next_order_id;
-                        active_bid_valid <= 1'b1;
-                        active_bid_price <= new_bid_price;
+                        active_bid_id        <= next_order_id;
+                        active_bid_remaining <= kOrderQuantity;
+                        active_bid_price     <= new_bid_price;
                         next_order_id    <= wrapped_next;
                         order_request    <= 1'b0;
                         state            <= kStateSeedAsk;
@@ -202,7 +214,7 @@ module market_maker #(
                     order_quantity <= kOrderQuantity;
                     if (order_grant) begin
                         active_ask_id          <= next_order_id;
-                        active_ask_valid       <= 1'b1;
+                        active_ask_remaining   <= kOrderQuantity;
                         active_ask_price       <= new_ask_price;
                         next_order_id          <= wrapped_next;
                         last_quoted_fair       <= fair_price;
@@ -235,9 +247,9 @@ module market_maker #(
                     order_price    <= new_bid_price;
                     order_quantity <= kOrderQuantity;
                     if (order_grant) begin
-                        active_bid_id    <= next_order_id;
-                        active_bid_valid <= 1'b1;
-                        active_bid_price <= new_bid_price;
+                        active_bid_id        <= next_order_id;
+                        active_bid_remaining <= kOrderQuantity;
+                        active_bid_price     <= new_bid_price;
                         next_order_id    <= wrapped_next;
                         order_request    <= 1'b0;
                         state            <= kStateQuoting;
@@ -251,9 +263,9 @@ module market_maker #(
                     order_price    <= new_ask_price;
                     order_quantity <= kOrderQuantity;
                     if (order_grant) begin
-                        active_ask_id    <= next_order_id;
-                        active_ask_valid <= 1'b1;
-                        active_ask_price <= new_ask_price;
+                        active_ask_id        <= next_order_id;
+                        active_ask_remaining <= kOrderQuantity;
+                        active_ask_price     <= new_ask_price;
                         next_order_id    <= wrapped_next;
                         order_request    <= 1'b0;
                         state            <= kStateQuoting;
@@ -270,9 +282,9 @@ module market_maker #(
                         order_price    <= {kPriceWidth{1'b0}};
                         order_quantity <= {kQuantityWidth{1'b0}};
                         if (order_grant) begin
-                            active_bid_valid <= 1'b0;
-                            order_request    <= 1'b0;
-                            state            <= kStateCancelAsk;
+                            active_bid_remaining <= {kQuantityWidth{1'b0}};
+                            order_request        <= 1'b0;
+                            state                <= kStateCancelAsk;
                         end
                     end else begin
                         order_request <= 1'b0;
@@ -288,9 +300,9 @@ module market_maker #(
                         order_price    <= {kPriceWidth{1'b0}};
                         order_quantity <= {kQuantityWidth{1'b0}};
                         if (order_grant) begin
-                            active_ask_valid <= 1'b0;
-                            order_request    <= 1'b0;
-                            state            <= kStatePostBid;
+                            active_ask_remaining <= {kQuantityWidth{1'b0}};
+                            order_request        <= 1'b0;
+                            state                <= kStatePostBid;
                         end
                     end else begin
                         order_request <= 1'b0;
@@ -305,9 +317,9 @@ module market_maker #(
                     order_price    <= new_bid_price;
                     order_quantity <= kOrderQuantity;
                     if (order_grant) begin
-                        active_bid_id    <= next_order_id;
-                        active_bid_valid <= 1'b1;
-                        active_bid_price <= new_bid_price;
+                        active_bid_id        <= next_order_id;
+                        active_bid_remaining <= kOrderQuantity;
+                        active_bid_price     <= new_bid_price;
                         next_order_id    <= wrapped_next;
                         order_request    <= 1'b0;
                         state            <= kStatePostAsk;
@@ -322,7 +334,7 @@ module market_maker #(
                     order_quantity <= kOrderQuantity;
                     if (order_grant) begin
                         active_ask_id          <= next_order_id;
-                        active_ask_valid       <= 1'b1;
+                        active_ask_remaining   <= kOrderQuantity;
                         active_ask_price       <= new_ask_price;
                         next_order_id          <= wrapped_next;
                         last_quoted_fair       <= fair_price;

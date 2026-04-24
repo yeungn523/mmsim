@@ -13,15 +13,14 @@ golden model exactly.
 
 from __future__ import annotations
 
-import argparse
 import math
 import random
 import statistics
-import sys
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import click
 import matplotlib.pyplot as plt
 
 from ...matching_engine.python_verification.matching_engine_golden import (
@@ -43,6 +42,24 @@ _NOISE_ORDER_ID_BASE: int = 50_000
 
 # Window length in cycles used for the rolling mean applied to the observed spread plot.
 _SPREAD_ROLLING_WINDOW: int = 200
+
+
+@dataclass
+class NoiseEvent:
+    """Captures a single per-cycle decision of the noise counterparty.
+
+    Attributes:
+        fire: Determines whether a noise order fires on this cycle.
+        is_buy: Determines whether the fired order is a buy rather than a sell.
+        size: The share count of the fired order.
+    """
+
+    fire: bool
+    """Determines whether a noise order fires on this cycle."""
+    is_buy: bool
+    """Determines whether the fired order is a buy rather than a sell."""
+    size: int
+    """The share count of the fired order."""
 
 
 @dataclass
@@ -75,12 +92,47 @@ class RunRecord:
     """The total shares traded against the market maker's quotes."""
 
 
+def precompute_noise_events(
+    ticks: int,
+    activity_rate: float,
+    max_size: int,
+    buy_bias: float,
+    seed: int,
+) -> list[NoiseEvent]:
+    """Generates the full per-cycle noise event sequence for deterministic replay.
+
+    Writing the sequence out to disk lets the ModelSim testbench replay the same flow the Python
+    study observes, ensuring bit-exact DUT-vs-golden comparisons see identical stimulus.
+
+    Args:
+        ticks: The number of cycles to cover.
+        activity_rate: The per-cycle probability of firing a market order.
+        max_size: The maximum share count per fired order.
+        buy_bias: The probability that a fired order is a buy rather than a sell.
+        seed: The deterministic seed for the random number generator.
+
+    Returns:
+        A list of NoiseEvent with one entry per cycle.
+    """
+    rng = random.Random(seed)
+    events: list[NoiseEvent] = []
+    for _ in range(ticks):
+        if rng.random() >= activity_rate:
+            events.append(NoiseEvent(fire=False, is_buy=False, size=0))
+            continue
+        is_buy = rng.random() < buy_bias
+        size = rng.randint(1, max_size)
+        events.append(NoiseEvent(fire=True, is_buy=is_buy, size=size))
+    return events
+
+
 class NoiseCounterparty:
     """Fires random market orders against the book to simulate adverse order flow.
 
-    Generates one candidate market order per cycle with probability equal to the activity rate,
-    drawn uniformly over sides (skewed by buy_bias) and uniformly over sizes. Skips generation
-    when the targeted side of the book is empty to avoid wasted cycles.
+    Supports two modes: live generation from an internal RNG, or replay from a pre-computed
+    event list. Replay mode is used when a ModelSim TB must see the identical sequence, since
+    the TB reads the same event list from disk. In either mode, orders are skipped when the
+    targeted side of the book is empty.
 
     Args:
         activity_rate: The per-cycle probability of attempting to fire a market order.
@@ -88,13 +140,16 @@ class NoiseCounterparty:
         buy_bias: The probability that a fired order is a buy rather than a sell.
         seed: The deterministic seed for the internal random number generator.
         order_id_base: The lowest order_id this counterparty will issue.
+        events: When provided, replays this event list instead of drawing fresh RNG samples.
 
     Attributes:
         _activity_rate: Cached per-cycle firing probability.
         _max_size: Cached maximum order size.
         _buy_bias: Cached buy-side probability.
-        _rng: The internal random number generator.
+        _rng: The internal random number generator (used only in live mode).
         _next_order_id: The identifier to use for the next emitted market order.
+        _events: The replay event list, or None when in live generation mode.
+        _event_index: The position into the replay list for the next cycle.
     """
 
     def __init__(
@@ -104,12 +159,15 @@ class NoiseCounterparty:
         buy_bias: float,
         seed: int,
         order_id_base: int = _NOISE_ORDER_ID_BASE,
+        events: list[NoiseEvent] | None = None,
     ) -> None:
         self._activity_rate: float = activity_rate
         self._max_size: int = max_size
         self._buy_bias: float = buy_bias
         self._rng: random.Random = random.Random(seed)
         self._next_order_id: int = order_id_base
+        self._events: list[NoiseEvent] | None = events
+        self._event_index: int = 0
 
     def maybe_fire(self, engine: MatchingEngine) -> OrderCommand | None:
         """Returns a market order to submit this cycle, or None when the counterparty stays quiet.
@@ -120,11 +178,20 @@ class NoiseCounterparty:
         Returns:
             An OrderCommand describing the market order to submit, or None.
         """
-        if self._rng.random() >= self._activity_rate:
-            return None
-
-        is_buy = self._rng.random() < self._buy_bias
-        size = self._rng.randint(1, self._max_size)
+        if self._events is not None:
+            if self._event_index >= len(self._events):
+                return None
+            event = self._events[self._event_index]
+            self._event_index += 1
+            if not event.fire:
+                return None
+            is_buy = event.is_buy
+            size = event.size
+        else:
+            if self._rng.random() >= self._activity_rate:
+                return None
+            is_buy = self._rng.random() < self._buy_bias
+            size = self._rng.randint(1, self._max_size)
 
         if is_buy and not engine._ask_book.best_valid:
             return None
@@ -150,6 +217,7 @@ def run_single(
     activity_rate: float,
     anchor_price: int = 1024,
     noise_max_size: int = 3,
+    events: list[NoiseEvent] | None = None,
 ) -> RunRecord:
     """Runs one simulation of the market maker against the noise counterparty.
 
@@ -161,6 +229,8 @@ def run_single(
         activity_rate: The per-cycle probability that the noise counterparty fires an order.
         anchor_price: The cold-start fair price passed to the market maker.
         noise_max_size: The maximum share count per noise market order.
+        events: When provided, the noise counterparty replays this event list instead of
+            drawing fresh RNG samples. Used to synchronize Python and ModelSim runs.
 
     Returns:
         A RunRecord capturing per-cycle metrics and end-of-run counters for this run.
@@ -174,6 +244,7 @@ def run_single(
         max_size=noise_max_size,
         buy_bias=buy_bias,
         seed=seed,
+        events=events,
     )
 
     record = RunRecord(label="v2" if skew_enable else "v1")
@@ -408,60 +479,169 @@ def plot_comparison(record_v1: RunRecord, record_v2: RunRecord, output_directory
     plt.close(fig=figure)
 
 
-def main() -> None:
-    """Parses command-line arguments and runs the requested study mode."""
-    parser = argparse.ArgumentParser(
-        description="Compare fixed-spread (v1) vs inventory-skewed (v2) market maker policies.",
-    )
-    parser.add_argument("--ticks", type=int, default=10_000, help="Number of simulation cycles.")
-    parser.add_argument("--seed", type=int, default=42, help="Base random seed for noise flow.")
-    parser.add_argument(
-        "--seeds",
-        type=int,
-        default=1,
-        help="Number of seeds to sweep for statistical rigor (1 = single-seed with plots).",
-    )
-    parser.add_argument(
-        "--buy-bias",
-        type=float,
-        default=0.5,
-        help="Noise counterparty buy probability (0.5 = symmetric, >0.5 = buy pressure).",
-    )
-    parser.add_argument(
-        "--activity-rate",
-        type=float,
-        default=0.15,
-        help="Per-cycle probability that the noise counterparty fires an order.",
-    )
-    parser.add_argument("--no-plots", action="store_true", help="Skip plot generation.")
-    parser.add_argument(
-        "--output-dir",
-        type=Path,
-        default=None,
-        help="Directory to save plots in (defaults to src/mmsim/agents/sim/study_artifacts).",
-    )
-    args = parser.parse_args()
+def plot_comparison_overlay(
+    python_v1: RunRecord,
+    python_v2: RunRecord,
+    verilog_v1: RunRecord,
+    verilog_v2: RunRecord,
+    output_directory: Path,
+) -> None:
+    """Saves four comparison plots with Python and Verilog overlaid per policy.
 
+    Each plot draws four lines using a color-per-policy and style-per-source convention so that
+    Python-vs-Verilog agreement shows up as coincident lines of the same color while the v1-vs-v2
+    comparison shows up as distinct colors. Any visible gap between a solid and dashed line of
+    the same color is a bit-exact divergence worth investigating.
+
+    Args:
+        python_v1: The RunRecord from the Python golden model with the v1 (fixed) policy.
+        python_v2: The RunRecord from the Python golden model with the v2 (skewed) policy.
+        verilog_v1: The RunRecord parsed from the ModelSim log with the v1 policy.
+        verilog_v2: The RunRecord parsed from the ModelSim log with the v2 policy.
+        output_directory: The directory to save the PNG plots in.
+    """
+    output_directory.mkdir(parents=True, exist_ok=True)
+    cycles = range(len(python_v1.inventory))
+
+    v1_color = "tab:blue"
+    v2_color = "tab:orange"
+    python_style = "-"
+    verilog_style = "--"
+
+    figure, axis = plt.subplots(figsize=(10, 5))
+    axis.plot(cycles, python_v1.inventory, color=v1_color, linestyle=python_style,
+              label="Python v1 (fixed)", alpha=0.8)
+    axis.plot(cycles, verilog_v1.inventory, color=v1_color, linestyle=verilog_style,
+              label="Verilog v1 (fixed)", alpha=0.8)
+    axis.plot(cycles, python_v2.inventory, color=v2_color, linestyle=python_style,
+              label="Python v2 (skewed)", alpha=0.8)
+    axis.plot(cycles, verilog_v2.inventory, color=v2_color, linestyle=verilog_style,
+              label="Verilog v2 (skewed)", alpha=0.8)
+    axis.axhline(y=0, color="black", linestyle=":", linewidth=0.5)
+    axis.set_xlabel(xlabel="Cycle")
+    axis.set_ylabel(ylabel="Net inventory (shares)")
+    axis.set_title(label="Market maker inventory over time (Python vs Verilog)")
+    axis.legend()
+    figure.tight_layout()
+    figure.savefig(fname=output_directory / "inventory.png", dpi=120)
+    plt.close(fig=figure)
+
+    figure, axis = plt.subplots(figsize=(10, 5))
+    axis.plot(cycles, python_v1.cumulative_pnl, color=v1_color, linestyle=python_style,
+              label="Python v1 (fixed)", alpha=0.8)
+    axis.plot(cycles, verilog_v1.cumulative_pnl, color=v1_color, linestyle=verilog_style,
+              label="Verilog v1 (fixed)", alpha=0.8)
+    axis.plot(cycles, python_v2.cumulative_pnl, color=v2_color, linestyle=python_style,
+              label="Python v2 (skewed)", alpha=0.8)
+    axis.plot(cycles, verilog_v2.cumulative_pnl, color=v2_color, linestyle=verilog_style,
+              label="Verilog v2 (skewed)", alpha=0.8)
+    axis.set_xlabel(xlabel="Cycle")
+    axis.set_ylabel(ylabel="Mark-to-market PnL (tick · shares)")
+    axis.set_title(label="Cumulative PnL over time (Python vs Verilog)")
+    axis.legend()
+    figure.tight_layout()
+    figure.savefig(fname=output_directory / "pnl.png", dpi=120)
+    plt.close(fig=figure)
+
+    figure, axis = plt.subplots(figsize=(10, 5))
+    for record, color, style, label in (
+        (python_v1, v1_color, python_style, "Python v1 (fixed)"),
+        (verilog_v1, v1_color, verilog_style, "Verilog v1 (fixed)"),
+        (python_v2, v2_color, python_style, "Python v2 (skewed)"),
+        (verilog_v2, v2_color, verilog_style, "Verilog v2 (skewed)"),
+    ):
+        axis.plot(
+            cycles,
+            _rolling_mean(values=record.spread, window=_SPREAD_ROLLING_WINDOW),
+            color=color, linestyle=style, label=label, alpha=0.8,
+        )
+    axis.set_xlabel(xlabel="Cycle")
+    axis.set_ylabel(ylabel=f"Observed spread (ticks, {_SPREAD_ROLLING_WINDOW}-cycle rolling mean)")
+    axis.set_title(label="Top-of-book spread over time (Python vs Verilog)")
+    axis.legend()
+    figure.tight_layout()
+    figure.savefig(fname=output_directory / "spread.png", dpi=120)
+    plt.close(fig=figure)
+
+    figure, axis = plt.subplots(figsize=(8, 5))
+    labels = ["Python v1", "Verilog v1", "Python v2", "Verilog v2"]
+    bid_counts = [
+        python_v1.fills_bid, verilog_v1.fills_bid,
+        python_v2.fills_bid, verilog_v2.fills_bid,
+    ]
+    ask_counts = [
+        python_v1.fills_ask, verilog_v1.fills_ask,
+        python_v2.fills_ask, verilog_v2.fills_ask,
+    ]
+    positions = range(len(labels))
+    bar_width = 0.35
+    axis.bar(
+        x=[position - bar_width / 2 for position in positions],
+        height=bid_counts, width=bar_width, label="Bid fills (MM bought)",
+    )
+    axis.bar(
+        x=[position + bar_width / 2 for position in positions],
+        height=ask_counts, width=bar_width, label="Ask fills (MM sold)",
+    )
+    axis.set_xticks(ticks=list(positions))
+    axis.set_xticklabels(labels=labels)
+    axis.set_ylabel(ylabel="Fill count")
+    axis.set_title(label="Fills by side (Python vs Verilog)")
+    axis.legend()
+    figure.tight_layout()
+    figure.savefig(fname=output_directory / "fills_by_side.png", dpi=120)
+    plt.close(fig=figure)
+
+
+_DEFAULT_SEED: int = 42
+
+
+@click.command()
+@click.option("--ticks", type=int, default=10_000, show_default=True,
+              help="Number of simulation cycles.")
+@click.option("--seeds", type=int, default=1, show_default=True,
+              help="Number of seeds to sweep (1 = single-seed with plots).")
+@click.option("--buy-bias", type=float, default=0.5, show_default=True,
+              help="Noise counterparty buy probability (0.5 = symmetric).")
+@click.option("--activity-rate", type=float, default=0.15, show_default=True,
+              help="Per-cycle probability that the noise counterparty fires an order.")
+@click.option("--no-plots", is_flag=True, default=False, help="Skip plot generation.")
+@click.option("-o", "--output-dir", type=click.Path(path_type=Path), default=None,
+              help="Directory to save plots in (defaults to agents/sim/study_artifacts).")
+def main(
+    ticks: int,
+    seeds: int,
+    buy_bias: float,
+    activity_rate: float,
+    no_plots: bool,
+    output_dir: Path | None,
+) -> None:
+    """Compare fixed-spread (v1) vs inventory-skewed (v2) market maker policies.
+
+    Runs the Python golden model against a random noise counterparty for each policy and
+    reports aggregate metrics. With a single seed, also generates four diagnostic plots.
+    With multiple seeds, reports mean and standard deviation across the sweep instead.
+    """
     default_output = Path(__file__).resolve().parent.parent / "sim" / "study_artifacts"
-    output_directory: Path = args.output_dir if args.output_dir is not None else default_output
+    output_directory: Path = output_dir if output_dir is not None else default_output
 
-    if args.seeds <= 1:
+    if seeds <= 1:
         record_v1 = run_single(
             skew_enable=False,
-            ticks=args.ticks,
-            seed=args.seed,
-            buy_bias=args.buy_bias,
-            activity_rate=args.activity_rate,
+            ticks=ticks,
+            seed=_DEFAULT_SEED,
+            buy_bias=buy_bias,
+            activity_rate=activity_rate,
         )
         record_v2 = run_single(
             skew_enable=True,
-            ticks=args.ticks,
-            seed=args.seed,
-            buy_bias=args.buy_bias,
-            activity_rate=args.activity_rate,
+            ticks=ticks,
+            seed=_DEFAULT_SEED,
+            buy_bias=buy_bias,
+            activity_rate=activity_rate,
         )
         print_single_seed_table(record_v1=record_v1, record_v2=record_v2)
-        if not args.no_plots:
+        if not no_plots:
             plot_comparison(
                 record_v1=record_v1, record_v2=record_v2, output_directory=output_directory,
             )
@@ -470,21 +650,21 @@ def main() -> None:
 
     metrics_v1: list[dict[str, float]] = []
     metrics_v2: list[dict[str, float]] = []
-    for offset in range(args.seeds):
-        seed = args.seed + offset
+    for offset in range(seeds):
+        current_seed = _DEFAULT_SEED + offset
         record_v1 = run_single(
             skew_enable=False,
-            ticks=args.ticks,
-            seed=seed,
-            buy_bias=args.buy_bias,
-            activity_rate=args.activity_rate,
+            ticks=ticks,
+            seed=current_seed,
+            buy_bias=buy_bias,
+            activity_rate=activity_rate,
         )
         record_v2 = run_single(
             skew_enable=True,
-            ticks=args.ticks,
-            seed=seed,
-            buy_bias=args.buy_bias,
-            activity_rate=args.activity_rate,
+            ticks=ticks,
+            seed=current_seed,
+            buy_bias=buy_bias,
+            activity_rate=activity_rate,
         )
         metrics_v1.append(summarize(record=record_v1))
         metrics_v2.append(summarize(record=record_v2))
@@ -528,4 +708,3 @@ def _rolling_mean(values: list[float], window: int) -> list[float]:
 
 if __name__ == "__main__":
     main()
-    sys.exit(0)
