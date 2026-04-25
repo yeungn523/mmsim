@@ -37,10 +37,13 @@ module price_level_store_no_cancellation #(
     localparam [1:0] kCommandInsert  = 2'd1;  ///< Adds a quantity to the level at command_price.
     localparam [1:0] kCommandConsume = 2'd2;  ///< Consumes shares from the current best price.
 
-    // Top-level FSM states.
-    localparam [1:0] kStateIdle      = 2'd0;  ///< Waits for a new command.
-    localparam [1:0] kStateReadWait  = 2'd1;  ///< Holds for the M10K read pipeline latency cycle.
-    localparam [1:0] kStateSettle    = 2'd2;  ///< Allows writes to propagate, then pulses response_valid.
+    // Top-level FSM states. Four states are needed because the M10K read has 1 cycle of latency:
+    // the address must be presented one cycle before port_a_rdata reflects it. The Settle state
+    // additionally lets the priority encoder pipeline catch up before the next command latches.
+    localparam [1:0] kStateIdle      = 2'd0;  ///< Waits for a new command and registers the read address.
+    localparam [1:0] kStateReadFetch = 2'd1;  ///< Lets port_a_rdata catch up to the just-set address.
+    localparam [1:0] kStateReadAct   = 2'd2;  ///< Captures port_a_rdata, computes the new value, drives the write.
+    localparam [1:0] kStateSettle    = 2'd3;  ///< Lets the write and priority encoder propagate, then pulses response_valid.
 
     localparam kPriceIndexWidth = $clog2(kPriceRange);  ///< Bit width required to index a price tick.
 
@@ -71,13 +74,27 @@ module price_level_store_no_cancellation #(
     reg  [kQuantityWidth-1:0]   port_a_rdata;
     reg  [kQuantityWidth-1:0]   port_b_rdata;
 
+    wire [kPriceIndexWidth-1:0] best_price_index;
+
+    // Drives the synchronous read-modify-write port and resets the output register so
+    // port_a_rdata starts at zero rather than X before any read has issued.
     always @(posedge clk) begin : level_quantity_port_a
-        if (port_a_we) level_quantity[port_a_addr] <= port_a_wdata;
-        port_a_rdata <= level_quantity[port_a_addr];
+        if (!rst_n) begin
+            port_a_rdata <= {kQuantityWidth{1'b0}};
+        end else begin
+            if (port_a_we) level_quantity[port_a_addr] <= port_a_wdata;
+            port_a_rdata <= level_quantity[port_a_addr];
+        end
     end
 
+    // Drives the synchronous read for the best-price quantity and resets the output register
+    // so best_quantity reads zero before any command has executed.
     always @(posedge clk) begin : level_quantity_port_b
-        port_b_rdata <= level_quantity[best_price_index];
+        if (!rst_n) begin
+            port_b_rdata <= {kQuantityWidth{1'b0}};
+        end else begin
+            port_b_rdata <= level_quantity[best_price_index];
+        end
     end
 
     // Implements a two-stage pipelined priority encoder that resolves best_price_index from the
@@ -150,8 +167,6 @@ module price_level_store_no_cancellation #(
         end
     end
 
-    wire [kPriceIndexWidth-1:0] best_price_index;
-
     generate
         if (kGroupCount > 1) begin : hier_assemble
             assign best_price_index = {winning_group, group_best_index_reg[winning_group]};
@@ -208,31 +223,38 @@ module price_level_store_no_cancellation #(
             case (top_state)
                 kStateIdle: begin
                     if (command_valid && command_ready && command != kCommandNop) begin
-                        working_command <= command;
+                        working_command  <= command;
                         working_quantity <= command_quantity;
 
                         if (command == kCommandInsert) begin
                             target_price_index = command_price[kPriceIndexWidth-1:0];
-                            working_out_of_range <= (command_price >= kPriceRange);
-                            working_price_index  <= target_price_index;
-                            port_a_addr          <= target_price_index;
+                            working_out_of_range    <= (command_price >= kPriceRange);
+                            working_price_index     <= target_price_index;
+                            port_a_addr             <= target_price_index;
                             working_level_was_valid <= level_valid[target_price_index];
                         end else begin
-                            // CONSUME targets the current best price. Skips the read if the book
-                            // is empty; the response is then quantity zero.
-                            working_out_of_range <= 1'b0;
-                            working_price_index  <= best_price_index;
-                            port_a_addr          <= best_price_index;
+                            // CONSUME targets the current best price. Skips the read and write
+                            // when the book is empty; the response is then quantity zero.
+                            working_out_of_range    <= 1'b0;
+                            working_price_index     <= best_price_index;
+                            port_a_addr             <= best_price_index;
                             working_level_was_valid <= (level_count != 0);
                         end
 
                         command_ready <= 1'b0;
-                        top_state     <= kStateReadWait;
+                        top_state     <= kStateReadFetch;
                     end
                 end
 
-                kStateReadWait: begin
-                    // Snapshots the addressed level's old quantity returned on port_a_rdata.
+                kStateReadFetch: begin
+                    // Absorbs the M10K read pipeline latency. By the end of this cycle,
+                    // port_a_rdata reflects level_quantity[port_a_addr] for the just-set address
+                    // rather than the previous command's address.
+                    top_state <= kStateReadAct;
+                end
+
+                kStateReadAct: begin
+                    // Snapshots the addressed level's old quantity that port_a_rdata now holds.
                     old_quantity = port_a_rdata;
 
                     if (working_command == kCommandInsert) begin
@@ -253,7 +275,7 @@ module price_level_store_no_cancellation #(
                             end
                         end
                     end else begin
-                        // CONSUME
+                        // Handles the CONSUME branch.
                         if (!working_level_was_valid) begin
                             new_quantity              = {kQuantityWidth{1'b0}};
                             amount_consumed           = {kQuantityWidth{1'b0}};
@@ -281,9 +303,9 @@ module price_level_store_no_cancellation #(
                 end
 
                 kStateSettle: begin
-                    // Reaches this state after level_valid and level_quantity writes have
-                    // propagated, so the priority encoder reflects the post-command state.
-                    // Emits the response and releases the command interface.
+                    // The write commits this cycle and the priority encoder catches up to the
+                    // updated level_valid mirror, so best_price_index and port_b_rdata reflect
+                    // the post-command state by the time response_valid is observed externally.
                     response_valid    <= 1'b1;
                     response_quantity <= working_response_quantity;
                     command_ready     <= 1'b1;
