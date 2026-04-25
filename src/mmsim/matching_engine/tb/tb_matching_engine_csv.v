@@ -1,52 +1,31 @@
-/**
- * @file
- *
- * @brief Provides a CSV-driven testbench for the matching_engine module.
- *
- * Reads order packets from matching_engine_orders.csv, replays each order against the DUT, and
- * writes trade executions to matching_engine_trades_actual.csv and the post-order book state to
- * matching_engine_book_state_actual.csv. A Python script diffs the actual CSVs against the
- * expected CSVs (produced by the golden model) to verify functional equivalence.
- *
- * Input CSV format (matching_engine_orders.csv):
- *     order_type,order_id,price,quantity
- *
- * Output CSV formats:
- *     matching_engine_trades_actual.csv:
- *         step,aggressor_id,resting_id,trade_price,trade_quantity
- *     matching_engine_book_state_actual.csv:
- *         step,order_type,order_id,order_price,order_quantity,
- *         best_bid_price,best_bid_quantity,best_bid_valid,
- *         best_ask_price,best_ask_quantity,best_ask_valid,
- *         total_trades,total_volume
- */
-
 `timescale 1ns/1ps
+
+// CSV-driven testbench for the matching_engine module. Reads raw 32-bit packet values from
+// matching_engine_packets.csv, replays each against the DUT, and writes two outputs:
+//   matching_engine_actual.csv        -- post-packet book snapshot, one row per packet
+//   matching_engine_trades_actual.csv -- one row per trade pulse, for cross-check with the
+//                                        golden model's trade_expected CSV
 
 module tb_matching_engine_csv;
 
-    localparam kClockPeriod    = 20;
-    localparam kDepth          = 8;
-    localparam kMaxOrders      = 16;
-    localparam kPriceWidth     = 32;
-    localparam kQuantityWidth  = 16;
-    localparam kOrderIdWidth   = 16;
+    localparam kClockPeriod   = 20;
+    localparam kPriceWidth    = 32;
+    localparam kQuantityWidth = 16;
+    localparam kPriceRange    = 480;
 
     reg                        clock;
     reg                        reset_n;
 
-    reg  [2:0]                 order_type;
-    reg  [kOrderIdWidth-1:0]   order_id;
-    reg  [kPriceWidth-1:0]     order_price;
-    reg  [kQuantityWidth-1:0]  order_quantity;
+    reg  [31:0]                order_packet;
     reg                        order_valid;
     wire                       order_ready;
 
-    wire [kOrderIdWidth-1:0]   trade_aggressor_id;
-    wire [kOrderIdWidth-1:0]   trade_resting_id;
     wire [kPriceWidth-1:0]     trade_price;
     wire [kQuantityWidth-1:0]  trade_quantity;
+    wire                       trade_side;
     wire                       trade_valid;
+    wire [kPriceWidth-1:0]     last_trade_price;
+    wire                       last_trade_price_valid;
 
     wire [kPriceWidth-1:0]     best_bid_price;
     wire [kQuantityWidth-1:0]  best_bid_quantity;
@@ -59,25 +38,21 @@ module tb_matching_engine_csv;
     wire [31:0]                total_volume;
 
     matching_engine #(
-        .kDepth         (kDepth),
-        .kMaxOrders     (kMaxOrders),
         .kPriceWidth    (kPriceWidth),
         .kQuantityWidth (kQuantityWidth),
-        .kOrderIdWidth  (kOrderIdWidth)
+        .kPriceRange    (kPriceRange)
     ) dut (
         .clk                (clock),
         .rst_n              (reset_n),
-        .order_type         (order_type),
-        .order_id           (order_id),
-        .order_price        (order_price),
-        .order_quantity     (order_quantity),
+        .order_packet       (order_packet),
         .order_valid        (order_valid),
         .order_ready        (order_ready),
-        .trade_aggressor_id (trade_aggressor_id),
-        .trade_resting_id   (trade_resting_id),
-        .trade_price        (trade_price),
-        .trade_quantity     (trade_quantity),
-        .trade_valid        (trade_valid),
+        .trade_price            (trade_price),
+        .trade_quantity         (trade_quantity),
+        .trade_side             (trade_side),
+        .trade_valid            (trade_valid),
+        .last_trade_price       (last_trade_price),
+        .last_trade_price_valid (last_trade_price_valid),
         .best_bid_price     (best_bid_price),
         .best_bid_quantity  (best_bid_quantity),
         .best_bid_valid     (best_bid_valid),
@@ -97,45 +72,49 @@ module tb_matching_engine_csv;
 
     task tick_n;
         input integer count;
-        integer iteration;
+        integer i;
         begin
-            for (iteration = 0; iteration < count; iteration = iteration + 1) tick;
+            for (i = 0; i < count; i = i + 1) tick;
         end
     endtask
 
-    // Captures trade executions live into the trades CSV as they occur
+    // Per-trade logging. Counts trades within a single packet so the CSV's trade_index matches
+    // the golden model's convention.
     integer trades_file;
     integer current_step;
+    integer trade_index;
+    reg     in_packet;
 
     always @(posedge clock) begin
-        if (trade_valid && reset_n) begin
+        if (reset_n && trade_valid) begin
             $fwrite(trades_file, "%0d,%0d,%0d,%0d,%0d\n",
-                current_step,
-                trade_aggressor_id,
-                trade_resting_id,
-                trade_price,
-                trade_quantity
-            );
+                current_step, trade_index, trade_price, trade_quantity, trade_side);
+            trade_index <= trade_index + 1;
         end
     end
 
-    integer input_file;
-    integer book_state_file;
-    integer read_order_type;
-    integer read_order_id;
-    integer read_price;
-    integer read_quantity;
+    integer packets_file;
+    integer actual_file;
     integer scan_result;
     integer timeout;
-    reg [8*256-1:0] header_line;
+    integer trade_count;
+    integer total_fill_quantity;
+    reg [8*512-1:0] header_line;
+    reg [31:0] read_packet;
 
     initial begin
         $dumpfile("matching_engine_csv_tb.vcd");
         $dumpvars(0, tb_matching_engine_csv);
 
-        input_file = $fopen("matching_engine_orders.csv", "r");
-        if (input_file == 0) begin
-            $display("[ERROR] Cannot open matching_engine_orders.csv -- run the golden model first");
+        packets_file = $fopen("matching_engine_packets.csv", "r");
+        if (packets_file == 0) begin
+            $display("[ERROR] Cannot open matching_engine_packets.csv -- run the golden model first");
+            $finish;
+        end
+
+        actual_file = $fopen("matching_engine_actual.csv", "w");
+        if (actual_file == 0) begin
+            $display("[ERROR] Cannot open matching_engine_actual.csv for writing");
             $finish;
         end
 
@@ -145,81 +124,91 @@ module tb_matching_engine_csv;
             $finish;
         end
 
-        book_state_file = $fopen("matching_engine_book_state_actual.csv", "w");
-        if (book_state_file == 0) begin
-            $display("[ERROR] Cannot open matching_engine_book_state_actual.csv for writing");
-            $finish;
-        end
+        $fwrite(actual_file,
+            "step,packet_hex,side,order_type,agent_type,price,volume,"
+            "trade_count,total_fill_quantity,"
+            "best_bid_price,best_bid_quantity,best_bid_valid,"
+            "best_ask_price,best_ask_quantity,best_ask_valid,"
+            "last_trade_price,last_trade_price_valid,"
+            "total_trades,total_volume\n"
+        );
+        $fwrite(trades_file, "step,trade_index,trade_price,trade_quantity,trade_side\n");
 
-        $fwrite(trades_file,
-            "step,aggressor_id,resting_id,trade_price,trade_quantity\n");
-        $fwrite(book_state_file,
-            "step,order_type,order_id,order_price,order_quantity,best_bid_price,best_bid_quantity,best_bid_valid,best_ask_price,best_ask_quantity,best_ask_valid,total_trades,total_volume\n");
+        // Skip header
+        scan_result = $fgets(header_line, packets_file);
 
-        scan_result = $fgets(header_line, input_file);
-
-        reset_n        <= 1'b0;
-        order_valid    <= 1'b0;
-        order_type     <= 3'd0;
-        order_id       <= 0;
-        order_price    <= 0;
-        order_quantity <= 0;
+        reset_n       <= 1'b0;
+        order_valid   <= 1'b0;
+        order_packet  <= 32'd0;
         current_step   = 0;
+        trade_index    = 0;
+        trade_count    = 0;
+        total_fill_quantity = 0;
         tick_n(4);
         reset_n <= 1'b1;
         tick_n(2);
 
-        while (!$feof(input_file)) begin
-            scan_result = $fscanf(input_file, "%d,%d,%d,%d\n",
-                read_order_type, read_order_id, read_price, read_quantity);
-
-            if (scan_result != 4) begin
-                if (!$feof(input_file))
-                    $display("[WARNING] Skipped malformed line at step %0d (scan_result=%0d)",
-                             current_step, scan_result);
+        while (!$feof(packets_file)) begin
+            scan_result = $fscanf(packets_file, "%h\n", read_packet);
+            if (scan_result != 1) begin
+                if (!$feof(packets_file))
+                    $display("[WARNING] Skipped malformed line at step %0d", current_step);
             end else begin
+                // Resets the per-packet trade counters before driving.
+                trade_index        = 0;
+                trade_count        = 0;
+                total_fill_quantity = 0;
+
+                // Waits for the engine to be ready, then drives the packet.
                 timeout = 0;
-                while (!order_ready && timeout < 5000) begin
+                while (!order_ready && timeout < 2000) begin
                     tick;
                     timeout = timeout + 1;
                 end
-                if (timeout >= 5000) begin
-                    $display("[ERROR] order_ready timeout at step %0d", current_step);
-                    $finish;
-                end
 
-                order_type     <= read_order_type[2:0];
-                order_id       <= read_order_id[kOrderIdWidth-1:0];
-                order_price    <= read_price[kPriceWidth-1:0];
-                order_quantity <= read_quantity[kQuantityWidth-1:0];
-                order_valid    <= 1'b1;
+                order_packet <= read_packet;
+                order_valid  <= 1'b1;
                 tick;
-                order_valid <= 1'b0;
+                order_valid  <= 1'b0;
 
+                // Waits for the engine to complete (order_ready returns high) while capturing
+                // any trade pulses into the trades CSV via the always block above.
                 timeout = 0;
-                while (!order_ready && timeout < 5000) begin
+                while (!order_ready && timeout < 2000) begin
                     tick;
+                    if (trade_valid) begin
+                        trade_count         = trade_count + 1;
+                        total_fill_quantity = total_fill_quantity + trade_quantity;
+                    end
                     timeout = timeout + 1;
                 end
-                if (timeout >= 5000) begin
-                    $display("[ERROR] Completion timeout at step %0d", current_step);
+                if (timeout >= 2000) begin
+                    $display("[ERROR] Packet processing timeout at step %0d", current_step);
                     $finish;
                 end
+
+                // Extra settle tick so book-state outputs reflect the last write.
                 tick;
 
-                // Writes the post-order book state to the book state CSV
-                $fwrite(book_state_file, "%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d\n",
+                $fwrite(actual_file,
+                    "%0d,%08h,%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d\n",
                     current_step,
-                    read_order_type,
-                    read_order_id,
-                    read_price,
-                    read_quantity,
+                    read_packet,
+                    read_packet[31],
+                    read_packet[30],
+                    read_packet[29:28],
+                    read_packet[24:16],
+                    read_packet[15:0],
+                    trade_count,
+                    total_fill_quantity,
                     best_bid_price,
                     best_bid_quantity,
                     best_bid_valid,
                     best_ask_price,
                     best_ask_quantity,
                     best_ask_valid,
+                    last_trade_price,
+                    last_trade_price_valid,
                     total_trades,
                     total_volume
                 );
@@ -228,20 +217,18 @@ module tb_matching_engine_csv;
             end
         end
 
-        $fclose(input_file);
+        $fclose(packets_file);
+        $fclose(actual_file);
         $fclose(trades_file);
-        $fclose(book_state_file);
 
         $display("");
-        $display("CSV replay complete: %0d orders processed", current_step);
-        $display("  Input:  matching_engine_orders.csv");
+        $display("CSV replay complete: %0d packets processed", current_step);
+        $display("  Input:  matching_engine_packets.csv");
+        $display("  Output: matching_engine_actual.csv");
         $display("  Output: matching_engine_trades_actual.csv");
-        $display("  Output: matching_engine_book_state_actual.csv");
-        $display("");
         $finish;
     end
 
-    // Terminates the simulation if the testbench exceeds the expected runtime
     initial begin
         #(kClockPeriod * 500000);
         $display("[ERROR] Watchdog timeout -- simulation hung");

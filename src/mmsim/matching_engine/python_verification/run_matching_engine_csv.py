@@ -1,16 +1,12 @@
-"""Orchestrates the full CSV verification pipeline for the matching_engine module.
-
-Runs three stages in sequence. First, generates the order stimulus CSV and expected trade and
-book-state CSVs from the Python golden model. Second, invokes ModelSim to replay the orders
-against the Verilog DUT, producing the actual trade and book-state CSVs. Third, compares the
-expected and actual CSVs row-by-row and reports the result.
-"""
+"""Orchestrates the full CSV verification pipeline for the matching_engine module."""
 
 from __future__ import annotations
 
 import subprocess
 import sys
 from pathlib import Path
+
+import click
 
 from ...utilities import console
 
@@ -37,8 +33,6 @@ def run_stage(description: str, command: list[str], working_directory: Path) -> 
         text=True,
     )
 
-    # Prints captured stdout raw so that log-level prefixes from the subprocess are preserved
-    # without being re-wrapped in another [INFO] prefix.
     if result.stdout.strip():
         print(result.stdout.rstrip())  # noqa: T201
 
@@ -52,7 +46,9 @@ def run_stage(description: str, command: list[str], working_directory: Path) -> 
     return True
 
 
-if __name__ == "__main__":
+@click.command()
+def main() -> None:
+    """Run the three-stage CSV verification pipeline for the matching engine."""
     matching_engine_directory = Path(__file__).resolve().parent.parent
     simulation_directory = matching_engine_directory / "sim"
     project_root = matching_engine_directory.parent.parent.parent
@@ -69,32 +65,25 @@ if __name__ == "__main__":
         working_directory=project_root,
     )
     if not stage_one_pass:
-        message = "Unable to run the verification pipeline. The golden model CSV generation failed."
-        console.error(message=message, error=RuntimeError)
+        console.error(
+            message="Unable to run the verification pipeline. Golden model generation failed.",
+            error=RuntimeError,
+        )
 
-    orders_csv_path = simulation_directory / "matching_engine_orders.csv"
-    expected_trades_csv_path = simulation_directory / "matching_engine_trades_expected.csv"
-    expected_book_state_csv_path = simulation_directory / "matching_engine_book_state_expected.csv"
-    for expected_path in (orders_csv_path, expected_trades_csv_path, expected_book_state_csv_path):
-        if not expected_path.exists():
-            message = (
-                f"Unable to run the verification pipeline. The golden model did not produce "
-                f"{expected_path.name} in {simulation_directory}."
-            )
-            console.error(message=message, error=FileNotFoundError)
+    packets_csv_path = simulation_directory / "matching_engine_packets.csv"
+    expected_csv_path = simulation_directory / "matching_engine_expected.csv"
+    if not packets_csv_path.exists() or not expected_csv_path.exists():
+        console.error(
+            message=(
+                f"Golden model did not produce matching_engine_packets.csv and "
+                f"matching_engine_expected.csv in {simulation_directory}."
+            ),
+            error=FileNotFoundError,
+        )
 
-    console.log(message=f"  matching_engine_orders.csv: {orders_csv_path.stat().st_size} bytes")
+    console.log(message=f"  matching_engine_packets.csv: {packets_csv_path.stat().st_size} bytes")
     console.log(
-        message=(
-            f"  matching_engine_trades_expected.csv: "
-            f"{expected_trades_csv_path.stat().st_size} bytes"
-        ),
-    )
-    console.log(
-        message=(
-            f"  matching_engine_book_state_expected.csv: "
-            f"{expected_book_state_csv_path.stat().st_size} bytes"
-        ),
+        message=f"  matching_engine_expected.csv: {expected_csv_path.stat().st_size} bytes",
     )
 
     stage_two_pass = run_stage(
@@ -103,31 +92,23 @@ if __name__ == "__main__":
         working_directory=simulation_directory,
     )
     if not stage_two_pass:
-        message = (
-            "Unable to run the verification pipeline. The ModelSim invocation failed. "
-            "Verify that vsim is installed and available on the PATH."
+        console.error(
+            message=(
+                "Unable to run the verification pipeline. ModelSim invocation failed. "
+                "Verify that vsim is installed and available on PATH."
+            ),
+            error=RuntimeError,
         )
-        console.error(message=message, error=RuntimeError)
 
-    actual_trades_csv_path = simulation_directory / "matching_engine_trades_actual.csv"
-    actual_book_state_csv_path = simulation_directory / "matching_engine_book_state_actual.csv"
-    for actual_path in (actual_trades_csv_path, actual_book_state_csv_path):
-        if not actual_path.exists():
-            message = (
-                f"Unable to run the verification pipeline. ModelSim did not produce "
-                f"{actual_path.name} in {simulation_directory}."
-            )
-            console.error(message=message, error=FileNotFoundError)
-
-    console.log(
-        message=f"  matching_engine_trades_actual.csv: {actual_trades_csv_path.stat().st_size} bytes",
-    )
-    console.log(
-        message=(
-            f"  matching_engine_book_state_actual.csv: "
-            f"{actual_book_state_csv_path.stat().st_size} bytes"
-        ),
-    )
+    actual_csv_path = simulation_directory / "matching_engine_actual.csv"
+    if not actual_csv_path.exists():
+        console.error(
+            message=(
+                f"ModelSim did not produce matching_engine_actual.csv in {simulation_directory}."
+            ),
+            error=FileNotFoundError,
+        )
+    console.log(message=f"  matching_engine_actual.csv: {actual_csv_path.stat().st_size} bytes")
 
     stage_three_pass = run_stage(
         description="Compare golden model vs Verilog output",
@@ -143,6 +124,11 @@ if __name__ == "__main__":
     if stage_one_pass and stage_two_pass and stage_three_pass:
         console.success(message="All stages passed. The hardware matches the golden model.")
         sys.exit(0)
-    else:
-        console.error(message="Pipeline failed. One or more stages did not pass.", exit_code=0)
-        sys.exit(1)
+    console.error(
+        message="Pipeline failed. One or more stages did not pass.", exit_code=0,
+    )
+    sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

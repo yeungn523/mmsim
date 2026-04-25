@@ -1,13 +1,15 @@
 # run_matching_engine_csv.tcl
 # ModelSim simulation script for the CSV-driven matching_engine testbench.
 #
-# Reads matching_engine_orders.csv from the sim/ working directory and writes
-# matching_engine_trades_actual.csv and matching_engine_book_state_actual.csv.
-# Expects the golden model to have produced matching_engine_orders.csv first.
+# Reads matching_engine_packets.csv from the sim/ working directory and writes
+# matching_engine_actual.csv plus matching_engine_trades_actual.csv. Expects the
+# golden model to have produced the packets CSV first.
 #
 # Run from ModelSim transcript:
 #   cd <path_to_matching_engine>/sim
 #   do run_matching_engine_csv.tcl
+# Or headless via the orchestrator:
+#   vsim -c -do "do run_matching_engine_csv.tcl; quit -f"
 
 if {[file exists work]} {
     vdel -lib work -all
@@ -15,7 +17,7 @@ if {[file exists work]} {
 
 vlib work
 
-vlog -sv -work work ../rtl/price_level_store.v
+vlog -sv -work work ../rtl/price_level_store_no_cancellation.v
 vlog -sv -work work ../rtl/matching_engine.v
 vlog -sv -work work ../tb/tb_matching_engine_csv.v
 
@@ -28,6 +30,6 @@ run -all
 
 puts ""
 puts "CSV replay complete."
-puts "  Input:  matching_engine_orders.csv"
+puts "  Input:  matching_engine_packets.csv"
+puts "  Output: matching_engine_actual.csv"
 puts "  Output: matching_engine_trades_actual.csv"
-puts "  Output: matching_engine_book_state_actual.csv"

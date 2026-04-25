@@ -1,16 +1,12 @@
-"""Orchestrates the full CSV verification pipeline for the price_level_store module.
-
-Runs three stages in sequence. First, generates lob_commands.csv and lob_expected.csv from the
-Python golden model. Second, invokes ModelSim to replay the commands against the Verilog DUT,
-producing lob_actual.csv. Third, compares the expected and actual CSVs row-by-row and reports
-the result.
-"""
+"""Orchestrates the full CSV verification pipeline for price_level_store_no_cancellation."""
 
 from __future__ import annotations
 
 import subprocess
 import sys
 from pathlib import Path
+
+import click
 
 from ...utilities import console
 
@@ -50,41 +46,55 @@ def run_stage(description: str, command: list[str], working_directory: Path) -> 
     return True
 
 
-if __name__ == "__main__":
+@click.command()
+def main() -> None:
+    """Run the three-stage CSV verification pipeline for the no-cancellation store."""
     matching_engine_directory = Path(__file__).resolve().parent.parent
     simulation_directory = matching_engine_directory / "sim"
     project_root = matching_engine_directory.parent.parent.parent
 
-    console.log(message="Price Level Store CSV Verification Pipeline", prefix=False)
+    console.log(
+        message="Price Level Store (No Cancellation) CSV Verification Pipeline", prefix=False,
+    )
 
     stage_one_pass = run_stage(
         description="Generate golden model CSVs",
         command=[
             sys.executable,
             "-m",
-            "mmsim.matching_engine.python_verification.price_level_store_golden",
+            "mmsim.matching_engine.python_verification.price_level_store_no_cancellation_golden",
         ],
         working_directory=project_root,
     )
     if not stage_one_pass:
-        message = "Unable to run the verification pipeline. The golden model CSV generation failed."
+        message = (
+            "Unable to run the verification pipeline. The golden model CSV generation failed."
+        )
         console.error(message=message, error=RuntimeError)
 
-    commands_csv_path = simulation_directory / "lob_commands.csv"
-    expected_csv_path = simulation_directory / "lob_expected.csv"
+    commands_csv_path = simulation_directory / "lob_no_cancellation_commands.csv"
+    expected_csv_path = simulation_directory / "lob_no_cancellation_expected.csv"
     if not commands_csv_path.exists() or not expected_csv_path.exists():
         message = (
             f"Unable to run the verification pipeline. The golden model did not produce both "
-            f"lob_commands.csv and lob_expected.csv in {simulation_directory}."
+            f"lob_no_cancellation_commands.csv and lob_no_cancellation_expected.csv in "
+            f"{simulation_directory}."
         )
         console.error(message=message, error=FileNotFoundError)
 
-    console.log(message=f"  lob_commands.csv: {commands_csv_path.stat().st_size} bytes")
-    console.log(message=f"  lob_expected.csv: {expected_csv_path.stat().st_size} bytes")
+    console.log(
+        message=f"  lob_no_cancellation_commands.csv: {commands_csv_path.stat().st_size} bytes",
+    )
+    console.log(
+        message=f"  lob_no_cancellation_expected.csv: {expected_csv_path.stat().st_size} bytes",
+    )
 
     stage_two_pass = run_stage(
         description="Run Verilog CSV testbench (ModelSim)",
-        command=["vsim", "-c", "-do", "do run_price_level_store_csv.tcl; quit -f"],
+        command=[
+            "vsim", "-c", "-do",
+            "do run_price_level_store_no_cancellation_csv.tcl; quit -f",
+        ],
         working_directory=simulation_directory,
     )
     if not stage_two_pass:
@@ -94,22 +104,22 @@ if __name__ == "__main__":
         )
         console.error(message=message, error=RuntimeError)
 
-    actual_csv_path = simulation_directory / "lob_actual.csv"
+    actual_csv_path = simulation_directory / "lob_no_cancellation_actual.csv"
     if not actual_csv_path.exists():
         message = (
-            f"Unable to run the verification pipeline. ModelSim did not produce lob_actual.csv "
-            f"in {simulation_directory}."
+            f"Unable to run the verification pipeline. ModelSim did not produce "
+            f"lob_no_cancellation_actual.csv in {simulation_directory}."
         )
         console.error(message=message, error=FileNotFoundError)
 
-    console.log(message=f"  lob_actual.csv: {actual_csv_path.stat().st_size} bytes")
+    console.log(message=f"  lob_no_cancellation_actual.csv: {actual_csv_path.stat().st_size} bytes")
 
     stage_three_pass = run_stage(
         description="Compare golden model vs Verilog output",
         command=[
             sys.executable,
             "-m",
-            "mmsim.matching_engine.python_verification.price_level_store_golden",
+            "mmsim.matching_engine.python_verification.price_level_store_no_cancellation_golden",
             "--verify",
         ],
         working_directory=project_root,
@@ -119,5 +129,11 @@ if __name__ == "__main__":
         console.success(message="All stages passed. The hardware matches the golden model.")
         sys.exit(0)
     else:
-        console.error(message="Pipeline failed. One or more stages did not pass.", exit_code=0)
+        console.error(
+            message="Pipeline failed. One or more stages did not pass.", exit_code=0,
+        )
         sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
