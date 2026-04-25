@@ -69,8 +69,6 @@ class StepRecord:
         best_ask_valid: Determines whether the ask book is nonempty.
         last_trade_price: The most recently executed trade price after processing this packet.
         last_trade_price_valid: Determines whether at least one trade has executed yet.
-        total_trades: The cumulative trade count.
-        total_volume: The cumulative shares traded.
     """
 
     step: int
@@ -105,10 +103,6 @@ class StepRecord:
     """The most recently executed trade price after processing this packet."""
     last_trade_price_valid: bool = False
     """Determines whether at least one trade has executed yet."""
-    total_trades: int = 0
-    """The cumulative trade count."""
-    total_volume: int = 0
-    """The cumulative shares traded."""
 
 
 def encode_packet(side: int, order_type: int, agent_type: int, price: int, volume: int) -> int:
@@ -154,8 +148,7 @@ class MatchingEngine:
 
     Maintains a bid book and an ask book using the aggregate-quantity no-cancellation store.
     Processes incoming order packets by matching against the opposite side; any unmatched limit
-    remainder is inserted into the same-side book. Market orders never insert. Tracks trade
-    executions and cumulative statistics identically to the hardware.
+    remainder is inserted into the same-side book. Market orders never insert.
 
     Args:
         price_range: The number of addressable price ticks, matching kPriceRange in the DUT.
@@ -166,8 +159,6 @@ class MatchingEngine:
         _ask_book: The ask-side price level store.
         _last_trade_price: The most recently executed trade price.
         _last_trade_price_valid: Determines whether at least one trade has executed.
-        _total_trades: The cumulative trade count.
-        _total_volume: The cumulative shares traded.
     """
 
     def __init__(self, price_range: int = _DEFAULT_PRICE_RANGE) -> None:
@@ -180,25 +171,13 @@ class MatchingEngine:
         )
         self._last_trade_price: int = 0
         self._last_trade_price_valid: bool = False
-        self._total_trades: int = 0
-        self._total_volume: int = 0
 
     def __repr__(self) -> str:
         """Returns a string representation of the MatchingEngine instance."""
         return (
-            f"MatchingEngine(total_trades={self._total_trades}, "
-            f"total_volume={self._total_volume})"
+            f"MatchingEngine(last_trade_price={self._last_trade_price}, "
+            f"last_trade_price_valid={self._last_trade_price_valid})"
         )
-
-    @property
-    def total_trades(self) -> int:
-        """Returns the cumulative trade count."""
-        return self._total_trades
-
-    @property
-    def total_volume(self) -> int:
-        """Returns the cumulative shares traded."""
-        return self._total_volume
 
     @property
     def last_trade_price(self) -> int:
@@ -247,8 +226,6 @@ class MatchingEngine:
                 side=0 if is_buy else 1,
             ))
             remaining -= consumed
-            self._total_trades += 1
-            self._total_volume += consumed
             self._last_trade_price = opposite_best
             self._last_trade_price_valid = True
 
@@ -287,8 +264,6 @@ class MatchingEngine:
                 best_ask_valid=self._ask_book.best_valid,
                 last_trade_price=self._last_trade_price,
                 last_trade_price_valid=self._last_trade_price_valid,
-                total_trades=self._total_trades,
-                total_volume=self._total_volume,
             ))
         return records
 
@@ -452,18 +427,30 @@ def generate_stress_sweep(
     seed: int = _DEFAULT_SEED,
     include_edge_cases: bool = False,
     price_range: int = _DEFAULT_PRICE_RANGE,
+    price_distribution: str = "uniform",
+    price_mean: float | None = None,
+    price_stddev: float | None = None,
 ) -> list[int]:
     """Generates a large randomized packet sweep for stress testing.
 
-    Each packet draws a uniform random side, order type, agent type, valid price tick, and
-    volume. Optionally prepends a fixed set of boundary and saturation cases so a single run
-    exercises both random coverage and known edge conditions.
+    Each packet draws a random side, order type, agent type, valid price tick, and volume.
+    Optionally prepends a fixed set of boundary and saturation cases so a single run exercises
+    both random coverage and known edge conditions.
 
     Args:
         packet_count: The number of random packets to emit (in addition to any edge cases).
         seed: The deterministic seed for reproducible random sampling.
         include_edge_cases: When True, prepends generate_edge_case_packets() output.
         price_range: The addressable tick range; random prices are bounded by this.
+        price_distribution: The distribution used to sample price ticks. Must be 'uniform' or
+            'gaussian'. Uniform sampling weights every addressable tick equally and exercises
+            boundaries aggressively. Gaussian sampling clusters prices around price_mean with
+            spread price_stddev and is closer to realistic market microstructure.
+        price_mean: The mean tick used when price_distribution is 'gaussian'. Defaults to the
+            middle of the addressable tick range.
+        price_stddev: The standard deviation in ticks used when price_distribution is
+            'gaussian'. Defaults to price_range / 6, which places ~99.7% of samples inside the
+            addressable range.
 
     Returns:
         A list of packed 32-bit order packets.
@@ -473,12 +460,34 @@ def generate_stress_sweep(
     if include_edge_cases:
         packets.extend(generate_edge_case_packets(price_range=price_range))
 
+    if price_distribution not in {"uniform", "gaussian"}:
+        message = (
+            f"Unable to generate stress sweep with the given price_distribution. The "
+            f"price_distribution must be 'uniform' or 'gaussian', but got "
+            f"{price_distribution!r}."
+        )
+        console.error(message=message, error=ValueError)
+
+    # Centers the Gaussian on the mid-range and sets the standard deviation so that ~99.7% of
+    # samples fall inside the addressable tick range (3 sigma == half-range). Samples in the
+    # tails beyond the range are rejection-sampled.
+    effective_mean = price_mean if price_mean is not None else (price_range - 1) / 2.0
+    effective_stddev = price_stddev if price_stddev is not None else price_range / 6.0
+
+    def sample_price() -> int:
+        if price_distribution == "uniform":
+            return rng.randint(0, price_range - 1)
+        while True:
+            tick = round(rng.gauss(mu=effective_mean, sigma=effective_stddev))
+            if 0 <= tick < price_range:
+                return tick
+
     for _ in range(packet_count):
         packets.append(encode_packet(
             side=rng.randint(0, 1),
             order_type=rng.randint(0, 1),
             agent_type=rng.randint(0, 3),
-            price=rng.randint(0, price_range - 1),
+            price=sample_price(),
             volume=rng.randint(1, 200),
         ))
     return packets
@@ -502,7 +511,6 @@ def write_expected_csv(records: list[StepRecord], file_path: Path) -> None:
         "best_bid_price", "best_bid_quantity", "best_bid_valid",
         "best_ask_price", "best_ask_quantity", "best_ask_valid",
         "last_trade_price", "last_trade_price_valid",
-        "total_trades", "total_volume",
     ]
     with file_path.open(mode="w", newline="") as csv_file:
         writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
@@ -526,8 +534,6 @@ def write_expected_csv(records: list[StepRecord], file_path: Path) -> None:
                 "best_ask_valid": int(record.best_ask_valid),
                 "last_trade_price": record.last_trade_price,
                 "last_trade_price_valid": int(record.last_trade_price_valid),
-                "total_trades": record.total_trades,
-                "total_volume": record.total_volume,
             })
 
 
@@ -567,7 +573,6 @@ def verify_against_verilog(expected_path: Path, actual_path: Path) -> dict[str, 
         "best_bid_price", "best_bid_quantity", "best_bid_valid",
         "best_ask_price", "best_ask_quantity", "best_ask_valid",
         "last_trade_price", "last_trade_price_valid",
-        "total_trades", "total_volume",
     ]
 
     diff_path = actual_path.parent / "matching_engine_diff.csv"
@@ -626,7 +631,22 @@ def verify_against_verilog(expected_path: Path, actual_path: Path) -> dict[str, 
                    "instead of the deterministic regression sweep.")
 @click.option("--edge-cases", is_flag=True, default=False,
               help="In stress mode, prepend a small set of boundary and saturation packets.")
-def main(verify: bool, price_range: int, stress: int, edge_cases: bool) -> None:
+@click.option("--price-distribution", type=click.Choice(["uniform", "gaussian"]),
+              default="uniform", show_default=True,
+              help="In stress mode, the distribution used to sample price ticks.")
+@click.option("--price-mean", type=float, default=None,
+              help="Gaussian mean tick. Defaults to the middle of the addressable tick range.")
+@click.option("--price-stddev", type=float, default=None,
+              help="Gaussian standard deviation in ticks. Defaults to price-range / 6.")
+def main(
+    verify: bool,
+    price_range: int,
+    stress: int,
+    edge_cases: bool,
+    price_distribution: str,
+    price_mean: float | None,
+    price_stddev: float | None,
+) -> None:
     """Generate CSVs or diff existing Verilog output against the golden model."""
     output_directory = Path(__file__).resolve().parent.parent / "sim"
     output_directory.mkdir(exist_ok=True)
@@ -665,7 +685,8 @@ def main(verify: bool, price_range: int, stress: int, edge_cases: bool) -> None:
     if stress > 0:
         console.log(
             message=(
-                f"Generating stress sweep ({stress} back-to-back packets"
+                f"Generating stress sweep ({stress} back-to-back packets, "
+                f"{price_distribution} prices"
                 f"{', with edge cases' if edge_cases else ''})..."
             ),
         )
@@ -674,6 +695,9 @@ def main(verify: bool, price_range: int, stress: int, edge_cases: bool) -> None:
             seed=_DEFAULT_SEED,
             include_edge_cases=edge_cases,
             price_range=price_range,
+            price_distribution=price_distribution,
+            price_mean=price_mean,
+            price_stddev=price_stddev,
         )
     else:
         console.log(message="Generating deterministic packet sweep...")
@@ -683,10 +707,12 @@ def main(verify: bool, price_range: int, stress: int, edge_cases: bool) -> None:
     console.log(message="Running golden model...")
     engine = MatchingEngine(price_range=price_range)
     records = engine.run_sequence(packets=packets)
+    total_trade_count = sum(len(record.trades) for record in records)
+    total_fill_quantity = sum(trade.quantity for record in records for trade in record.trades)
     console.log(
         message=(
             f"  Processed {len(records)} steps, "
-            f"{engine.total_trades} trades, {engine.total_volume} shares"
+            f"{total_trade_count} trades, {total_fill_quantity} shares"
         ),
     )
 
