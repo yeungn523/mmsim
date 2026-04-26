@@ -17,7 +17,7 @@ if {[file exists work]} {
 
 vlib work
 
-vlog -sv -work work ../rtl/price_level_store_no_cancellation.v
+vlog -sv -work work ../rtl/price_level_store.v
 vlog -sv -work work ../tb/tb_price_level_store_no_cancellation_csv.v
 
 if {[catch {vsim -t 1ns -novopt work.tb_price_level_store_no_cancellation_csv} err]} {

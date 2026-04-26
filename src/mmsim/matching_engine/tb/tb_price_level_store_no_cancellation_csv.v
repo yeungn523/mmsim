@@ -1,4 +1,4 @@
-`timescale 1ns/1ps
+`timescale 1ns/1ns
 
 module tb_price_level_store_no_cancellation_csv;
 
@@ -22,7 +22,7 @@ module tb_price_level_store_no_cancellation_csv;
     wire [kQuantityWidth-1:0]  best_quantity;
     wire                       best_valid;
 
-    price_level_store_no_cancellation #(
+    price_level_store #(
         .kPriceWidth    (kPriceWidth),
         .kQuantityWidth (kQuantityWidth),
         .kIsBid         (1),

@@ -2,7 +2,7 @@
 // CLT-12 Gaussian approximation using 12 parallel 32-bit Galois LFSR modules. Output format is
 // Q4.12 signed fixed-point (16-bit).
 
-`timescale 1ns/1ps
+`timescale 1ns/1ns
 
 module clt12_gaussian (
     input  wire        clk,

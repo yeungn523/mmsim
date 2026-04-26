@@ -28,7 +28,7 @@
 //   do run_sim.tcl
 //   Output: sim_output.csv in working directory
 
-`timescale 1ns/1ps
+`timescale 1ns/1ns
 
 module agent_execution_unit_tb;
 

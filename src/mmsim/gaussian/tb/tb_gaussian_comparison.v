@@ -5,7 +5,7 @@
 //   clt12_samples.csv      - sample_index, raw_q115, float_value
 //   ziggurat_samples.csv   - sample_index, raw_q115, float_value
 
-`timescale 1ns/1ps
+`timescale 1ns/1ns
 
 module tb_gaussian_comparison;
 

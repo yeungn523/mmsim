@@ -1,11 +1,11 @@
-`timescale 1ns/1ps
+`timescale 1ns/1ns
 
 ///
-/// @file price_level_store_no_cancellation.v
+/// @file price_level_store.v
 /// @brief Stores aggregate share quantities per price tick for one side of the limit order book.
 ///
 
-module price_level_store_no_cancellation #(
+module price_level_store #(
     parameter kPriceWidth    = 32,    ///< Bit width of the price field (unsigned ticks).
     parameter kQuantityWidth = 16,    ///< Bit width of the quantity field.
     parameter kIsBid         = 1,     ///< Determines whether the instance manages the bid (1) or ask (0) side.

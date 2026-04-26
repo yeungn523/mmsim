@@ -1,4 +1,4 @@
-`timescale 1ns/1ps
+`timescale 1ns/1ns
 
 // Pipelined CSV testbench for the matching_engine. Issues packets back-to-back whenever the
 // engine asserts order_ready, then logs one CSV row per retired packet using order_retire_valid

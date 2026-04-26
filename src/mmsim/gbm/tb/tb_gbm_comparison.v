@@ -3,7 +3,7 @@
 // Drive Euler and Log-Space modules with identical Z-stimulus for verification.
 // =============================================================================
 
-`timescale 1ns/1ps
+`timescale 1ns/1ns
 
 module tb_gbm_comparison;
 

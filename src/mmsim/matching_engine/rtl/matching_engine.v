@@ -1,4 +1,4 @@
-`timescale 1ns/1ps
+`timescale 1ns/1ns
 
 ///
 /// @file matching_engine.v
@@ -59,7 +59,7 @@ module matching_engine #(
     output reg  [kQuantityWidth-1:0]   order_retire_fill_quantity   ///< Total shares filled across this packet.
 );
 
-    // Book command opcodes (must match price_level_store_no_cancellation).
+    // Book command opcodes (must match price_level_store).
     localparam [1:0] kCommandNop     = 2'd0;  ///< Skips the cycle without modifying the book.
     localparam [1:0] kCommandInsert  = 2'd1;  ///< Adds shares to the level at command_price.
     localparam [1:0] kCommandConsume = 2'd2;  ///< Consumes shares from the current best price.
@@ -140,7 +140,7 @@ module matching_engine #(
     reg                         ask_in_flight;
 
     // Instantiates the bid-side and ask-side aggregate-quantity stores.
-    price_level_store_no_cancellation #(
+    price_level_store #(
         .kPriceWidth    (kPriceWidth),
         .kQuantityWidth (kQuantityWidth),
         .kIsBid         (1),
@@ -160,7 +160,7 @@ module matching_engine #(
         .best_valid        (best_bid_valid)
     );
 
-    price_level_store_no_cancellation #(
+    price_level_store #(
         .kPriceWidth    (kPriceWidth),
         .kQuantityWidth (kQuantityWidth),
         .kIsBid         (0),

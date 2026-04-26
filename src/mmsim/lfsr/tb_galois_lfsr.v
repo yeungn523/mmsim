@@ -7,7 +7,7 @@
 //   vlog galois_lfsr.v tb_galois_lfsr.v
 //   vsim -do run_lfsr.tcl
 
-`timescale 1ns/1ps
+`timescale 1ns/1ns
 
 module tb_galois_lfsr;
 

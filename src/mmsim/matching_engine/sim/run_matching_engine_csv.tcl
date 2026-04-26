@@ -17,7 +17,7 @@ if {[file exists work]} {
 
 vlib work
 
-vlog -sv -work work ../rtl/price_level_store_no_cancellation.v
+vlog -sv -work work ../rtl/price_level_store.v
 vlog -sv -work work ../rtl/matching_engine.v
 vlog -sv -work work ../tb/tb_matching_engine_csv.v
 

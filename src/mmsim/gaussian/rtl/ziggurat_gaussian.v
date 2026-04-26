@@ -1,7 +1,7 @@
 // ziggurat_gaussian.v
 // Ziggurat-method Gaussian generator. Output format is Q4.12 signed fixed-point (16-bit).
 
-`timescale 1ns/1ps
+`timescale 1ns/1ns
 
 module ziggurat_gaussian (
     input  wire        clk,
