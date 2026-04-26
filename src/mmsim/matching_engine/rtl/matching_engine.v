@@ -201,8 +201,9 @@ module matching_engine #(
         : (opposite_best_price >= b_working_price);
     wire b_can_match     = opposite_best_valid && (b_working_is_market || b_limit_crosses);
 
-    // Pops the FIFO whenever Stage B is idle and a packet is waiting.
-    wire fifo_pop = (b_state == kBIdle) && (fifo_count != {kFifoCountWidth{1'b0}});
+    // Pops the FIFO when Stage B is idle and the prior packet has fully retired, so kBClassify
+    // sees coherent best_* values that include the prior packet's INSERT.
+    wire fifo_pop = (b_state == kBIdle) && (fifo_count != {kFifoCountWidth{1'b0}}) && !b_to_c_valid;
 
     // Routes Stage B's CONSUMEs and Stage C's INSERTs to the right store, granting Stage C
     // priority on the shared bus because it is draining an older packet.
@@ -314,8 +315,9 @@ module matching_engine #(
 
             case (b_state)
                 kBIdle: begin
-                    // Pops a packet off the FIFO when there is one waiting.
-                    if (fifo_count != {kFifoCountWidth{1'b0}}) begin
+                    // Pops the next packet only when the prior one has fully retired through
+                    // Stage C, serializing B with C so kBClassify reads coherent best_* values.
+                    if (fifo_count != {kFifoCountWidth{1'b0}} && !b_to_c_valid) begin
                         b_working_is_buy       <= ~head_side;
                         b_working_is_market    <= head_type;
                         b_working_price        <= {{(kPriceWidth - 9){1'b0}}, head_price};
