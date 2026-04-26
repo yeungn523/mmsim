@@ -28,23 +28,22 @@ module matching_engine #(
     input  wire                        clk,
     input  wire                        rst_n,
 
-    // Order packet input. order_ready stays high every cycle the FIFO has space, so an upstream
-    // arbiter can submit one packet per clock until a long burst fills the FIFO.
+    // Accepts one order packet per clock while the Accept FIFO has space.
     input  wire [31:0]                 order_packet,
     input  wire                        order_valid,
     output wire                        order_ready,
 
-    // Trade execution output, one pulse per filled level.
+    // Pulses once per filled price level during a sweep.
     output reg  [kPriceWidth-1:0]      trade_price,
     output reg  [kQuantityWidth-1:0]   trade_quantity,
     output reg                         trade_side,           ///< 0 = buy aggressor, 1 = sell aggressor.
     output reg                         trade_valid,
 
-    // Last-trade reference. Holds the most recent fill price across packets.
+    // Holds the most recent fill price across packets.
     output reg  [kPriceWidth-1:0]      last_trade_price,
     output reg                         last_trade_price_valid,
 
-    // Top-of-book state (combinational taps of the two stores).
+    // Exposes top-of-book state via combinational taps from each store.
     output wire [kPriceWidth-1:0]      best_bid_price,
     output wire [kQuantityWidth-1:0]   best_bid_quantity,
     output wire                        best_bid_valid,
@@ -52,9 +51,9 @@ module matching_engine #(
     output wire [kQuantityWidth-1:0]   best_ask_quantity,
     output wire                        best_ask_valid,
 
-    // One-cycle pulse per packet retired through Stage C, with that packet's exact trade
-    // aggregates. Stage B and Stage C run concurrently on adjacent packets, so the TB cannot
-    // deduce per-packet trade counts from the trade bus alone.
+    // Pulses for one cycle per packet retired through Stage C and reports that packet's exact
+    // trade aggregates. Stage B and Stage C run concurrently on adjacent packets, so the TB
+    // cannot derive per-packet trade counts from the trade bus alone.
     output reg                         order_retire_valid,
     output reg  [kQuantityWidth-1:0]   order_retire_trade_count,    ///< Trade pulses emitted for this packet.
     output reg  [kQuantityWidth-1:0]   order_retire_fill_quantity   ///< Total shares filled across this packet.
@@ -79,7 +78,7 @@ module matching_engine #(
     localparam [1:0] kCWait   = 2'd2;  ///< Awaits the insert response.
     localparam [1:0] kCSettle = 2'd3;  ///< Lets best_* propagate, then pulses order_retire_valid.
 
-    // Width helpers for the Accept FIFO pointers and count.
+    // Sizes the Accept FIFO pointers and count register.
     localparam kFifoPtrWidth   = $clog2(kAcceptFifoDepth);
     localparam kFifoCountWidth = $clog2(kAcceptFifoDepth + 1);
 
@@ -89,10 +88,10 @@ module matching_engine #(
     reg [kFifoPtrWidth-1:0]     fifo_tail;
     reg [kFifoCountWidth-1:0]   fifo_count;
 
-    // The head packet is read combinationally so Stage B can pop and decode in one cycle.
+    // Exposes the head packet combinationally so Stage B can pop and decode in one cycle.
     wire [31:0] fifo_head_packet = fifo_buffer[fifo_head];
 
-    // Stage B working state, latched when a packet is popped from the Accept FIFO.
+    // Latches Stage B's working packet on FIFO pop and tracks remaining shares through fills.
     reg [2:0]                   b_state;
     reg                         b_working_is_buy;
     reg                         b_working_is_market;
@@ -100,13 +99,13 @@ module matching_engine #(
     reg [kQuantityWidth-1:0]    b_working_remaining;
     reg [kPriceWidth-1:0]       b_working_trade_price;
 
-    // Per-packet trade aggregates, accumulated across the current packet's match loop and
-    // copied into the B-to-C register at handoff.
+    // Accumulates per-packet trade aggregates across Stage B's match loop and copies them into
+    // the B-to-C register at handoff.
     reg [kQuantityWidth-1:0]    b_packet_trade_count;
     reg [kQuantityWidth-1:0]    b_packet_fill_quantity;
 
-    // B-to-C handoff register. Holds one packet's tail data while Stage C commits or retires
-    // it, decoupling Stage B so it can immediately start the next packet.
+    // Holds one packet's tail data while Stage C commits or retires it, decoupling Stage B so
+    // it can immediately start the next packet.
     reg                         b_to_c_valid;
     reg                         b_to_c_for_insert;       ///< 1 = Stage C must INSERT, 0 = retire only.
     reg [kPriceWidth-1:0]       b_to_c_price;
@@ -115,10 +114,10 @@ module matching_engine #(
     reg [kQuantityWidth-1:0]    b_to_c_trade_count;
     reg [kQuantityWidth-1:0]    b_to_c_fill_quantity;
 
-    // Stage C substate register.
+    // Tracks Stage C's substate.
     reg [1:0]                   c_state;
 
-    // Book store interface signals. Stage B and Stage C both drive these through the bus mux.
+    // Wires Stage B and Stage C to the two book stores through the bus mux below.
     reg  [1:0]                  bid_command;
     reg  [kPriceWidth-1:0]      bid_command_price;
     reg  [kQuantityWidth-1:0]   bid_command_quantity;
@@ -135,13 +134,12 @@ module matching_engine #(
     wire [kQuantityWidth-1:0]   ask_response_quantity;
     wire                        ask_response_valid;
 
-    // Tracks whether a command is in flight on each book so the same store cannot be issued a
-    // duplicate command while still processing the previous one. The flag clears when the store
-    // reasserts command_ready after completing.
+    // Tracks whether a command is in flight on each book so the engine cannot issue a duplicate
+    // before the store completes. Clears when the store reasserts command_ready.
     reg                         bid_in_flight;
     reg                         ask_in_flight;
 
-    // Bid-side and ask-side aggregate-quantity stores.
+    // Instantiates the bid-side and ask-side aggregate-quantity stores.
     price_level_store_no_cancellation #(
         .kPriceWidth    (kPriceWidth),
         .kQuantityWidth (kQuantityWidth),
@@ -182,38 +180,38 @@ module matching_engine #(
         .best_valid        (best_ask_valid)
     );
 
-    // Stage A keeps order_ready high every cycle the Accept FIFO has space, so the upstream
-    // arbiter sees a 1-packet/clock interface as long as the FIFO is not full.
+    // Holds order_ready high every cycle the Accept FIFO has space so the upstream arbiter
+    // sees a 1-packet/clock interface until a long burst fills the FIFO.
     assign order_ready = (fifo_count != kAcceptFifoDepth[kFifoCountWidth-1:0]);
     wire fifo_push     = order_valid && order_ready;
 
-    // Decoded fields from the FIFO head packet.
+    // Decodes the FIFO head packet for Stage B's pop.
     wire        head_side    = fifo_head_packet[31];
     wire        head_type    = fifo_head_packet[30];
     wire [8:0]  head_price   = fifo_head_packet[24:16];
     wire [15:0] head_volume  = fifo_head_packet[15:0];
 
-    // Convenience wires naming the opposite side relative to Stage B's working packet.
+    // Names the opposite-side best relative to Stage B's working packet.
     wire [kPriceWidth-1:0] opposite_best_price = b_working_is_buy ? best_ask_price : best_bid_price;
     wire                   opposite_best_valid = b_working_is_buy ? best_ask_valid : best_bid_valid;
 
-    // Stage B's crossing predicate.
+    // Determines whether Stage B's working limit crosses the opposite-side best.
     wire b_limit_crosses = b_working_is_buy
         ? (opposite_best_price <= b_working_price)
         : (opposite_best_price >= b_working_price);
     wire b_can_match     = opposite_best_valid && (b_working_is_market || b_limit_crosses);
 
-    // Stage B is willing to pop the FIFO whenever it is idle.
+    // Pops the FIFO whenever Stage B is idle and a packet is waiting.
     wire fifo_pop = (b_state == kBIdle) && (fifo_count != {kFifoCountWidth{1'b0}});
 
-    // Bus mux: Stage C has priority over Stage B for the same store because it is draining
-    // an older packet. Each stage signals which store it wants to drive this cycle.
+    // Routes Stage B's CONSUMEs and Stage C's INSERTs to the right store, granting Stage C
+    // priority on the shared bus because it is draining an older packet.
     wire b_targets_bid = (b_state == kBMatchExec) && !b_working_is_buy;
     wire b_targets_ask = (b_state == kBMatchExec) &&  b_working_is_buy;
     wire c_targets_bid = (c_state == kCDrive)     &&  b_to_c_is_buy;
     wire c_targets_ask = (c_state == kCDrive)     && !b_to_c_is_buy;
 
-    // Grant signals. Stage C wins ties because it is draining an older packet.
+    // Grants the bus to Stage C over Stage B on ties.
     wire bid_grant_c = c_targets_bid && bid_command_ready && !bid_in_flight;
     wire bid_grant_b = b_targets_bid && bid_command_ready && !bid_in_flight && !c_targets_bid;
     wire ask_grant_c = c_targets_ask && ask_command_ready && !ask_in_flight;
@@ -253,7 +251,7 @@ module matching_engine #(
         end
     end
 
-    // Updates the Accept FIFO storage on push, pop, or both.
+    // Updates the Accept FIFO pointers and count on push, pop, or both.
     always @(posedge clk) begin
         if (!rst_n) begin
             fifo_head  <= {kFifoPtrWidth{1'b0}};
@@ -279,8 +277,8 @@ module matching_engine #(
         end
     end
 
-    // Drives Stage B's substate machine and the trade bus. Stage B is the sole writer of the
-    // trade-related outputs.
+    // Drives Stage B's substate machine and the trade bus. Stage B is the sole writer of every
+    // trade-related output.
     always @(posedge clk) begin
         if (!rst_n) begin
             b_state               <= kBIdle;
@@ -303,14 +301,14 @@ module matching_engine #(
             bid_in_flight <= 1'b0;
             ask_in_flight <= 1'b0;
         end else begin
-            // Default deassertions; states reassert as needed.
+            // Deasserts trade_valid by default; case branches reassert when a fill emits.
             trade_valid <= 1'b0;
 
             // Clears the in-flight flags on store completion.
             if (bid_in_flight && bid_command_ready) bid_in_flight <= 1'b0;
             if (ask_in_flight && ask_command_ready) ask_in_flight <= 1'b0;
 
-            // Sets the in-flight flag when this cycle's mux issues a command on either store.
+            // Sets the in-flight flag when the mux issues a command on either store this cycle.
             if (bid_grant_c || bid_grant_b) bid_in_flight <= 1'b1;
             if (ask_grant_c || ask_grant_b) ask_in_flight <= 1'b1;
 
@@ -329,8 +327,8 @@ module matching_engine #(
                 end
 
                 kBClassify: begin
-                    // Routes market and crossing-limit packets into the match loop. Non-crossing
-                    // limits skip the loop and head straight to handoff with insert flagged.
+                    // Sends market and crossing-limit packets into the match loop; non-crossing
+                    // limits go straight to handoff for insert.
                     if (b_working_is_market) begin
                         b_state <= kBMatchCheck;
                     end else if (opposite_best_valid && b_limit_crosses) begin
@@ -341,8 +339,8 @@ module matching_engine #(
                 end
 
                 kBMatchCheck: begin
-                    // Drops out of the loop when filled, when the opposite side is empty, or
-                    // when the next-best opposite price no longer crosses (limits only).
+                    // Exits the loop when filled, when the opposite side is empty, or when the
+                    // next-best opposite price no longer crosses (limits only).
                     if (b_working_remaining == {kQuantityWidth{1'b0}}) begin
                         b_state <= kBHandoff;
                     end else if (!b_can_match) begin
@@ -353,9 +351,8 @@ module matching_engine #(
                 end
 
                 kBMatchExec: begin
-                    // Captures the opposite-side best price for this fill and waits for the bus
-                    // mux to grant the consume command. Stays in this state when the grant is
-                    // denied (Stage C is using the same store) or the store is busy.
+                    // Latches the opposite-side best price for this fill and waits for the bus
+                    // mux grant. Stalls here when Stage C holds the same store or it is busy.
                     b_working_trade_price <= opposite_best_price;
                     if ((b_working_is_buy ? ask_grant_b : bid_grant_b)) begin
                         b_state <= kBMatchWait;
@@ -393,9 +390,9 @@ module matching_engine #(
                 end
 
                 kBHandoff: begin
-                    // Waits for the B-to-C register to be free, then writes the leftover (if
-                    // any) and returns to idle. The register also signals retirement for fully
-                    // consumed packets via b_to_c_for_insert = 0.
+                    // Waits for the B-to-C register to drain, then returns to idle. The B-to-C
+                    // block writes the register on the same cycle and flags fully consumed
+                    // packets via b_to_c_for_insert = 0.
                     if (!b_to_c_valid) begin
                         b_state <= kBIdle;
                     end
@@ -408,8 +405,8 @@ module matching_engine #(
         end
     end
 
-    // Manages the B-to-C handoff register. Stage B writes on hand-off; Stage C clears on
-    // retire. Keeping the writes in one block prevents a race between the two stages.
+    // Manages the B-to-C handoff register. Stage B writes on handoff; Stage C clears on retire.
+    // Co-locating both writes in one block prevents a race between the two stages.
     always @(posedge clk) begin
         if (!rst_n) begin
             b_to_c_valid         <= 1'b0;
@@ -420,14 +417,15 @@ module matching_engine #(
             b_to_c_trade_count   <= {kQuantityWidth{1'b0}};
             b_to_c_fill_quantity <= {kQuantityWidth{1'b0}};
         end else begin
-            // Stage C clears the register when it retires the previous packet.
+            // Clears the register on the retire-only path the cycle Stage C enters kCSettle.
             if ((c_state == kCIdle) && b_to_c_valid && !b_to_c_for_insert) begin
                 b_to_c_valid <= 1'b0;
             end
+            // Clears the register on the insert path the cycle Stage C observes response_valid.
             if ((c_state == kCWait) && (b_to_c_is_buy ? bid_response_valid : ask_response_valid)) begin
                 b_to_c_valid <= 1'b0;
             end
-            // Stage B writes the register on the cycle it transitions out of kBHandoff.
+            // Writes Stage B's working packet into the register on the cycle it leaves kBHandoff.
             if ((b_state == kBHandoff) && !b_to_c_valid) begin
                 b_to_c_valid         <= 1'b1;
                 b_to_c_for_insert    <= !b_working_is_market &&
@@ -441,8 +439,8 @@ module matching_engine #(
         end
     end
 
-    // Drives Stage C's substate machine and the order_retire_valid pulse so the TB can log one
-    // CSV row per retired packet.
+    // Drives Stage C's substate machine and the order_retire_valid pulse, exporting one clean
+    // snapshot point per retired packet for the TB to log against.
     always @(posedge clk) begin
         if (!rst_n) begin
             c_state                    <= kCIdle;
