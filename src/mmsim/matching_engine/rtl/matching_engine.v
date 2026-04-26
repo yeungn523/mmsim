@@ -2,107 +2,144 @@
 
 ///
 /// @file matching_engine.v
-/// @brief Matches agent order packets against a two-sided limit order book backed by two
-///        price_level_store_no_cancellation instances.
+/// @brief Three-stage pipelined matching engine over two no-cancellation price level stores.
+///
+/// Stage A accepts one order packet per clock into the Accept FIFO when space is available.
+/// Stage B runs the match loop on the head-of-FIFO packet, driving CONSUME commands into the
+/// opposite-side book and emitting trade pulses on every fill. Stage C commits any unmatched
+/// limit remainder via a single INSERT to the same-side book. The B-to-C handoff register lets
+/// Stage B start the next packet while Stage C is still committing the previous one.
 ///
 /// Order packet layout (must match agent_execution_unit.v):
 ///   bit  [31]       side        (0 = buy, 1 = sell)
 ///   bit  [30]       order_type  (0 = limit, 1 = market)
-///   bits [29:28]    agent_type  (unused by the engine, carried through for observability)
+///   bits [29:28]    agent_type  (unused by the engine)
 ///   bits [27:25]    reserved
 ///   bits [24:16]    price       (9-bit tick index, 0..kPriceRange-1)
 ///   bits [15:0]     volume      (16-bit unsigned share count)
 ///
 
 module matching_engine #(
-    parameter kPriceWidth    = 32,    ///< Bit width of the internal price field.
-    parameter kQuantityWidth = 16,    ///< Bit width of the quantity field.
-    parameter kPriceRange    = 480    ///< Number of addressable price ticks.
+    parameter kPriceWidth      = 32,    ///< Bit width of the internal price field.
+    parameter kQuantityWidth   = 16,    ///< Bit width of the quantity field.
+    parameter kPriceRange      = 480,   ///< Number of addressable price ticks.
+    parameter kAcceptFifoDepth = 32     ///< Depth of the Accept FIFO between Stage A and Stage B.
 )(
     input  wire                        clk,
     input  wire                        rst_n,
 
-    // Order packet input (valid/ready handshake).
-    input  wire [31:0]                 order_packet,         ///< Packed agent order packet.
-    input  wire                        order_valid,          ///< Asserts when order_packet is fresh.
-    output reg                         order_ready,          ///< Asserts when the engine can accept a packet.
+    // Accepts one order packet per clock while the Accept FIFO has space.
+    input  wire [31:0]                 order_packet,
+    input  wire                        order_valid,
+    output wire                        order_ready,
 
-    // Trade execution output. One pulse per level consumed.
-    output reg  [kPriceWidth-1:0]      trade_price,          ///< Execution price of this trade.
-    output reg  [kQuantityWidth-1:0]   trade_quantity,       ///< Share count filled in this trade.
-    output reg                         trade_side,           ///< Indicates the aggressor side: 0 = buy, 1 = sell.
-    output reg                         trade_valid,          ///< Pulses high for one cycle per fill.
+    // Pulses once per filled price level during a sweep.
+    output reg  [kPriceWidth-1:0]      trade_price,
+    output reg  [kQuantityWidth-1:0]   trade_quantity,
+    output reg                         trade_side,           ///< 0 = buy aggressor, 1 = sell aggressor.
+    output reg                         trade_valid,
 
-    // Last-trade reference. Holds the most recently executed trade price between pulses so
-    // downstream agents (momentum, value) can read it without latching the trade bus themselves.
-    output reg  [kPriceWidth-1:0]      last_trade_price,     ///< Most recent executed trade price.
-    output reg                         last_trade_price_valid, ///< Asserts after the first trade executes.
+    // Holds the most recent fill price across packets.
+    output reg  [kPriceWidth-1:0]      last_trade_price,
+    output reg                         last_trade_price_valid,
 
-    // Top-of-book state (combinational taps of the two book stores).
-    output wire [kPriceWidth-1:0]      best_bid_price,        ///< Best resting bid price.
-    output wire [kQuantityWidth-1:0]   best_bid_quantity,     ///< Aggregate share count at the best bid.
-    output wire                        best_bid_valid,        ///< Asserts when at least one bid level holds shares.
-    output wire [kPriceWidth-1:0]      best_ask_price,        ///< Best resting ask price.
-    output wire [kQuantityWidth-1:0]   best_ask_quantity,     ///< Aggregate share count at the best ask.
-    output wire                        best_ask_valid,        ///< Asserts when at least one ask level holds shares.
+    // Exposes top-of-book state via combinational taps from each store.
+    output wire [kPriceWidth-1:0]      best_bid_price,
+    output wire [kQuantityWidth-1:0]   best_bid_quantity,
+    output wire                        best_bid_valid,
+    output wire [kPriceWidth-1:0]      best_ask_price,
+    output wire [kQuantityWidth-1:0]   best_ask_quantity,
+    output wire                        best_ask_valid,
 
-    // Cumulative counters for observability.
-    output reg  [31:0]                 total_trades,          ///< Cumulative count of executed trades since reset.
-    output reg  [31:0]                 total_volume           ///< Cumulative shares filled across all trades since reset.
+    // Pulses for one cycle per packet retired through Stage C and reports that packet's exact
+    // trade aggregates. Stage B and Stage C run concurrently on adjacent packets, so the TB
+    // cannot derive per-packet trade counts from the trade bus alone.
+    output reg                         order_retire_valid,
+    output reg  [kQuantityWidth-1:0]   order_retire_trade_count,    ///< Trade pulses emitted for this packet.
+    output reg  [kQuantityWidth-1:0]   order_retire_fill_quantity   ///< Total shares filled across this packet.
 );
-
-    // Packet field decode.
-    wire                       packet_side       = order_packet[31];
-    wire                       packet_type       = order_packet[30];
-    wire [kPriceWidth-1:0]     packet_price      = {{(kPriceWidth - 9){1'b0}}, order_packet[24:16]};
-    wire [kQuantityWidth-1:0]  packet_volume     = order_packet[15:0];
 
     // Book command opcodes (must match price_level_store_no_cancellation).
     localparam [1:0] kCommandNop     = 2'd0;  ///< Skips the cycle without modifying the book.
-    localparam [1:0] kCommandInsert  = 2'd1;  ///< Inserts a quantity at the supplied price.
+    localparam [1:0] kCommandInsert  = 2'd1;  ///< Adds shares to the level at command_price.
     localparam [1:0] kCommandConsume = 2'd2;  ///< Consumes shares from the current best price.
 
-    // Top-level FSM states.
-    localparam [3:0] kStateIdle       = 4'd0;  ///< Waits for an incoming packet.
-    localparam [3:0] kStateClassify   = 4'd1;  ///< Routes the next action based on the decoded packet.
-    localparam [3:0] kStateMatchCheck = 4'd2;  ///< Inspects the opposite book for a crossable level.
-    localparam [3:0] kStateMatchExec  = 4'd3;  ///< Issues a CONSUME on the opposite book.
-    localparam [3:0] kStateMatchWait  = 4'd4;  ///< Awaits the consume response and emits a trade pulse.
-    localparam [3:0] kStateInsert     = 4'd5;  ///< Issues an INSERT on the same-side book for limit remainder.
-    localparam [3:0] kStateInsertWait = 4'd6;  ///< Awaits the insert response.
+    // Stage B substate encoding.
+    localparam [2:0] kBIdle       = 3'd0;  ///< Pops the next packet off the Accept FIFO.
+    localparam [2:0] kBClassify   = 3'd1;  ///< Routes the packet into match or handoff.
+    localparam [2:0] kBMatchCheck = 3'd2;  ///< Inspects the opposite side for a crossable level.
+    localparam [2:0] kBMatchExec  = 3'd3;  ///< Issues a CONSUME on the opposite store.
+    localparam [2:0] kBMatchWait  = 3'd4;  ///< Awaits the consume response and emits a trade pulse.
+    localparam [2:0] kBHandoff    = 3'd5;  ///< Writes the B-to-C register and returns to idle.
 
-    reg [3:0] state;  ///< Holds the current top-level FSM state.
+    // Stage C substate encoding.
+    localparam [1:0] kCIdle   = 2'd0;  ///< Waits for a B-to-C register write.
+    localparam [1:0] kCDrive  = 2'd1;  ///< Issues an INSERT on the same-side store.
+    localparam [1:0] kCWait   = 2'd2;  ///< Awaits the insert response.
+    localparam [1:0] kCSettle = 2'd3;  ///< Lets best_* propagate, then pulses order_retire_valid.
 
-    // Latched packet fields for multi-cycle processing.
-    reg                       working_is_buy;
-    reg                       working_is_market;
-    reg [kPriceWidth-1:0]     working_price;
-    reg [kQuantityWidth-1:0]  working_remaining;
-    reg [kPriceWidth-1:0]     working_trade_price;
+    // Sizes the Accept FIFO pointers and count register.
+    localparam kFifoPtrWidth   = $clog2(kAcceptFifoDepth);
+    localparam kFifoCountWidth = $clog2(kAcceptFifoDepth + 1);
 
-    // Bid book interface
-    reg  [1:0]                bid_command;
-    reg  [kPriceWidth-1:0]    bid_command_price;
-    reg  [kQuantityWidth-1:0] bid_command_quantity;
-    reg                       bid_command_valid;
-    wire                      bid_command_ready;
-    wire [kQuantityWidth-1:0] bid_response_quantity;
-    wire                      bid_response_valid;
+    // Stores raw 32-bit packets in distributed RAM; Stage B decodes on pop.
+    reg [31:0]                  fifo_buffer [0:kAcceptFifoDepth-1];
+    reg [kFifoPtrWidth-1:0]     fifo_head;
+    reg [kFifoPtrWidth-1:0]     fifo_tail;
+    reg [kFifoCountWidth-1:0]   fifo_count;
 
-    // Ask book interface
-    reg  [1:0]                ask_command;
-    reg  [kPriceWidth-1:0]    ask_command_price;
-    reg  [kQuantityWidth-1:0] ask_command_quantity;
-    reg                       ask_command_valid;
-    wire                      ask_command_ready;
-    wire [kQuantityWidth-1:0] ask_response_quantity;
-    wire                      ask_response_valid;
+    // Exposes the head packet combinationally so Stage B can pop and decode in one cycle.
+    wire [31:0] fifo_head_packet = fifo_buffer[fifo_head];
 
-    // Tracks whether a command is in flight so a duplicate submission never fires while the
-    // store's FSM is still occupied processing the previous one.
-    reg                       bid_in_flight;
-    reg                       ask_in_flight;
+    // Latches Stage B's working packet on FIFO pop and tracks remaining shares through fills.
+    reg [2:0]                   b_state;
+    reg                         b_working_is_buy;
+    reg                         b_working_is_market;
+    reg [kPriceWidth-1:0]       b_working_price;
+    reg [kQuantityWidth-1:0]    b_working_remaining;
+    reg [kPriceWidth-1:0]       b_working_trade_price;
 
+    // Accumulates per-packet trade aggregates across Stage B's match loop and copies them into
+    // the B-to-C register at handoff.
+    reg [kQuantityWidth-1:0]    b_packet_trade_count;
+    reg [kQuantityWidth-1:0]    b_packet_fill_quantity;
+
+    // Holds one packet's tail data while Stage C commits or retires it, decoupling Stage B so
+    // it can immediately start the next packet.
+    reg                         b_to_c_valid;
+    reg                         b_to_c_for_insert;       ///< 1 = Stage C must INSERT, 0 = retire only.
+    reg [kPriceWidth-1:0]       b_to_c_price;
+    reg [kQuantityWidth-1:0]    b_to_c_remaining;
+    reg                         b_to_c_is_buy;
+    reg [kQuantityWidth-1:0]    b_to_c_trade_count;
+    reg [kQuantityWidth-1:0]    b_to_c_fill_quantity;
+
+    // Tracks Stage C's substate.
+    reg [1:0]                   c_state;
+
+    // Wires Stage B and Stage C to the two book stores through the bus mux below.
+    reg  [1:0]                  bid_command;
+    reg  [kPriceWidth-1:0]      bid_command_price;
+    reg  [kQuantityWidth-1:0]   bid_command_quantity;
+    reg                         bid_command_valid;
+    wire                        bid_command_ready;
+    wire [kQuantityWidth-1:0]   bid_response_quantity;
+    wire                        bid_response_valid;
+
+    reg  [1:0]                  ask_command;
+    reg  [kPriceWidth-1:0]      ask_command_price;
+    reg  [kQuantityWidth-1:0]   ask_command_quantity;
+    reg                         ask_command_valid;
+    wire                        ask_command_ready;
+    wire [kQuantityWidth-1:0]   ask_response_quantity;
+    wire                        ask_response_valid;
+
+    // Tracks whether a command is in flight on each book so the engine cannot issue a duplicate
+    // before the store completes. Clears when the store reasserts command_ready.
+    reg                         bid_in_flight;
+    reg                         ask_in_flight;
+
+    // Instantiates the bid-side and ask-side aggregate-quantity stores.
     price_level_store_no_cancellation #(
         .kPriceWidth    (kPriceWidth),
         .kQuantityWidth (kQuantityWidth),
@@ -143,195 +180,307 @@ module matching_engine #(
         .best_valid        (best_ask_valid)
     );
 
-    // Convenience wires naming the opposite side relative to the incoming order direction.
-    wire [kPriceWidth-1:0] opposite_best_price = working_is_buy ? best_ask_price : best_bid_price;
-    wire                   opposite_best_valid = working_is_buy ? best_ask_valid : best_bid_valid;
+    // Holds order_ready high every cycle the Accept FIFO has space so the upstream arbiter
+    // sees a 1-packet/clock interface until a long burst fills the FIFO.
+    assign order_ready = (fifo_count != kAcceptFifoDepth[kFifoCountWidth-1:0]);
+    wire fifo_push     = order_valid && order_ready;
 
-    // A limit buy crosses when the lowest ask is at or below the buyer's price. A limit sell
-    // crosses when the highest bid is at or above the seller's price. Market orders always cross
-    // whenever the opposite side holds any resting shares.
-    wire limit_crosses = working_is_buy
-        ? (opposite_best_price <= working_price)
-        : (opposite_best_price >= working_price);
-    wire can_match     = opposite_best_valid && (working_is_market || limit_crosses);
+    // Decodes the FIFO head packet for Stage B's pop.
+    wire        head_side    = fifo_head_packet[31];
+    wire        head_type    = fifo_head_packet[30];
+    wire [8:0]  head_price   = fifo_head_packet[24:16];
+    wire [15:0] head_volume  = fifo_head_packet[15:0];
 
+    // Names the opposite-side best relative to Stage B's working packet.
+    wire [kPriceWidth-1:0] opposite_best_price = b_working_is_buy ? best_ask_price : best_bid_price;
+    wire                   opposite_best_valid = b_working_is_buy ? best_ask_valid : best_bid_valid;
+
+    // Determines whether Stage B's working limit crosses the opposite-side best.
+    wire b_limit_crosses = b_working_is_buy
+        ? (opposite_best_price <= b_working_price)
+        : (opposite_best_price >= b_working_price);
+    wire b_can_match     = opposite_best_valid && (b_working_is_market || b_limit_crosses);
+
+    // Pops the FIFO when Stage B is idle and the prior packet has fully retired, so kBClassify
+    // sees coherent best_* values that include the prior packet's INSERT.
+    wire fifo_pop = (b_state == kBIdle) && (fifo_count != {kFifoCountWidth{1'b0}}) && !b_to_c_valid;
+
+    // Routes Stage B's CONSUMEs and Stage C's INSERTs to the right store, granting Stage C
+    // priority on the shared bus because it is draining an older packet.
+    wire b_targets_bid = (b_state == kBMatchExec) && !b_working_is_buy;
+    wire b_targets_ask = (b_state == kBMatchExec) &&  b_working_is_buy;
+    wire c_targets_bid = (c_state == kCDrive)     &&  b_to_c_is_buy;
+    wire c_targets_ask = (c_state == kCDrive)     && !b_to_c_is_buy;
+
+    // Grants the bus to Stage C over Stage B on ties.
+    wire bid_grant_c = c_targets_bid && bid_command_ready && !bid_in_flight;
+    wire bid_grant_b = b_targets_bid && bid_command_ready && !bid_in_flight && !c_targets_bid;
+    wire ask_grant_c = c_targets_ask && ask_command_ready && !ask_in_flight;
+    wire ask_grant_b = b_targets_ask && ask_command_ready && !ask_in_flight && !c_targets_ask;
+
+    always @(*) begin
+        bid_command          = kCommandNop;
+        bid_command_price    = {kPriceWidth{1'b0}};
+        bid_command_quantity = {kQuantityWidth{1'b0}};
+        bid_command_valid    = 1'b0;
+        if (bid_grant_c) begin
+            bid_command          = kCommandInsert;
+            bid_command_price    = b_to_c_price;
+            bid_command_quantity = b_to_c_remaining;
+            bid_command_valid    = 1'b1;
+        end else if (bid_grant_b) begin
+            bid_command          = kCommandConsume;
+            bid_command_price    = {kPriceWidth{1'b0}};
+            bid_command_quantity = b_working_remaining;
+            bid_command_valid    = 1'b1;
+        end
+
+        ask_command          = kCommandNop;
+        ask_command_price    = {kPriceWidth{1'b0}};
+        ask_command_quantity = {kQuantityWidth{1'b0}};
+        ask_command_valid    = 1'b0;
+        if (ask_grant_c) begin
+            ask_command          = kCommandInsert;
+            ask_command_price    = b_to_c_price;
+            ask_command_quantity = b_to_c_remaining;
+            ask_command_valid    = 1'b1;
+        end else if (ask_grant_b) begin
+            ask_command          = kCommandConsume;
+            ask_command_price    = {kPriceWidth{1'b0}};
+            ask_command_quantity = b_working_remaining;
+            ask_command_valid    = 1'b1;
+        end
+    end
+
+    // Updates the Accept FIFO pointers and count on push, pop, or both.
     always @(posedge clk) begin
         if (!rst_n) begin
-            state                  <= kStateIdle;
-            order_ready            <= 1'b1;
+            fifo_head  <= {kFifoPtrWidth{1'b0}};
+            fifo_tail  <= {kFifoPtrWidth{1'b0}};
+            fifo_count <= {kFifoCountWidth{1'b0}};
+        end else begin
+            if (fifo_push) begin
+                fifo_buffer[fifo_tail] <= order_packet;
+                fifo_tail <= (fifo_tail == kAcceptFifoDepth[kFifoPtrWidth-1:0] - 1)
+                              ? {kFifoPtrWidth{1'b0}}
+                              : fifo_tail + 1'b1;
+            end
+            if (fifo_pop) begin
+                fifo_head <= (fifo_head == kAcceptFifoDepth[kFifoPtrWidth-1:0] - 1)
+                              ? {kFifoPtrWidth{1'b0}}
+                              : fifo_head + 1'b1;
+            end
+            case ({fifo_push, fifo_pop})
+                2'b10:   fifo_count <= fifo_count + 1'b1;
+                2'b01:   fifo_count <= fifo_count - 1'b1;
+                default: fifo_count <= fifo_count;
+            endcase
+        end
+    end
+
+    // Drives Stage B's substate machine and the trade bus. Stage B is the sole writer of every
+    // trade-related output.
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            b_state               <= kBIdle;
+            b_working_is_buy      <= 1'b0;
+            b_working_is_market   <= 1'b0;
+            b_working_price       <= {kPriceWidth{1'b0}};
+            b_working_remaining   <= {kQuantityWidth{1'b0}};
+            b_working_trade_price <= {kPriceWidth{1'b0}};
+
+            b_packet_trade_count   <= {kQuantityWidth{1'b0}};
+            b_packet_fill_quantity <= {kQuantityWidth{1'b0}};
+
             trade_valid            <= 1'b0;
             trade_price            <= {kPriceWidth{1'b0}};
             trade_quantity         <= {kQuantityWidth{1'b0}};
             trade_side             <= 1'b0;
             last_trade_price       <= {kPriceWidth{1'b0}};
             last_trade_price_valid <= 1'b0;
-            total_trades           <= 32'd0;
-            total_volume           <= 32'd0;
 
-            bid_command           <= kCommandNop;
-            bid_command_price     <= {kPriceWidth{1'b0}};
-            bid_command_quantity  <= {kQuantityWidth{1'b0}};
-            bid_command_valid     <= 1'b0;
-            bid_in_flight         <= 1'b0;
-
-            ask_command           <= kCommandNop;
-            ask_command_price     <= {kPriceWidth{1'b0}};
-            ask_command_quantity  <= {kQuantityWidth{1'b0}};
-            ask_command_valid     <= 1'b0;
-            ask_in_flight         <= 1'b0;
-
-            working_is_buy        <= 1'b0;
-            working_is_market     <= 1'b0;
-            working_price         <= {kPriceWidth{1'b0}};
-            working_remaining     <= {kQuantityWidth{1'b0}};
-            working_trade_price   <= {kPriceWidth{1'b0}};
-
+            bid_in_flight <= 1'b0;
+            ask_in_flight <= 1'b0;
         end else begin
-            // Deasserts the single-cycle pulses by default; individual states reassert as needed.
-            trade_valid       <= 1'b0;
-            bid_command_valid <= 1'b0;
-            ask_command_valid <= 1'b0;
+            // Deasserts trade_valid by default; case branches reassert when a fill emits.
+            trade_valid <= 1'b0;
 
-            // Clears the in-flight flag when the book reasserts command_ready after completing.
+            // Clears the in-flight flags on store completion.
             if (bid_in_flight && bid_command_ready) bid_in_flight <= 1'b0;
             if (ask_in_flight && ask_command_ready) ask_in_flight <= 1'b0;
 
-            case (state)
-                kStateIdle: begin
-                    if (order_valid && order_ready) begin
-                        working_is_buy    <= ~packet_side;   // packet_side 0 = buy, 1 = sell
-                        working_is_market <= packet_type;    // packet_type 0 = limit, 1 = market
-                        working_price     <= packet_price;
-                        working_remaining <= packet_volume;
-                        order_ready       <= 1'b0;
-                        state             <= kStateClassify;
+            // Sets the in-flight flag when the mux issues a command on either store this cycle.
+            if (bid_grant_c || bid_grant_b) bid_in_flight <= 1'b1;
+            if (ask_grant_c || ask_grant_b) ask_in_flight <= 1'b1;
+
+            case (b_state)
+                kBIdle: begin
+                    // Pops the next packet only when the prior one has fully retired through
+                    // Stage C, serializing B with C so kBClassify reads coherent best_* values.
+                    if (fifo_count != {kFifoCountWidth{1'b0}} && !b_to_c_valid) begin
+                        b_working_is_buy       <= ~head_side;
+                        b_working_is_market    <= head_type;
+                        b_working_price        <= {{(kPriceWidth - 9){1'b0}}, head_price};
+                        b_working_remaining    <= head_volume;
+                        b_packet_trade_count   <= {kQuantityWidth{1'b0}};
+                        b_packet_fill_quantity <= {kQuantityWidth{1'b0}};
+                        b_state                <= kBClassify;
                     end
                 end
 
-                kStateClassify: begin
-                    // Market orders always head for MatchCheck. Limit orders only try to match
-                    // when they cross the spread; otherwise they go straight to insertion.
-                    if (working_is_market) begin
-                        state <= kStateMatchCheck;
-                    end else if (opposite_best_valid && limit_crosses) begin
-                        state <= kStateMatchCheck;
+                kBClassify: begin
+                    // Sends market and crossing-limit packets into the match loop; non-crossing
+                    // limits go straight to handoff for insert.
+                    if (b_working_is_market) begin
+                        b_state <= kBMatchCheck;
+                    end else if (opposite_best_valid && b_limit_crosses) begin
+                        b_state <= kBMatchCheck;
                     end else begin
-                        state <= kStateInsert;
+                        b_state <= kBHandoff;
                     end
                 end
 
-                kStateMatchCheck: begin
-                    // Drops out of the match loop when the incoming order is fully filled, the
-                    // opposite side has no resting shares, or the next-best opposite price no
-                    // longer crosses (relevant for limit orders only).
-                    if (working_remaining == {kQuantityWidth{1'b0}}) begin
-                        state <= working_is_market ? kStateIdle : kStateInsert;
-                        if (working_is_market) order_ready <= 1'b1;
-                    end else if (!can_match) begin
-                        state <= working_is_market ? kStateIdle : kStateInsert;
-                        if (working_is_market) order_ready <= 1'b1;
+                kBMatchCheck: begin
+                    // Exits the loop when filled, when the opposite side is empty, or when the
+                    // next-best opposite price no longer crosses (limits only).
+                    if (b_working_remaining == {kQuantityWidth{1'b0}}) begin
+                        b_state <= kBHandoff;
+                    end else if (!b_can_match) begin
+                        b_state <= kBHandoff;
                     end else begin
-                        state <= kStateMatchExec;
+                        b_state <= kBMatchExec;
                     end
                 end
 
-                kStateMatchExec: begin
-                    // Latches the opposite-side best price before issuing the consume so the
-                    // trade pulse reports the fill price without needing to re-read the book.
-                    working_trade_price <= opposite_best_price;
-
-                    if (working_is_buy) begin
-                        if (ask_command_ready && !ask_in_flight) begin
-                            ask_command          <= kCommandConsume;
-                            ask_command_price    <= {kPriceWidth{1'b0}};
-                            ask_command_quantity <= working_remaining;
-                            ask_command_valid    <= 1'b1;
-                            ask_in_flight        <= 1'b1;
-                            state                <= kStateMatchWait;
-                        end
-                    end else begin
-                        if (bid_command_ready && !bid_in_flight) begin
-                            bid_command          <= kCommandConsume;
-                            bid_command_price    <= {kPriceWidth{1'b0}};
-                            bid_command_quantity <= working_remaining;
-                            bid_command_valid    <= 1'b1;
-                            bid_in_flight        <= 1'b1;
-                            state                <= kStateMatchWait;
-                        end
+                kBMatchExec: begin
+                    // Latches the opposite-side best price for this fill and waits for the bus
+                    // mux grant. Stalls here when Stage C holds the same store or it is busy.
+                    b_working_trade_price <= opposite_best_price;
+                    if ((b_working_is_buy ? ask_grant_b : bid_grant_b)) begin
+                        b_state <= kBMatchWait;
                     end
                 end
 
-                kStateMatchWait: begin
-                    if (working_is_buy && ask_response_valid) begin
+                kBMatchWait: begin
+                    if (b_working_is_buy && ask_response_valid) begin
                         if (ask_response_quantity != {kQuantityWidth{1'b0}}) begin
                             trade_valid            <= 1'b1;
-                            trade_price            <= working_trade_price;
+                            trade_price            <= b_working_trade_price;
                             trade_quantity         <= ask_response_quantity;
-                            trade_side             <= 1'b0;   // buy aggressor
-                            last_trade_price       <= working_trade_price;
+                            trade_side             <= 1'b0;
+                            last_trade_price       <= b_working_trade_price;
                             last_trade_price_valid <= 1'b1;
-                            total_trades           <= total_trades + 32'd1;
-                            total_volume           <= total_volume + {{(32 - kQuantityWidth){1'b0}}, ask_response_quantity};
-                            working_remaining      <= working_remaining - ask_response_quantity;
+                            b_working_remaining    <= b_working_remaining - ask_response_quantity;
+                            b_packet_trade_count   <= b_packet_trade_count + 1'b1;
+                            b_packet_fill_quantity <= b_packet_fill_quantity + ask_response_quantity;
                         end
-                        state <= kStateMatchCheck;
-                    end else if (!working_is_buy && bid_response_valid) begin
+                        b_state <= kBMatchCheck;
+                    end else if (!b_working_is_buy && bid_response_valid) begin
                         if (bid_response_quantity != {kQuantityWidth{1'b0}}) begin
                             trade_valid            <= 1'b1;
-                            trade_price            <= working_trade_price;
+                            trade_price            <= b_working_trade_price;
                             trade_quantity         <= bid_response_quantity;
-                            trade_side             <= 1'b1;   // sell aggressor
-                            last_trade_price       <= working_trade_price;
+                            trade_side             <= 1'b1;
+                            last_trade_price       <= b_working_trade_price;
                             last_trade_price_valid <= 1'b1;
-                            total_trades           <= total_trades + 32'd1;
-                            total_volume           <= total_volume + {{(32 - kQuantityWidth){1'b0}}, bid_response_quantity};
-                            working_remaining      <= working_remaining - bid_response_quantity;
+                            b_working_remaining    <= b_working_remaining - bid_response_quantity;
+                            b_packet_trade_count   <= b_packet_trade_count + 1'b1;
+                            b_packet_fill_quantity <= b_packet_fill_quantity + bid_response_quantity;
                         end
-                        state <= kStateMatchCheck;
+                        b_state <= kBMatchCheck;
                     end
                 end
 
-                kStateInsert: begin
-                    // Only reachable for limit orders. Inserts any unmatched remainder on the
-                    // same-side book. Skips the insert if the remainder is zero.
-                    if (working_remaining == {kQuantityWidth{1'b0}}) begin
-                        order_ready <= 1'b1;
-                        state       <= kStateIdle;
-                    end else if (working_is_buy) begin
-                        if (bid_command_ready && !bid_in_flight) begin
-                            bid_command          <= kCommandInsert;
-                            bid_command_price    <= working_price;
-                            bid_command_quantity <= working_remaining;
-                            bid_command_valid    <= 1'b1;
-                            bid_in_flight        <= 1'b1;
-                            state                <= kStateInsertWait;
-                        end
-                    end else begin
-                        if (ask_command_ready && !ask_in_flight) begin
-                            ask_command          <= kCommandInsert;
-                            ask_command_price    <= working_price;
-                            ask_command_quantity <= working_remaining;
-                            ask_command_valid    <= 1'b1;
-                            ask_in_flight        <= 1'b1;
-                            state                <= kStateInsertWait;
-                        end
-                    end
-                end
-
-                kStateInsertWait: begin
-                    if (working_is_buy && bid_response_valid) begin
-                        order_ready <= 1'b1;
-                        state       <= kStateIdle;
-                    end else if (!working_is_buy && ask_response_valid) begin
-                        order_ready <= 1'b1;
-                        state       <= kStateIdle;
+                kBHandoff: begin
+                    // Waits for the B-to-C register to drain, then returns to idle. The B-to-C
+                    // block writes the register on the same cycle and flags fully consumed
+                    // packets via b_to_c_for_insert = 0.
+                    if (!b_to_c_valid) begin
+                        b_state <= kBIdle;
                     end
                 end
 
                 default: begin
-                    state       <= kStateIdle;
-                    order_ready <= 1'b1;
+                    b_state <= kBIdle;
                 end
+            endcase
+        end
+    end
+
+    // Manages the B-to-C handoff register. Stage B writes on handoff; Stage C clears on retire.
+    // Co-locating both writes in one block prevents a race between the two stages.
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            b_to_c_valid         <= 1'b0;
+            b_to_c_for_insert    <= 1'b0;
+            b_to_c_price         <= {kPriceWidth{1'b0}};
+            b_to_c_remaining     <= {kQuantityWidth{1'b0}};
+            b_to_c_is_buy        <= 1'b0;
+            b_to_c_trade_count   <= {kQuantityWidth{1'b0}};
+            b_to_c_fill_quantity <= {kQuantityWidth{1'b0}};
+        end else begin
+            // Clears the register on the retire-only path the cycle Stage C enters kCSettle.
+            if ((c_state == kCIdle) && b_to_c_valid && !b_to_c_for_insert) begin
+                b_to_c_valid <= 1'b0;
+            end
+            // Clears the register on the insert path the cycle Stage C observes response_valid.
+            if ((c_state == kCWait) && (b_to_c_is_buy ? bid_response_valid : ask_response_valid)) begin
+                b_to_c_valid <= 1'b0;
+            end
+            // Writes Stage B's working packet into the register on the cycle it leaves kBHandoff.
+            if ((b_state == kBHandoff) && !b_to_c_valid) begin
+                b_to_c_valid         <= 1'b1;
+                b_to_c_for_insert    <= !b_working_is_market &&
+                                        (b_working_remaining != {kQuantityWidth{1'b0}});
+                b_to_c_price         <= b_working_price;
+                b_to_c_remaining     <= b_working_remaining;
+                b_to_c_is_buy        <= b_working_is_buy;
+                b_to_c_trade_count   <= b_packet_trade_count;
+                b_to_c_fill_quantity <= b_packet_fill_quantity;
+            end
+        end
+    end
+
+    // Drives Stage C's substate machine and the order_retire_valid pulse, exporting one clean
+    // snapshot point per retired packet for the TB to log against.
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            c_state                    <= kCIdle;
+            order_retire_valid         <= 1'b0;
+            order_retire_trade_count   <= {kQuantityWidth{1'b0}};
+            order_retire_fill_quantity <= {kQuantityWidth{1'b0}};
+        end else begin
+            order_retire_valid <= 1'b0;
+
+            case (c_state)
+                kCIdle: begin
+                    if (b_to_c_valid && !b_to_c_for_insert) begin
+                        c_state <= kCSettle;
+                    end else if (b_to_c_valid && b_to_c_for_insert) begin
+                        c_state <= kCDrive;
+                    end
+                end
+
+                kCDrive: begin
+                    if ((b_to_c_is_buy ? bid_grant_c : ask_grant_c)) begin
+                        c_state <= kCWait;
+                    end
+                end
+
+                kCWait: begin
+                    if (b_to_c_is_buy ? bid_response_valid : ask_response_valid) begin
+                        c_state <= kCSettle;
+                    end
+                end
+
+                kCSettle: begin
+                    order_retire_valid         <= 1'b1;
+                    order_retire_trade_count   <= b_to_c_trade_count;
+                    order_retire_fill_quantity <= b_to_c_fill_quantity;
+                    c_state                    <= kCIdle;
+                end
+
+                default: c_state <= kCIdle;
             endcase
         end
     end

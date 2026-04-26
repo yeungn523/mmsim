@@ -47,7 +47,27 @@ def run_stage(description: str, command: list[str], working_directory: Path) -> 
 
 
 @click.command()
-def main() -> None:
+@click.option("--stress", type=int, default=0, show_default=True,
+              help="Forward to the golden model: when >0, generate N back-to-back random "
+                   "packets instead of the deterministic regression sweep.")
+@click.option("--edge-cases", is_flag=True, default=False,
+              help="Forward to the golden model: in stress mode, prepend boundary and "
+                   "saturation packets.")
+@click.option("--price-distribution", type=click.Choice(["uniform", "gaussian"]),
+              default="uniform", show_default=True,
+              help="Forward to the golden model: distribution used to sample stress price "
+                   "ticks.")
+@click.option("--price-mean", type=float, default=None,
+              help="Forward to the golden model: Gaussian mean tick.")
+@click.option("--price-stddev", type=float, default=None,
+              help="Forward to the golden model: Gaussian standard deviation in ticks.")
+def main(
+    stress: int,
+    edge_cases: bool,
+    price_distribution: str,
+    price_mean: float | None,
+    price_stddev: float | None,
+) -> None:
     """Run the three-stage CSV verification pipeline for the matching engine."""
     matching_engine_directory = Path(__file__).resolve().parent.parent
     simulation_directory = matching_engine_directory / "sim"
@@ -55,13 +75,24 @@ def main() -> None:
 
     console.log(message="Matching Engine CSV Verification Pipeline", prefix=False)
 
+    golden_command = [
+        sys.executable,
+        "-m",
+        "mmsim.matching_engine.python_verification.matching_engine_golden",
+    ]
+    if stress > 0:
+        golden_command += ["--stress", str(stress)]
+        if edge_cases:
+            golden_command.append("--edge-cases")
+        golden_command += ["--price-distribution", price_distribution]
+        if price_mean is not None:
+            golden_command += ["--price-mean", str(price_mean)]
+        if price_stddev is not None:
+            golden_command += ["--price-stddev", str(price_stddev)]
+
     stage_one_pass = run_stage(
         description="Generate golden model CSVs",
-        command=[
-            sys.executable,
-            "-m",
-            "mmsim.matching_engine.python_verification.matching_engine_golden",
-        ],
+        command=golden_command,
         working_directory=project_root,
     )
     if not stage_one_pass:
@@ -109,6 +140,13 @@ def main() -> None:
             error=FileNotFoundError,
         )
     console.log(message=f"  matching_engine_actual.csv: {actual_csv_path.stat().st_size} bytes")
+
+    throughput_csv_path = simulation_directory / "matching_engine_throughput.csv"
+    if throughput_csv_path.exists():
+        console.log(message="Throughput metrics:")
+        for line in throughput_csv_path.read_text().splitlines()[1:]:
+            metric, _, value = line.partition(",")
+            console.log(message=f"  {metric}: {value}")
 
     stage_three_pass = run_stage(
         description="Compare golden model vs Verilog output",
