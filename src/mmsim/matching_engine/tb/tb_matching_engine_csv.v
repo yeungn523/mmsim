@@ -100,6 +100,7 @@ module tb_matching_engine_csv;
     integer packets_file;
     integer actual_file;
     integer trades_file;
+    integer throughput_file;
     integer scan_result;
     integer current_step;
     reg [8*512-1:0] header_line;
@@ -230,11 +231,25 @@ module tb_matching_engine_csv;
         $fclose(actual_file);
         $fclose(trades_file);
 
+        // Mirror the throughput numbers to a CSV alongside stdout, so they survive even when
+        // ModelSim's stdout pipe is buffered or routed to its transcript instead.
+        throughput_file = $fopen("matching_engine_throughput.csv", "w");
+        if (throughput_file != 0) begin
+            $fwrite(throughput_file, "metric,value\n");
+            $fwrite(throughput_file, "busy_cycles,%0d\n",         busy_cycles);
+            $fwrite(throughput_file, "packets_issued,%0d\n",      issue_count);
+            $fwrite(throughput_file, "packets_retired,%0d\n",     retire_count);
+            $fwrite(throughput_file, "trade_pulses,%0d\n",        trade_pulse_count);
+            $fwrite(throughput_file, "backpressure_cycles,%0d\n", backpressure_cycles);
+            $fclose(throughput_file);
+        end
+
         $display("");
         $display("CSV replay complete: %0d packets processed", current_step);
         $display("  Input:  matching_engine_packets.csv");
         $display("  Output: matching_engine_actual.csv");
         $display("  Output: matching_engine_trades_actual.csv");
+        $display("  Output: matching_engine_throughput.csv");
         $display("");
         $display("Throughput summary:");
         $display("  Busy cycles            : %0d", busy_cycles);

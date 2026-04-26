@@ -74,9 +74,10 @@ module matching_engine #(
     localparam [2:0] kBHandoff    = 3'd5;  ///< Writes the B-to-C register and returns to idle.
 
     // Stage C substate encoding.
-    localparam [1:0] kCIdle  = 2'd0;  ///< Waits for a B-to-C register write or retires non-insert packets.
-    localparam [1:0] kCDrive = 2'd1;  ///< Issues an INSERT on the same-side store.
-    localparam [1:0] kCWait  = 2'd2;  ///< Awaits the insert response, then retires the packet.
+    localparam [1:0] kCIdle   = 2'd0;  ///< Waits for a B-to-C register write.
+    localparam [1:0] kCDrive  = 2'd1;  ///< Issues an INSERT on the same-side store.
+    localparam [1:0] kCWait   = 2'd2;  ///< Awaits the insert response.
+    localparam [1:0] kCSettle = 2'd3;  ///< Lets best_* propagate, then pulses order_retire_valid.
 
     // Width helpers for the Accept FIFO pointers and count.
     localparam kFifoPtrWidth   = $clog2(kAcceptFifoDepth);
@@ -454,10 +455,7 @@ module matching_engine #(
             case (c_state)
                 kCIdle: begin
                     if (b_to_c_valid && !b_to_c_for_insert) begin
-                        order_retire_valid         <= 1'b1;
-                        order_retire_trade_count   <= b_to_c_trade_count;
-                        order_retire_fill_quantity <= b_to_c_fill_quantity;
-                        c_state                    <= kCIdle;
+                        c_state <= kCSettle;
                     end else if (b_to_c_valid && b_to_c_for_insert) begin
                         c_state <= kCDrive;
                     end
@@ -471,11 +469,15 @@ module matching_engine #(
 
                 kCWait: begin
                     if (b_to_c_is_buy ? bid_response_valid : ask_response_valid) begin
-                        order_retire_valid         <= 1'b1;
-                        order_retire_trade_count   <= b_to_c_trade_count;
-                        order_retire_fill_quantity <= b_to_c_fill_quantity;
-                        c_state                    <= kCIdle;
+                        c_state <= kCSettle;
                     end
+                end
+
+                kCSettle: begin
+                    order_retire_valid         <= 1'b1;
+                    order_retire_trade_count   <= b_to_c_trade_count;
+                    order_retire_fill_quantity <= b_to_c_fill_quantity;
+                    c_state                    <= kCIdle;
                 end
 
                 default: c_state <= kCIdle;

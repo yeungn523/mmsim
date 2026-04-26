@@ -141,6 +141,13 @@ def main(
         )
     console.log(message=f"  matching_engine_actual.csv: {actual_csv_path.stat().st_size} bytes")
 
+    throughput_csv_path = simulation_directory / "matching_engine_throughput.csv"
+    if throughput_csv_path.exists():
+        console.log(message="Throughput metrics:")
+        for line in throughput_csv_path.read_text().splitlines()[1:]:
+            metric, _, value = line.partition(",")
+            console.log(message=f"  {metric}: {value}")
+
     stage_three_pass = run_stage(
         description="Compare golden model vs Verilog output",
         command=[
