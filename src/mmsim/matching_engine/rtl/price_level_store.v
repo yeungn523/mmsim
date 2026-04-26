@@ -110,22 +110,31 @@ module price_level_store #(
     integer                    group_iterator;
     integer                    slot_iterator;
 
+    // Bounds guard on the level_valid access is required when kPriceRange is not an integer
+    // multiple of kGroupSize (e.g., 480 / 64 = 7.5 groups). The last group's upper slots
+    // address indices >= kPriceRange that the array does not declare. Both loop variables are
+    // compile-time constants after unrolling, so synthesis constant-folds the guard away and
+    // the out-of-range branches simply disappear from the netlist.
     always @(*) begin : stage1_compute
         for (group_iterator = 0; group_iterator < kGroupCount; group_iterator = group_iterator + 1) begin
             group_best_index_comb[group_iterator] = {kGroupIndexWidth{1'b0}};
             group_nonempty_comb[group_iterator]   = 1'b0;
             if (kIsBid) begin
                 for (slot_iterator = 0; slot_iterator < kGroupSize; slot_iterator = slot_iterator + 1) begin
-                    if (level_valid[group_iterator * kGroupSize + slot_iterator]) begin
-                        group_best_index_comb[group_iterator] = slot_iterator[kGroupIndexWidth-1:0];
-                        group_nonempty_comb[group_iterator]   = 1'b1;
+                    if ((group_iterator * kGroupSize + slot_iterator) < kPriceRange) begin
+                        if (level_valid[group_iterator * kGroupSize + slot_iterator]) begin
+                            group_best_index_comb[group_iterator] = slot_iterator[kGroupIndexWidth-1:0];
+                            group_nonempty_comb[group_iterator]   = 1'b1;
+                        end
                     end
                 end
             end else begin
                 for (slot_iterator = kGroupSize - 1; slot_iterator >= 0; slot_iterator = slot_iterator - 1) begin
-                    if (level_valid[group_iterator * kGroupSize + slot_iterator]) begin
-                        group_best_index_comb[group_iterator] = slot_iterator[kGroupIndexWidth-1:0];
-                        group_nonempty_comb[group_iterator]   = 1'b1;
+                    if ((group_iterator * kGroupSize + slot_iterator) < kPriceRange) begin
+                        if (level_valid[group_iterator * kGroupSize + slot_iterator]) begin
+                            group_best_index_comb[group_iterator] = slot_iterator[kGroupIndexWidth-1:0];
+                            group_nonempty_comb[group_iterator]   = 1'b1;
+                        end
                     end
                 end
             end
