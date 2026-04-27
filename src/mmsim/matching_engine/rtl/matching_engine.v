@@ -40,8 +40,8 @@ module matching_engine #(
     output reg                         trade_valid,
 
     // Holds the most recent fill price across packets.
-    output reg  [kPriceWidth-1:0]      last_trade_price,
-    output reg                         last_trade_price_valid,
+    output reg  [kPriceWidth-1:0]      last_executed_price,
+    output reg                         last_executed_price_valid,
 
     // Exposes top-of-book state via combinational taps from each store.
     output wire [kPriceWidth-1:0]      best_bid_price,
@@ -296,8 +296,8 @@ module matching_engine #(
             trade_price            <= {kPriceWidth{1'b0}};
             trade_quantity         <= {kQuantityWidth{1'b0}};
             trade_side             <= 1'b0;
-            last_trade_price       <= {kPriceWidth{1'b0}};
-            last_trade_price_valid <= 1'b0;
+            last_executed_price       <= {kPriceWidth{1'b0}};
+            last_executed_price_valid <= 1'b0;
 
             bid_in_flight <= 1'b0;
             ask_in_flight <= 1'b0;
@@ -368,8 +368,8 @@ module matching_engine #(
                             trade_price            <= b_working_trade_price;
                             trade_quantity         <= ask_response_quantity;
                             trade_side             <= 1'b0;
-                            last_trade_price       <= b_working_trade_price;
-                            last_trade_price_valid <= 1'b1;
+                            last_executed_price       <= b_working_trade_price;
+                            last_executed_price_valid <= 1'b1;
                             b_working_remaining    <= b_working_remaining - ask_response_quantity;
                             b_packet_trade_count   <= b_packet_trade_count + 1'b1;
                             b_packet_fill_quantity <= b_packet_fill_quantity + ask_response_quantity;
@@ -381,8 +381,8 @@ module matching_engine #(
                             trade_price            <= b_working_trade_price;
                             trade_quantity         <= bid_response_quantity;
                             trade_side             <= 1'b1;
-                            last_trade_price       <= b_working_trade_price;
-                            last_trade_price_valid <= 1'b1;
+                            last_executed_price       <= b_working_trade_price;
+                            last_executed_price_valid <= 1'b1;
                             b_working_remaining    <= b_working_remaining - bid_response_quantity;
                             b_packet_trade_count   <= b_packet_trade_count + 1'b1;
                             b_packet_fill_quantity <= b_packet_fill_quantity + bid_response_quantity;

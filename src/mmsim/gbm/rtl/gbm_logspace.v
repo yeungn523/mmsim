@@ -1,55 +1,49 @@
-// =============================================================================
-// gbm_logspace.v - GBM Price Pipeline: Log-Space Accumulation
-// =============================================================================
-
-`include "exp_lut.vh"
+///
+/// @file gbm_logspace.v
+/// @brief Geometric Brownian Motion price pipeline using log-space accumulation and an exp LUT.
+///
 
 module gbm_logspace #(
-    parameter PRICE_WIDTH  = 32,
-    parameter SIGMA_WIDTH  = 32,
-    parameter Z_WIDTH      = 16,
-    parameter L_FRAC       = 24,
-    parameter SIGMA_FRAC   = 24,
-    parameter Z_FRAC       = 12,
+    parameter PRICE_WIDTH  = 32,                         ///< Bit width of the output price.
+    parameter SIGMA_WIDTH  = 32,                         ///< Bit width of the output sigma.
+    parameter Z_WIDTH      = 16,                         ///< Bit width of the input Gaussian sample.
+    parameter L_FRAC       = 24,                         ///< Fractional bits of the log-price register.
+    parameter SIGMA_FRAC   = 24,                         ///< Fractional bits of the sigma register.
+    parameter Z_FRAC       = 12,                         ///< Fractional bits of the Gaussian sample.
 
-    // LUT range parameters
-    parameter signed [31:0] L_MIN_FIXED  = 32'sh00000000,
-    parameter signed [31:0] L_MAX_FIXED  = 32'sh058B6E14,
-    parameter        [31:0] L_STEP_FIXED = 32'h00002C5C,
-    parameter        [31:0] L_STEP_RECIP = 32'hB8AC68F6,
+    parameter signed [31:0] L_MIN_FIXED  = 32'sh00000000,    ///< Lower bound of the log-price LUT range.
+    parameter signed [31:0] L_MAX_FIXED  = 32'sh058B6E14,    ///< Upper bound of the log-price LUT range.
+    parameter        [31:0] L_STEP_FIXED = 32'h00002C5C,     ///< LUT step size in log-price units.
+    parameter        [31:0] L_STEP_RECIP = 32'hB8AC68F6,     ///< Reciprocal of the LUT step for address scaling.
 
-    parameter [31:0] PRICE_MIN = 32'h00000001,
-    parameter [31:0] PRICE_MAX = 32'hFFFFFFFF,
+    parameter [31:0] PRICE_MIN = 32'h00000001,           ///< Minimum representable price clamp.
+    parameter [31:0] PRICE_MAX = 32'hFFFFFFFF,           ///< Maximum representable price clamp.
 
-    // Default constants 
-    parameter signed [31:0] MU_ITO_DT_DEF     = 32'sh00000000,
-    parameter signed [31:0] SIGMA_SQRT_DT_DEF = 32'sh00000451,
-    parameter        [31:0] SIGMA_INIT_DEF    = 32'h00000451,
-    parameter        [31:0] ALPHA_FP_DEF      = 32'h00FD70A4,
-    parameter        [31:0] P0_RECIP_DEF      = 32'h00028F5C,
-    parameter signed [31:0] L0_DEF            = 32'sh049AEC6F
+    parameter signed [31:0] MU_ITO_DT_DEF     = 32'sh00000000,   ///< Default Ito-corrected drift per step.
+    parameter signed [31:0] SIGMA_SQRT_DT_DEF = 32'sh00000451,   ///< Default sigma * sqrt(dt) coefficient.
+    parameter        [31:0] SIGMA_INIT_DEF    = 32'h00000451,    ///< Default initial sigma estimate.
+    parameter        [31:0] ALPHA_FP_DEF      = 32'h00FD70A4,    ///< Default EWMA smoothing factor.
+    parameter        [31:0] P0_RECIP_DEF      = 32'h00028F5C,    ///< Default reciprocal of the reference price.
+    parameter signed [31:0] L0_DEF            = 32'sh049AEC6F    ///< Default initial log-price.
 )(
-    input  wire        clk,
-    input  wire        rst_n,
+    input  wire        clk,                              ///< System clock.
+    input  wire        rst_n,                            ///< Active-low asynchronous reset.
 
-    // handshake
-    input  wire        z_valid,
-    input  wire signed [Z_WIDTH-1:0] z_in,
+    input  wire        z_valid,                          ///< Pulses one cycle to inject a new Gaussian sample.
+    input  wire signed [Z_WIDTH-1:0] z_in,               ///< Signed Gaussian sample driving the diffusion term.
 
-    // parameter overrides
-    input  wire        param_load,
-    input  wire signed [31:0] mu_ito_dt_in,
-    input  wire signed [31:0] sigma_sqrt_dt_in,
-    input  wire        [31:0] sigma_init_in,
-    input  wire        [31:0] alpha_in,
-    input  wire        [31:0] p0_recip_in,
+    input  wire        param_load,                       ///< Loads runtime parameter overrides on a single-cycle pulse.
+    input  wire signed [31:0] mu_ito_dt_in,              ///< Runtime override for MU_ITO_DT_DEF.
+    input  wire signed [31:0] sigma_sqrt_dt_in,          ///< Runtime override for SIGMA_SQRT_DT_DEF.
+    input  wire        [31:0] sigma_init_in,             ///< Runtime override for SIGMA_INIT_DEF.
+    input  wire        [31:0] alpha_in,                  ///< Runtime override for ALPHA_FP_DEF.
+    input  wire        [31:0] p0_recip_in,               ///< Runtime override for P0_RECIP_DEF.
 
-    output reg  [PRICE_WIDTH-1:0] price_out,
-    output reg  [SIGMA_WIDTH-1:0] sigma_out,
-    output reg                    price_valid
+    output reg  [PRICE_WIDTH-1:0] price_out,             ///< Latest GBM price (Q8.24 unsigned).
+    output reg  [SIGMA_WIDTH-1:0] sigma_out,             ///< Latest sigma estimate (Q0.24 unsigned).
+    output reg                    price_valid           ///< Pulses one cycle when price_out is valid.
 );
 
-    // FSM states
     localparam [3:0]
         S_IDLE      = 4'd0,
         S_LATCH     = 4'd1,
@@ -76,31 +70,34 @@ module gbm_logspace #(
     reg        [31:0] p0_recip_reg;
 
     // Persistent state
-    reg signed [31:0] L_reg;       
-    reg        [31:0] P_reg;       
-    reg        [31:0] sigma_reg;   
+    reg signed [31:0] L_reg;
+    reg        [31:0] P_reg;
+    reg        [31:0] sigma_reg;
 
     // Pipeline registers
     reg signed [15:0]  z_latch;
-    reg signed [63:0]  diff_full;     
-    reg signed [31:0]  diffusion;     
-    reg signed [31:0]  L_new;         
-    reg        [12:0]  lut_addr;      
-    reg        [31:0]  lut_data;      
-    reg        [31:0]  P_new;         
+    reg signed [63:0]  diff_full;
+    reg signed [31:0]  diffusion;
+    reg signed [31:0]  L_new;
+    reg        [12:0]  lut_addr;
+    reg        [31:0]  lut_data;
+    reg        [31:0]  P_new;
     reg        [31:0]  delta_P;
     reg        [63:0]  abs_ret_full;
     reg        [63:0]  alpha_full;
     reg        [31:0]  abs_ret_norm;
     reg        [31:0]  alpha_sigma;
-    reg        [31:0]  abs_ret_scaled;
+    wire       [31:0]  abs_ret_scaled;
     reg        [63:0]  one_m_alpha_full;
     reg        [31:0]  one_m_alpha_ret;
-    reg        [32:0]  sigma_sum;
+    wire       [32:0]  sigma_sum;
+
+    assign abs_ret_scaled = abs_ret_norm + (abs_ret_norm >> 2);
+    assign sigma_sum      = {1'b0, alpha_sigma} + {1'b0, one_m_alpha_ret};
 
     wire signed [31:0] L_offset_wire;
     assign L_offset_wire  = L_new - $signed(L_MIN_FIXED);
-    
+
     wire [63:0] addr_full_wire;
     wire [63:0] addr_mult_wire;
     assign addr_mult_wire = {32'd0, L_offset_wire} * {32'd0, L_STEP_RECIP};
@@ -128,6 +125,7 @@ module gbm_logspace #(
         .q_a        (lut_data)
     );
 `else
+    `include "exp_lut.vh"
     always @(posedge clk) begin
         lut_data <= exp_lut_lookup(lut_addr);
     end
@@ -174,10 +172,8 @@ module gbm_logspace #(
             alpha_full        <= 64'd0;
             abs_ret_norm      <= 32'd0;
             alpha_sigma       <= 32'd0;
-            abs_ret_scaled    <= 32'd0;
             one_m_alpha_full  <= 64'd0;
             one_m_alpha_ret   <= 32'd0;
-            sigma_sum         <= 33'd0;
         end else begin
             price_valid <= 1'b0;
 
@@ -212,7 +208,7 @@ module gbm_logspace #(
                 S_L_UPDATE: begin
                     if ($signed(L_offset_wire) <= 32'sh0)
                         lut_addr <= 13'd0;
-                    else if (|addr_full_wire[63:58]) 
+                    else if (|addr_full_wire[63:58])
                         lut_addr <= 13'd8191;
                     else
                         lut_addr <= addr_full_wire[57:45];
@@ -240,7 +236,6 @@ module gbm_logspace #(
                 S_SIGMA_B: begin
                     abs_ret_norm   <= (abs_ret_full + 64'd8388608) >> 24;
                     alpha_sigma    <= (alpha_full   + 64'd8388608) >> 24;
-                    abs_ret_scaled <= abs_ret_norm + (abs_ret_norm >> 2);
                     state          <= S_SIGMA_C;
                 end
 
@@ -255,18 +250,17 @@ module gbm_logspace #(
                 end
 
                 S_SIGMA_E: begin
-                    sigma_sum <= {1'b0, alpha_sigma} + {1'b0, one_m_alpha_ret};
                     if (sigma_sum < {1'b0, sigma_init_reg}) begin
                         sigma_reg <= sigma_init_reg;
                         sigma_out <= sigma_init_reg;
-                    end else if (alpha_sigma[31] & one_m_alpha_ret[31]) begin
+                    end else if (sigma_sum[32]) begin
                         sigma_reg <= {32{1'b1}};
                         sigma_out <= {32{1'b1}};
                     end else begin
-                        sigma_reg <= alpha_sigma + one_m_alpha_ret;
-                        sigma_out <= alpha_sigma + one_m_alpha_ret;
+                        sigma_reg <= sigma_sum[31:0];
+                        sigma_out <= sigma_sum[31:0];
                     end
-                    
+
                     L_reg       <= L_new;
                     P_reg       <= P_new;
                     price_out   <= P_new;

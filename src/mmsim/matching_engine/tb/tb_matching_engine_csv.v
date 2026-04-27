@@ -25,8 +25,8 @@ module tb_matching_engine_csv;
     wire [kQuantityWidth-1:0]  trade_quantity;
     wire                       trade_side;
     wire                       trade_valid;
-    wire [kPriceWidth-1:0]     last_trade_price;
-    wire                       last_trade_price_valid;
+    wire [kPriceWidth-1:0]     last_executed_price;
+    wire                       last_executed_price_valid;
 
     wire [kPriceWidth-1:0]     best_bid_price;
     wire [kQuantityWidth-1:0]  best_bid_quantity;
@@ -54,8 +54,8 @@ module tb_matching_engine_csv;
         .trade_quantity             (trade_quantity),
         .trade_side                 (trade_side),
         .trade_valid                (trade_valid),
-        .last_trade_price           (last_trade_price),
-        .last_trade_price_valid     (last_trade_price_valid),
+        .last_executed_price           (last_executed_price),
+        .last_executed_price_valid     (last_executed_price_valid),
         .best_bid_price             (best_bid_price),
         .best_bid_quantity          (best_bid_quantity),
         .best_bid_valid             (best_bid_valid),
@@ -151,8 +151,8 @@ module tb_matching_engine_csv;
                     best_ask_price,
                     best_ask_quantity,
                     best_ask_valid,
-                    last_trade_price,
-                    last_trade_price_valid);
+                    last_executed_price,
+                    last_executed_price_valid);
                 issue_head  <= issue_head + 1;
                 trade_index <= trade_valid ? 1 : 0;
             end else if (trade_valid) begin
@@ -188,7 +188,7 @@ module tb_matching_engine_csv;
             "trade_count,total_fill_quantity,"
             "best_bid_price,best_bid_quantity,best_bid_valid,"
             "best_ask_price,best_ask_quantity,best_ask_valid,"
-            "last_trade_price,last_trade_price_valid\n"
+            "last_executed_price,last_executed_price_valid\n"
         );
         $fwrite(trades_file, "step,trade_index,trade_price,trade_quantity,trade_side\n");
 

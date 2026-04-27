@@ -67,8 +67,8 @@ class StepRecord:
         best_ask_price: The best ask price after processing.
         best_ask_quantity: The aggregate quantity at the best ask.
         best_ask_valid: Determines whether the ask book is nonempty.
-        last_trade_price: The most recently executed trade price after processing this packet.
-        last_trade_price_valid: Determines whether at least one trade has executed yet.
+        last_executed_price: The most recently executed trade price after processing this packet.
+        last_executed_price_valid: Determines whether at least one trade has executed yet.
     """
 
     step: int
@@ -99,9 +99,9 @@ class StepRecord:
     """The aggregate quantity at the best ask."""
     best_ask_valid: bool = False
     """Determines whether the ask book is nonempty."""
-    last_trade_price: int = 0
+    last_executed_price: int = 0
     """The most recently executed trade price after processing this packet."""
-    last_trade_price_valid: bool = False
+    last_executed_price_valid: bool = False
     """Determines whether at least one trade has executed yet."""
 
 
@@ -157,8 +157,8 @@ class MatchingEngine:
         price_range: Cached price-tick range parameter.
         _bid_book: The bid-side price level store.
         _ask_book: The ask-side price level store.
-        _last_trade_price: The most recently executed trade price.
-        _last_trade_price_valid: Determines whether at least one trade has executed.
+        _last_executed_price: The most recently executed trade price.
+        _last_executed_price_valid: Determines whether at least one trade has executed.
     """
 
     def __init__(self, price_range: int = _DEFAULT_PRICE_RANGE) -> None:
@@ -169,25 +169,25 @@ class MatchingEngine:
         self._ask_book: PriceLevelStoreNoCancellation = PriceLevelStoreNoCancellation(
             is_bid=False, price_range=price_range,
         )
-        self._last_trade_price: int = 0
-        self._last_trade_price_valid: bool = False
+        self._last_executed_price: int = 0
+        self._last_executed_price_valid: bool = False
 
     def __repr__(self) -> str:
         """Returns a string representation of the MatchingEngine instance."""
         return (
-            f"MatchingEngine(last_trade_price={self._last_trade_price}, "
-            f"last_trade_price_valid={self._last_trade_price_valid})"
+            f"MatchingEngine(last_executed_price={self._last_executed_price}, "
+            f"last_executed_price_valid={self._last_executed_price_valid})"
         )
 
     @property
-    def last_trade_price(self) -> int:
+    def last_executed_price(self) -> int:
         """Returns the most recently executed trade price (0 before any trade has occurred)."""
-        return self._last_trade_price
+        return self._last_executed_price
 
     @property
-    def last_trade_price_valid(self) -> bool:
+    def last_executed_price_valid(self) -> bool:
         """Returns True after the first trade has executed."""
-        return self._last_trade_price_valid
+        return self._last_executed_price_valid
 
     def process_packet(self, packet: int) -> list[TradeRecord]:
         """Processes a single order packet and returns the resulting trades.
@@ -226,8 +226,8 @@ class MatchingEngine:
                 side=0 if is_buy else 1,
             ))
             remaining -= consumed
-            self._last_trade_price = opposite_best
-            self._last_trade_price_valid = True
+            self._last_executed_price = opposite_best
+            self._last_executed_price_valid = True
 
         if remaining > 0 and not is_market:
             same_book.insert(price=price, quantity=remaining)
@@ -262,8 +262,8 @@ class MatchingEngine:
                 best_ask_price=self._ask_book.best_price,
                 best_ask_quantity=self._ask_book.best_quantity,
                 best_ask_valid=self._ask_book.best_valid,
-                last_trade_price=self._last_trade_price,
-                last_trade_price_valid=self._last_trade_price_valid,
+                last_executed_price=self._last_executed_price,
+                last_executed_price_valid=self._last_executed_price_valid,
             ))
         return records
 
@@ -510,7 +510,7 @@ def write_expected_csv(records: list[StepRecord], file_path: Path) -> None:
         "trade_count", "total_fill_quantity",
         "best_bid_price", "best_bid_quantity", "best_bid_valid",
         "best_ask_price", "best_ask_quantity", "best_ask_valid",
-        "last_trade_price", "last_trade_price_valid",
+        "last_executed_price", "last_executed_price_valid",
     ]
     with file_path.open(mode="w", newline="") as csv_file:
         writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
@@ -532,8 +532,8 @@ def write_expected_csv(records: list[StepRecord], file_path: Path) -> None:
                 "best_ask_price": record.best_ask_price,
                 "best_ask_quantity": record.best_ask_quantity,
                 "best_ask_valid": int(record.best_ask_valid),
-                "last_trade_price": record.last_trade_price,
-                "last_trade_price_valid": int(record.last_trade_price_valid),
+                "last_executed_price": record.last_executed_price,
+                "last_executed_price_valid": int(record.last_executed_price_valid),
             })
 
 
@@ -572,7 +572,7 @@ def verify_against_verilog(expected_path: Path, actual_path: Path) -> dict[str, 
         "trade_count", "total_fill_quantity",
         "best_bid_price", "best_bid_quantity", "best_bid_valid",
         "best_ask_price", "best_ask_quantity", "best_ask_valid",
-        "last_trade_price", "last_trade_price_valid",
+        "last_executed_price", "last_executed_price_valid",
     ]
 
     diff_path = actual_path.parent / "matching_engine_diff.csv"

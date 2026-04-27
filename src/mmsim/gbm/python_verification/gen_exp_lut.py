@@ -1,132 +1,283 @@
+"""Offline table generator for the gbm_logspace.v exp() lookup table.
+
+Emits the Q8.24 exp(L) table in three formats: a Quartus MIF ROM image, a Verilog header with
+a behavioral lookup function for simulation, and a Python module imported by the golden model.
 """
-gen_exp_lut.py
-Offline table generator for the gbm_logspace.v exp() lookup table.
-"""
-import os
+
+from pathlib import Path
+
 import numpy as np
-import math
+from numpy.typing import NDArray
 
-# Directory that ModelSim runs from; .mif and .vh outputs are written here so the testbench
-# include path (+incdir+. inside sim/) and Quartus memory init can find them.
-SIM_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "sim"))
+_ENTRY_COUNT: int = 8192
+_LOG_PRICE_MIN: float = 0.0
+_LOG_PRICE_MAX: float = 5.545
+_PRICE_FRAC: int = 24
+_LOG_PRICE_FRAC: int = 24
+_PRICE_MAX_INT: int = (256 << _PRICE_FRAC) - 1
+_RECIPROCAL_SHIFT_START: int = 48
+_RECIPROCAL_SHIFT_LIMIT: int = 1 << 32
+_VERILOG_ADDRESS_LOWER_OFFSET: int = 12
 
-# Configuration
-N_ENTRIES     = 8192
-L_MIN         = 0.0
-L_MAX         = 5.545
-PRICE_FRAC    = 24
-L_FRAC        = 24
-PRICE_MAX_INT = (256 << PRICE_FRAC) - 1
+_SCRIPT_DIR: Path = Path(__file__).resolve().parent
+_RTL_DIR: Path = _SCRIPT_DIR.parent / "rtl"
+_SIM_DIR: Path = _SCRIPT_DIR.parent / "sim"
+_MIF_OUTPUT_PATH: Path = _SIM_DIR / "exp_lut.mif"
+_VH_OUTPUT_PATH: Path = _SIM_DIR / "exp_lut.vh"
+_PYTHON_OUTPUT_PATH: Path = _SCRIPT_DIR / "exp_lut_golden.py"
 
-# Compute LUT entries
-L_step   = (L_MAX - L_MIN) / N_ENTRIES
-L_values = np.array([L_MIN + i * L_step for i in range(N_ENTRIES)])
-exp_values = np.exp(L_values)
-exp_q824 = np.array([
-    min(int(round(e * (1 << PRICE_FRAC))), PRICE_MAX_INT)
-    for e in exp_values
-], dtype=np.int64)
 
-L_MIN_FIXED  = int(round(L_MIN  * (1 << L_FRAC)))
-L_STEP_FIXED = int(round(L_step * (1 << L_FRAC)))
+def build_exp_table(
+    entry_count: int = _ENTRY_COUNT,
+    log_price_min: float = _LOG_PRICE_MIN,
+    log_price_max: float = _LOG_PRICE_MAX,
+) -> tuple[NDArray[np.float64], NDArray[np.int64], float, int, int, int]:
+    """Builds the quantized exp(L) lookup table and the hardware address scaling constants.
 
-# Reciprocal multiplier for hardware address calculation
-shift = 48
-while (1 << shift) // L_STEP_FIXED >= (1 << 32):
-    shift -= 1
-L_STEP_RECIP = int(round((1 << shift) / L_STEP_FIXED))
+    Args:
+        entry_count: The number of LUT entries to generate.
+        log_price_min: The lower bound of the log-price range covered by the LUT.
+        log_price_max: The upper bound of the log-price range covered by the LUT.
 
-print(f"LUT configuration:")
-print(f"  N_ENTRIES    = {N_ENTRIES}")
-print(f"  L range      = [{L_MIN:.3f}, {L_MAX:.3f}]")
-print(f"  L_step       = {L_step:.6f}")
-print(f"  L_MIN_FIXED  = {L_MIN_FIXED} (32'h{L_MIN_FIXED & 0xFFFFFFFF:08X})")
-print(f"  L_STEP_FIXED = {L_STEP_FIXED} (32'h{L_STEP_FIXED:08X})")
-print(f"  L_STEP_RECIP = {L_STEP_RECIP} (32'h{L_STEP_RECIP:08X})")
-print(f"  VERILOG SHIFT AMOUNT = {shift}")
-print(f"  VERILOG EXTRACTION   = addr_full_wire[{shift+12}:{shift}]")
-print(f"  Price range  = [{exp_values[0]:.4f}, {exp_values[-1]:.2f}]")
-print(f"  exp_q824 spot checks: [0]={exp_q824[0]}, [4095]={exp_q824[4095]}, [8191]={exp_q824[8191]}")
+    Returns:
+        A tuple containing the dense L-axis values, the Q8.24 quantized exp values, the L step
+        size in float, the L step size in fixed-point, the reciprocal multiplier used for
+        hardware address calculation, and the shift amount paired with that reciprocal.
+    """
+    log_price_step = (log_price_max - log_price_min) / entry_count
+    log_price_values: NDArray[np.float64] = np.array(
+        [log_price_min + index * log_price_step for index in range(entry_count)],
+        dtype=np.float64,
+    )
+    exp_values = np.exp(log_price_values)
+    exp_q824: NDArray[np.int64] = np.array(
+        [min(int(round(value * (1 << _PRICE_FRAC))), _PRICE_MAX_INT) for value in exp_values],
+        dtype=np.int64,
+    )
 
-# Quantization error verification
-max_abs_err = 0.0
-max_rel_err = 0.0
-for i in range(N_ENTRIES):
-    real_val    = exp_q824[i] / (1 << PRICE_FRAC)
-    clamped_val = min(exp_values[i], PRICE_MAX_INT / (1 << PRICE_FRAC))
-    abs_err     = abs(real_val - clamped_val)
-    rel_err     = abs_err / clamped_val
-    max_abs_err = max(max_abs_err, abs_err)
-    max_rel_err = max(max_rel_err, rel_err)
+    log_price_step_fixed = int(round(log_price_step * (1 << _LOG_PRICE_FRAC)))
 
-print(f"\nQuantization error:")
-print(f"  Max absolute error: {max_abs_err:.6e}")
-print(f"  Max relative error: {max_rel_err*100:.4f}%")
+    shift_amount = _RECIPROCAL_SHIFT_START
+    while (1 << shift_amount) // log_price_step_fixed >= _RECIPROCAL_SHIFT_LIMIT:
+        shift_amount -= 1
+    log_price_step_reciprocal = int(round((1 << shift_amount) / log_price_step_fixed))
 
-# Generate MIF file
-mif_filename = os.path.join(SIM_DIR, "exp_lut.mif")
-with open(mif_filename, "w", encoding="utf-8") as f:
-    f.write(f"-- exp() LUT for gbm_logspace.v\n")
-    f.write(f"-- Generated by gen_exp_lut.py\n")
-    f.write(f"-- L range: [{L_MIN}, {L_MAX}], N={N_ENTRIES}, Q8.24 output\n")
-    f.write(f"WIDTH = 32;\n")
-    f.write(f"DEPTH = {N_ENTRIES};\n")
-    f.write(f"ADDRESS_RADIX = UNS;\n")
-    f.write(f"DATA_RADIX = UNS;\n")
-    f.write(f"CONTENT BEGIN\n")
-    for i, val in enumerate(exp_q824):
-        f.write(f"    {i} : {int(val)};\n")
-    f.write(f"END;\n")
-print(f"\nWrote {mif_filename}")
+    return log_price_values, exp_q824, log_price_step, log_price_step_fixed, log_price_step_reciprocal, shift_amount
 
-# Generate behavioral Verilog header
-vh_filename = os.path.join(SIM_DIR, "exp_lut.vh")
-with open(vh_filename, "w", encoding="utf-8") as f:
-    f.write("// exp_lut.vh - Behavioral exp() LUT for ModelSim\n")
-    f.write("// Generated by gen_exp_lut.py\n")
-    f.write(f"// L range [{L_MIN:.3f}, {L_MAX:.3f}], step={L_step:.6f}\n\n")
-    f.write("function [31:0] exp_lut_lookup;\n")
-    f.write("    input [12:0] addr;\n")
-    f.write("    begin\n")
-    f.write("        case (addr)\n")
-    for i, val in enumerate(exp_q824):
-        f.write(f"            13'd{i:<4d}: exp_lut_lookup = 32'h{int(val):08X};\n")
-    f.write("            default: exp_lut_lookup = 32'h00000000;\n")
-    f.write("        endcase\n")
-    f.write("    end\n")
-    f.write("endfunction\n")
-print(f"Wrote {vh_filename}")
 
-# Generate Python golden model constants
-py_filename = "exp_lut_golden.py"
-with open(py_filename, "w", encoding="utf-8") as f:
-    f.write('"""\nGenerated by gen_exp_lut.py - Quantized exp() LUT constants\n"""\n\n')
-    f.write(f'N_ENTRIES    = {N_ENTRIES}\n')
-    f.write(f'L_MIN        = {L_MIN}\n')
-    f.write(f'L_MAX        = {L_MAX}\n')
-    f.write(f'L_STEP       = {L_step!r}\n')
-    f.write(f'L_MIN_FIXED  = {L_MIN_FIXED}\n')
-    f.write(f'L_STEP_FIXED = {L_STEP_FIXED}\n')
-    f.write(f'L_STEP_RECIP = {L_STEP_RECIP}\n')
-    f.write(f'L_STEP_SHIFT = {shift}\n')
-    f.write(f'PRICE_FRAC   = {PRICE_FRAC}\n')
-    f.write(f'L_FRAC       = {L_FRAC}\n\n')
-    f.write('EXP_LUT = [\n')
-    for i, val in enumerate(exp_q824):
-        f.write(f'    {int(val)},  # L={L_values[i]:.4f} -> exp={exp_values[i]:.4f}\n')
-    f.write(']\n\n')
-    f.write('def exp_lut_lookup(addr):\n')
-    f.write('    if 0 <= addr < N_ENTRIES:\n')
-    f.write('        return EXP_LUT[addr]\n')
-    f.write('    return 0\n\n')
-    f.write('def l_to_price(L_fixed):\n')
-    f.write('    """\n    Convert Q8.24 log-price integer to Q8.24 price integer.\n')
-    f.write('    Mirrors gbm_logspace.v hardware implementation.\n    """\n')
-    f.write('    offset = L_fixed - L_MIN_FIXED\n')
-    f.write('    if offset < 0:\n')
-    f.write('        return exp_lut_lookup(0)\n')
-    f.write(f'    addr = (offset * L_STEP_RECIP) >> {shift}\n')
-    f.write('    if addr >= N_ENTRIES:\n')
-    f.write('        return exp_lut_lookup(N_ENTRIES - 1)\n')
-    f.write('    return exp_lut_lookup(int(addr))\n')
-print(f"Wrote {py_filename}")
+def write_mif(
+    exp_q824: NDArray[np.int64],
+    output_path: Path = _MIF_OUTPUT_PATH,
+) -> None:
+    """Writes the Quartus MIF image holding the Q8.24 exp(L) table.
+
+    Args:
+        exp_q824: The quantized exp(L) values indexed by LUT address.
+        output_path: The destination path for the emitted MIF file.
+    """
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    lines: list[str] = [
+        "-- exp() LUT for gbm_logspace.v",
+        "-- Generated by gen_exp_lut.py",
+        f"-- L range: [{_LOG_PRICE_MIN}, {_LOG_PRICE_MAX}], N={len(exp_q824)}, Q8.24 output",
+        "WIDTH = 32;",
+        f"DEPTH = {len(exp_q824)};",
+        "ADDRESS_RADIX = UNS;",
+        "DATA_RADIX = UNS;",
+        "CONTENT BEGIN",
+    ]
+    for index, value in enumerate(exp_q824):
+        lines.append(f"    {index} : {int(value)};")
+    lines.append("END;")
+
+    output_path.write_text("\n".join(lines))
+    print(f"Wrote {output_path}")
+
+
+def write_verilog_header(
+    exp_q824: NDArray[np.int64],
+    log_price_step: float,
+    output_path: Path = _VH_OUTPUT_PATH,
+) -> None:
+    """Writes a Verilog include file with a behavioral exp() lookup function for simulation.
+
+    Args:
+        exp_q824: The quantized exp(L) values indexed by LUT address.
+        log_price_step: The L step size used to annotate the header file.
+        output_path: The destination path for the emitted Verilog header.
+    """
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    lines: list[str] = [
+        "// exp_lut.vh - Behavioral exp() LUT for ModelSim",
+        "// Generated by gen_exp_lut.py",
+        f"// L range [{_LOG_PRICE_MIN:.3f}, {_LOG_PRICE_MAX:.3f}], step={log_price_step:.6f}",
+        "",
+        "function [31:0] exp_lut_lookup;",
+        "    input [12:0] addr;",
+        "    begin",
+        "        case (addr)",
+    ]
+    for index, value in enumerate(exp_q824):
+        lines.append(f"            13'd{index:<4d}: exp_lut_lookup = 32'h{int(value):08X};")
+    lines.extend([
+        "            default: exp_lut_lookup = 32'h00000000;",
+        "        endcase",
+        "    end",
+        "endfunction",
+    ])
+
+    output_path.write_text("\n".join(lines))
+    print(f"Wrote {output_path}")
+
+
+def write_python_module(
+    log_price_values: NDArray[np.float64],
+    exp_q824: NDArray[np.int64],
+    log_price_step: float,
+    log_price_step_fixed: int,
+    log_price_step_reciprocal: int,
+    shift_amount: int,
+    output_path: Path = _PYTHON_OUTPUT_PATH,
+) -> None:
+    """Writes the Python module consumed by the golden model.
+
+    Emits the LUT contents alongside the address-scaling constants and a helper that mirrors
+    the hardware lookup, so the golden model and the RTL produce bit-identical prices.
+
+    Args:
+        log_price_values: The dense L-axis values used to annotate each LUT entry.
+        exp_q824: The quantized exp(L) values indexed by LUT address.
+        log_price_step: The L step size emitted as the L_STEP constant.
+        log_price_step_fixed: The L step size in Q0.24 fixed-point.
+        log_price_step_reciprocal: The reciprocal multiplier paired with shift_amount.
+        shift_amount: The right-shift amount that returns the LUT address from the multiply.
+        output_path: The destination path for the emitted Python module.
+    """
+    log_price_min_fixed = int(round(_LOG_PRICE_MIN * (1 << _LOG_PRICE_FRAC)))
+
+    lines: list[str] = [
+        '"""Generated by gen_exp_lut.py - Quantized exp() LUT constants."""',
+        "",
+        f"N_ENTRIES    = {len(exp_q824)}",
+        f"L_MIN        = {_LOG_PRICE_MIN}",
+        f"L_MAX        = {_LOG_PRICE_MAX}",
+        f"L_STEP       = {log_price_step!r}",
+        f"L_MIN_FIXED  = {log_price_min_fixed}",
+        f"L_STEP_FIXED = {log_price_step_fixed}",
+        f"L_STEP_RECIP = {log_price_step_reciprocal}",
+        f"L_STEP_SHIFT = {shift_amount}",
+        f"PRICE_FRAC   = {_PRICE_FRAC}",
+        f"L_FRAC       = {_LOG_PRICE_FRAC}",
+        "",
+        "EXP_LUT = [",
+    ]
+    for index, value in enumerate(exp_q824):
+        lines.append(f"    {int(value)},  # L={log_price_values[index]:.4f} -> exp={np.exp(log_price_values[index]):.4f}")
+    lines.extend([
+        "]",
+        "",
+        "def exp_lut_lookup(address):",
+        "    if 0 <= address < N_ENTRIES:",
+        "        return EXP_LUT[address]",
+        "    return 0",
+        "",
+        "def l_to_price(log_price_fixed):",
+        '    """Convert Q8.24 log-price integer to Q8.24 price integer."""',
+        "    offset = log_price_fixed - L_MIN_FIXED",
+        "    if offset < 0:",
+        "        return exp_lut_lookup(0)",
+        f"    address = (offset * L_STEP_RECIP) >> {shift_amount}",
+        "    if address >= N_ENTRIES:",
+        "        return exp_lut_lookup(N_ENTRIES - 1)",
+        "    return exp_lut_lookup(int(address))",
+    ])
+
+    output_path.write_text("\n".join(lines))
+    print(f"Wrote {output_path}")
+
+
+def _print_lut_summary(
+    log_price_step: float,
+    log_price_step_fixed: int,
+    log_price_step_reciprocal: int,
+    shift_amount: int,
+    exp_q824: NDArray[np.int64],
+) -> None:
+    """Prints the LUT configuration and hardware address scaling constants.
+
+    Args:
+        log_price_step: The L step size between adjacent LUT entries.
+        log_price_step_fixed: The L step size in Q0.24 fixed-point.
+        log_price_step_reciprocal: The reciprocal multiplier paired with shift_amount.
+        shift_amount: The right-shift amount that returns the LUT address from the multiply.
+        exp_q824: The quantized exp(L) values used for spot checks.
+    """
+    log_price_min_fixed = int(round(_LOG_PRICE_MIN * (1 << _LOG_PRICE_FRAC)))
+
+    print("LUT configuration:")
+    print(f"  N_ENTRIES    = {len(exp_q824)}")
+    print(f"  L range      = [{_LOG_PRICE_MIN:.3f}, {_LOG_PRICE_MAX:.3f}]")
+    print(f"  L_step       = {log_price_step:.6f}")
+    print(f"  L_MIN_FIXED  = {log_price_min_fixed} (32'h{log_price_min_fixed & 0xFFFFFFFF:08X})")
+    print(f"  L_STEP_FIXED = {log_price_step_fixed} (32'h{log_price_step_fixed:08X})")
+    print(f"  L_STEP_RECIP = {log_price_step_reciprocal} (32'h{log_price_step_reciprocal:08X})")
+    print(f"  VERILOG SHIFT AMOUNT = {shift_amount}")
+    print(f"  VERILOG EXTRACTION   = addr_full_wire[{shift_amount + _VERILOG_ADDRESS_LOWER_OFFSET}:{shift_amount}]")
+    print(f"  exp_q824 spot checks: [0]={exp_q824[0]}, [4095]={exp_q824[4095]}, [8191]={exp_q824[8191]}")
+
+
+def _print_quantization_error(
+    log_price_values: NDArray[np.float64],
+    exp_q824: NDArray[np.int64],
+) -> None:
+    """Prints the maximum absolute and relative quantization error across the LUT.
+
+    Args:
+        log_price_values: The dense L-axis values used to evaluate the reference exp(L).
+        exp_q824: The quantized exp(L) values indexed by LUT address.
+    """
+    exp_values = np.exp(log_price_values)
+    max_absolute_error = 0.0
+    max_relative_error = 0.0
+    for index in range(len(exp_q824)):
+        real_value = exp_q824[index] / (1 << _PRICE_FRAC)
+        clamped_value = min(exp_values[index], _PRICE_MAX_INT / (1 << _PRICE_FRAC))
+        absolute_error = abs(real_value - clamped_value)
+        relative_error = absolute_error / clamped_value
+        max_absolute_error = max(max_absolute_error, absolute_error)
+        max_relative_error = max(max_relative_error, relative_error)
+
+    print("\nQuantization error:")
+    print(f"  Max absolute error: {max_absolute_error:.6e}")
+    print(f"  Max relative error: {max_relative_error * 100:.4f}%")
+
+
+def main() -> None:
+    """Runs the full table-generation pipeline and emits all three artifacts."""
+    log_price_values, exp_q824, log_price_step, log_price_step_fixed, log_price_step_reciprocal, shift_amount = (
+        build_exp_table()
+    )
+
+    _print_lut_summary(
+        log_price_step=log_price_step,
+        log_price_step_fixed=log_price_step_fixed,
+        log_price_step_reciprocal=log_price_step_reciprocal,
+        shift_amount=shift_amount,
+        exp_q824=exp_q824,
+    )
+    _print_quantization_error(log_price_values=log_price_values, exp_q824=exp_q824)
+
+    write_mif(exp_q824=exp_q824)
+    write_verilog_header(exp_q824=exp_q824, log_price_step=log_price_step)
+    write_python_module(
+        log_price_values=log_price_values,
+        exp_q824=exp_q824,
+        log_price_step=log_price_step,
+        log_price_step_fixed=log_price_step_fixed,
+        log_price_step_reciprocal=log_price_step_reciprocal,
+        shift_amount=shift_amount,
+    )
+
+
+if __name__ == "__main__":
+    main()

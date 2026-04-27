@@ -30,8 +30,8 @@ PHASES = [
         'name': 'Always Emit (param1=1023)',
         'param_data': (0b00 << 30) | (0x3FF << 20) | (50 << 10) | 100,
         'gbm_price':  0x64000000,   
-        'last_exec_price': 0x64000000,
-        'oldest_exec_price': 0x64000000,
+        'last_executed_price': 0x64000000,
+        'oldest_executed_price': 0x64000000,
         'cycles':     400,
     },
     {
@@ -39,8 +39,8 @@ PHASES = [
         'name': 'Never Emit (param1=0)',
         'param_data': (0b00 << 30) | (0x000 << 20) | (50 << 10) | 100,
         'gbm_price':  0x64000000,
-        'last_exec_price': 0x64000000,
-        'oldest_exec_price': 0x64000000,
+        'last_executed_price': 0x64000000,
+        'oldest_executed_price': 0x64000000,
         'cycles':     200,
     },
     {
@@ -48,8 +48,8 @@ PHASES = [
         'name': '50pct Emit (param1=512)',
         'param_data': (0b00 << 30) | (512 << 20) | (50 << 10) | 100,
         'gbm_price':  0x64000000,
-        'last_exec_price': 0x64000000,
-        'oldest_exec_price': 0x64000000,
+        'last_executed_price': 0x64000000,
+        'oldest_executed_price': 0x64000000,
         # 4000 cycles + 4 setup cycles from TB transition = 4004
         'cycles':     4004, 
     },
@@ -59,8 +59,8 @@ PHASES = [
         'name': 'Value: Undervalued (Buy)',
         'param_data': (0b11 << 30) | (10 << 20) | (256 << 10) | 100,
         'gbm_price':  0x78000000,   
-        'last_exec_price': 0x64000000, 
-        'oldest_exec_price': 0x64000000,
+        'last_executed_price': 0x64000000, 
+        'oldest_executed_price': 0x64000000,
         'cycles':     200,
     },
     {
@@ -68,8 +68,8 @@ PHASES = [
         'name': 'Value: Overvalued (Sell)',
         'param_data': (0b11 << 30) | (10 << 20) | (256 << 10) | 100,
         'gbm_price':  0x50000000,   
-        'last_exec_price': 0x64000000, 
-        'oldest_exec_price': 0x64000000,
+        'last_executed_price': 0x64000000, 
+        'oldest_executed_price': 0x64000000,
         'cycles':     200,
     },
     {
@@ -77,8 +77,8 @@ PHASES = [
         'name': 'Value: Within Threshold (Silent)',
         'param_data': (0b11 << 30) | (10 << 20) | (256 << 10) | 100,
         'gbm_price':  0x66000000,   
-        'last_exec_price': 0x64000000, 
-        'oldest_exec_price': 0x64000000,
+        'last_executed_price': 0x64000000, 
+        'oldest_executed_price': 0x64000000,
         'cycles':     200,
     },
     # --- MOMENTUM TRADER PHASES ---
@@ -87,8 +87,8 @@ PHASES = [
         'name': 'Momentum: Uptrend (Buy)',
         'param_data': (0b10 << 30) | (10 << 20) | (256 << 10) | 100,
         'gbm_price':  0x64000000, # Ignored by Momentum, but keeping struct intact
-        'last_exec_price':   0x78000000, # Newest (Tick 240)
-        'oldest_exec_price': 0x64000000, # Oldest (Tick 200)
+        'last_executed_price':   0x78000000, # Newest (Tick 240)
+        'oldest_executed_price': 0x64000000, # Oldest (Tick 200)
         'cycles':     200,
     },
     {
@@ -96,8 +96,8 @@ PHASES = [
         'name': 'Momentum: Downtrend (Sell)',
         'param_data': (0b10 << 30) | (10 << 20) | (256 << 10) | 100,
         'gbm_price':  0x64000000,
-        'last_exec_price':   0x50000000, # Newest (Tick 160)
-        'oldest_exec_price': 0x64000000, # Oldest (Tick 200)
+        'last_executed_price':   0x50000000, # Newest (Tick 160)
+        'oldest_executed_price': 0x64000000, # Oldest (Tick 200)
         'cycles':     200,
     },
     {
@@ -105,8 +105,8 @@ PHASES = [
         'name': 'Momentum: Sideways (Silent)',
         'param_data': (0b10 << 30) | (10 << 20) | (256 << 10) | 100,
         'gbm_price':  0x64000000,
-        'last_exec_price':   0x66000000, # Newest (Tick 204)
-        'oldest_exec_price': 0x64000000, # Oldest (Tick 200)
+        'last_executed_price':   0x66000000, # Newest (Tick 204)
+        'oldest_executed_price': 0x64000000, # Oldest (Tick 200)
         'cycles':     200,
     }
 ]
@@ -138,14 +138,14 @@ def decode_param_data(param_data):
 def run_golden_model(phase, lfsr_init):
     param_data = phase['param_data']
     gbm_price  = phase['gbm_price']
-    last_exec_price = phase['last_exec_price']
-    oldest_exec_price = phase.get('oldest_exec_price', 0x64000000)
+    last_executed_price = phase['last_executed_price']
+    oldest_executed_price = phase.get('oldest_executed_price', 0x64000000)
     num_cycles = phase['cycles']
     
     agent_type, param1, param2, param3 = decode_param_data(param_data)
     gbm_tick = gbm_price_to_tick(gbm_price)
-    last_exec_tick = gbm_price_to_tick(last_exec_price)
-    oldest_exec_tick = gbm_price_to_tick(oldest_exec_price)
+    last_executed_tick = gbm_price_to_tick(last_executed_price)
+    oldest_executed_tick = gbm_price_to_tick(oldest_executed_price)
     
     predictions = []
     lfsr = lfsr_init
@@ -194,7 +194,7 @@ def run_golden_model(phase, lfsr_init):
 
         # --- MOMENTUM TRADER (10) ---
         elif agent_type == 0b10:
-            momentum_delta = last_exec_tick - oldest_exec_tick
+            momentum_delta = last_executed_tick - oldest_executed_tick
             abs_mom = abs(momentum_delta)
             
             emits = abs_mom > param1
@@ -206,7 +206,7 @@ def run_golden_model(phase, lfsr_init):
                 volume_raw = (dsp_product >> 10) + 1
                 volume = min(volume_raw, param3)
                 
-                final_price = last_exec_tick # Market orders fire at the current front of the book
+                final_price = last_executed_tick # Market orders fire at the current front of the book
                 order_type = 1 # Always market
                 
                 predictions.append({
@@ -221,7 +221,7 @@ def run_golden_model(phase, lfsr_init):
 
         # --- VALUE INVESTOR (11) ---
         elif agent_type == 0b11:
-            divergence = gbm_tick - last_exec_tick
+            divergence = gbm_tick - last_executed_tick
             abs_div = abs(divergence)
             
             emits = abs_div > param1
@@ -460,7 +460,7 @@ def plot_value_results(actual_df, predictions_by_phase):
     ax1.set_ylim(0, max(max(volumes) + 3, 10))
 
     gbm_ticks = [gbm_price_to_tick(PHASES[3]['gbm_price']), gbm_price_to_tick(PHASES[4]['gbm_price']), gbm_price_to_tick(PHASES[5]['gbm_price'])]
-    exec_tick = gbm_price_to_tick(PHASES[3]['last_exec_price']) 
+    exec_tick = gbm_price_to_tick(PHASES[3]['last_executed_price']) 
     
     ax2.plot(x, gbm_ticks, marker='o', linestyle='-', color='blue', label='GBM Fair Value Tick', markersize=8)
     ax2.axhline(exec_tick, color='purple', linestyle='--', label=f'Last Exec Tick ({exec_tick})')
@@ -520,8 +520,8 @@ def plot_momentum_results(actual_df, predictions_by_phase):
     ax1.set_ylim(0, max(max(volumes) + 3, 10))
 
     # Retrieve ticks directly from the test configs
-    newest_ticks = [gbm_price_to_tick(PHASES[6]['last_exec_price']), gbm_price_to_tick(PHASES[7]['last_exec_price']), gbm_price_to_tick(PHASES[8]['last_exec_price'])]
-    oldest_ticks = [gbm_price_to_tick(PHASES[6]['oldest_exec_price']), gbm_price_to_tick(PHASES[7]['oldest_exec_price']), gbm_price_to_tick(PHASES[8]['oldest_exec_price'])]
+    newest_ticks = [gbm_price_to_tick(PHASES[6]['last_executed_price']), gbm_price_to_tick(PHASES[7]['last_executed_price']), gbm_price_to_tick(PHASES[8]['last_executed_price'])]
+    oldest_ticks = [gbm_price_to_tick(PHASES[6]['oldest_executed_price']), gbm_price_to_tick(PHASES[7]['oldest_executed_price']), gbm_price_to_tick(PHASES[8]['oldest_executed_price'])]
     
     ax2.plot(x, newest_ticks, marker='o', linestyle='-', color='blue', label='Newest Trade (reg_0)', markersize=8)
     ax2.plot(x, oldest_ticks, marker='s', linestyle='--', color='purple', label='Oldest Trade (reg_3)', markersize=8)

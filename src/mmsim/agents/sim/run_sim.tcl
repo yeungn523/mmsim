@@ -88,10 +88,10 @@ add wave -divider "Slot Counter"
 add wave -radix unsigned   /agent_execution_unit_tb/dut/slot_counter
 
 add wave -divider "Exec Price Shift Reg"
-add wave -radix hex        /agent_execution_unit_tb/dut/exec_price_shift_reg_0
-add wave -radix hex        /agent_execution_unit_tb/dut/exec_price_shift_reg_1
-add wave -radix hex        /agent_execution_unit_tb/dut/exec_price_shift_reg_2
-add wave -radix hex        /agent_execution_unit_tb/dut/exec_price_shift_reg_3
+add wave -radix hex        /agent_execution_unit_tb/dut/executed_price_shift_reg_0
+add wave -radix hex        /agent_execution_unit_tb/dut/executed_price_shift_reg_1
+add wave -radix hex        /agent_execution_unit_tb/dut/executed_price_shift_reg_2
+add wave -radix hex        /agent_execution_unit_tb/dut/executed_price_shift_reg_3
 
 # =====================================================================
 # 5. Configure wave window
