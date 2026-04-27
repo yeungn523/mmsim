@@ -1,10 +1,15 @@
-`timescale 1ns/1ns
+///
+/// @file tb_matching_engine_csv.v
+/// @brief Pipelined CSV testbench for matching_engine that issues packets back-to-back whenever
+///        order_ready is asserted and logs one CSV row per retired packet plus one row per
+///        trade pulse for golden-model comparison.
+///
+/// Outputs:
+///   matching_engine_actual.csv        -- post-packet book snapshot, one row per packet
+///   matching_engine_trades_actual.csv -- one row per trade pulse
+///
 
-// Pipelined CSV testbench for the matching_engine. Issues packets back-to-back whenever the
-// engine asserts order_ready, then logs one CSV row per retired packet using order_retire_valid
-// and the engine's per-packet trade aggregates.
-//   matching_engine_actual.csv        -- post-packet book snapshot, one row per packet
-//   matching_engine_trades_actual.csv -- one row per trade pulse
+`timescale 1ns/1ns
 
 module tb_matching_engine_csv;
 

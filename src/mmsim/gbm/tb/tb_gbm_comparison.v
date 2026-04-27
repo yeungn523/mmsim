@@ -1,7 +1,8 @@
-// =============================================================================
-// tb_gbm_comparison.v - GBM Candidate Comparison Testbench
-// Drive Euler and Log-Space modules with identical Z-stimulus for verification.
-// =============================================================================
+///
+/// @file tb_gbm_comparison.v
+/// @brief Drives the Euler-Maruyama and log-space GBM candidates with an identical Z-stimulus
+///        stream so the two implementations can be cross-checked sample-for-sample.
+///
 
 `timescale 1ns/1ns
 

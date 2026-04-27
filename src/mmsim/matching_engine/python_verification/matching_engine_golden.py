@@ -17,6 +17,10 @@ from .price_level_store_no_cancellation_golden import PriceLevelStoreNoCancellat
 # Number of addressable price ticks (must match kPriceRange in the Verilog DUT).
 _DEFAULT_PRICE_RANGE: int = 480
 
+# Left-shift applied to a tick to expose last_executed_price as a Q8.24 price (matches
+# kTickShiftBits in matching_engine.v and TICK_SHIFT_BITS in agent_execution_unit.v).
+_TICK_SHIFT_BITS: int = 23
+
 # Default seed for deterministic stimulus generation.
 _DEFAULT_SEED: int = 42
 
@@ -181,7 +185,11 @@ class MatchingEngine:
 
     @property
     def last_executed_price(self) -> int:
-        """Returns the most recently executed trade price (0 before any trade has occurred)."""
+        """Returns the most recently executed trade price as a Q8.24 unsigned value (0 before any
+        trade has occurred). The internal book operates on raw tick indices; this property
+        applies the same left-shift the Verilog matching_engine uses on its last_executed_price
+        output so the agent execution unit's Q8.24 contract is satisfied directly.
+        """
         return self._last_executed_price
 
     @property
@@ -226,7 +234,7 @@ class MatchingEngine:
                 side=0 if is_buy else 1,
             ))
             remaining -= consumed
-            self._last_executed_price = opposite_best
+            self._last_executed_price = opposite_best << _TICK_SHIFT_BITS
             self._last_executed_price_valid = True
 
         if remaining > 0 and not is_market:

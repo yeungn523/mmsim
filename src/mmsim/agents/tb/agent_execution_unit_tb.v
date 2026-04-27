@@ -1,32 +1,32 @@
-// agent_execution_unit_tb.v
-// ModelSim testbench for agent_execution_unit
-//
-// METHODOLOGY:
-//   - Drives hardcoded deterministic inputs so Python golden model can
-//     predict exact outputs without needing to simulate the TB itself
-//   - Internal LFSR inside DUT is real and free-running from a known seed
-//     (LFSR_SEED = 32'hCAFEBABE, POLY = 32'hB4BCD35C) -- Python replicates
-//     this exact Galois LFSR to predict emission decisions and packet values
-//   - Every order_valid pulse dumps one CSV row via $fwrite
-//   - CSV includes input state snapshot at moment of emission so Python
-//     can verify math without ambiguity
-//
-// CSV FORMAT (one row per order_valid pulse):
-//   cycle,phase,side,order_type,agent_type,price,volume,gbm_price_in,param_data_in
-//
-// PHASES:
-//   Phase 1-3: Noise trader (Always emit, Never emit, 50% emit)
-//   Phase 4-6: Value investor (Buy, Sell, Silent)
-//   Phase 7: Momentum trader, Uptrend (Buy)
-//            Expected: order_valid every 4 cycles, market buy
-//   Phase 8: Momentum trader, Downtrend (Sell)
-//            Expected: order_valid every 4 cycles, market sell
-//   Phase 9: Momentum trader, Sideways (Silent)
-//            Expected: order_valid never asserted
-//
-// HOW TO RUN:
-//   do run_sim.tcl
-//   Output: sim_output.csv in working directory
+///
+/// @file agent_execution_unit_tb.v
+/// @brief Phased deterministic testbench for agent_execution_unit that exercises every agent
+///        type with hardcoded stimuli and dumps one CSV row per order_valid pulse for the
+///        Python golden model to score.
+///
+/// Methodology:
+///   - Drives hardcoded deterministic inputs so the Python golden model predicts exact outputs
+///     without simulating the testbench itself.
+///   - Lets the DUT's internal LFSR free-run from a known seed (LFSR_SEED = 32'hCAFEBABE,
+///     POLY = 32'hB4BCD35C). Python replicates the same Galois LFSR to predict emission
+///     decisions and packet values.
+///   - Dumps one CSV row per order_valid pulse via $fwrite, capturing the input snapshot at
+///     the moment of emission so the math can be verified without ambiguity.
+///
+/// CSV format (one row per order_valid pulse):
+///   cycle,phase,side,order_type,agent_type,price,volume,gbm_price_in,param_data_in
+///
+/// Phases:
+///   1-3: Noise trader (always emit, never emit, 50pct emit)
+///   4-6: Value investor (buy, sell, silent)
+///   7:   Momentum trader uptrend (market buy every 4 cycles)
+///   8:   Momentum trader downtrend (market sell every 4 cycles)
+///   9:   Momentum trader sideways (silent)
+///
+/// How to run:
+///   do run_sim.tcl
+///   Output: sim_output.csv in working directory.
+///
 
 `timescale 1ns/1ns
 
@@ -59,7 +59,7 @@ module agent_execution_unit_tb;
     reg         clk;
     reg         rst_n;
     reg  [31:0] gbm_price;
-    reg  [31:0] last_exec_price;
+    reg  [31:0] last_executed_price;
     reg  [15:0] sigma;
     reg         trade_valid;
     wire [15:0] param_addr;
@@ -97,7 +97,7 @@ module agent_execution_unit_tb;
         .clk               (clk),
         .rst_n             (rst_n),
         .gbm_price         (gbm_price),
-        .last_exec_price   (last_exec_price),
+        .last_executed_price (last_executed_price),
         .sigma             (sigma),
         .trade_valid       (trade_valid),
         .param_addr        (param_addr),
@@ -161,7 +161,7 @@ module agent_execution_unit_tb;
         // ============================================================
         phase           = 1;
         gbm_price       = 32'h64000000; // Q8.24 = 100.0, tick = 200
-        last_exec_price = 32'h64000000;
+        last_executed_price = 32'h64000000;
         sigma           = 16'h0100;
 
         for (i = 0; i < 64; i = i + 1)
@@ -236,7 +236,7 @@ module agent_execution_unit_tb;
         // SETUP FOR VALUE INVESTOR (PHASES 4-6)
         // Must pulse trade_valid so exec_price_shift_reg catches it
         // ============================================================
-        last_exec_price = 32'h64000000; // Q8.24 = 100.0, tick = 200
+        last_executed_price = 32'h64000000; // Q8.24 = 100.0, tick = 200
         trade_valid     = 1;
         @(posedge clk);
         #1; 
@@ -307,20 +307,20 @@ module agent_execution_unit_tb;
         // Type=10, Threshold=10, Aggression=256, Cap=100
         param_table[0] = {2'b10, 10'd10, 10'd256, 10'd100};
         
-        last_exec_price = 32'h64000000; trade_valid = 1; @(posedge clk); #1; trade_valid = 0; repeat(3) @(posedge clk); #1; // tick 200
-        last_exec_price = 32'h69000000; trade_valid = 1; @(posedge clk); #1; trade_valid = 0; repeat(3) @(posedge clk); #1; // tick 210
-        last_exec_price = 32'h6E000000; trade_valid = 1; @(posedge clk); #1; trade_valid = 0; repeat(3) @(posedge clk); #1; // tick 220
-        last_exec_price = 32'h78000000; trade_valid = 1; @(posedge clk); #1; trade_valid = 0; repeat(3) @(posedge clk); #1; // tick 240
+        last_executed_price = 32'h64000000; trade_valid = 1; @(posedge clk); #1; trade_valid = 0; repeat(3) @(posedge clk); #1; // tick 200
+        last_executed_price = 32'h69000000; trade_valid = 1; @(posedge clk); #1; trade_valid = 0; repeat(3) @(posedge clk); #1; // tick 210
+        last_executed_price = 32'h6E000000; trade_valid = 1; @(posedge clk); #1; trade_valid = 0; repeat(3) @(posedge clk); #1; // tick 220
+        last_executed_price = 32'h78000000; trade_valid = 1; @(posedge clk); #1; trade_valid = 0; repeat(3) @(posedge clk); #1; // tick 240
         
         // ============================================================
         // SETUP FOR MOMENTUM TRADER - UPTREND (PHASE 7)
         // ============================================================
         param_table[0] = 32'd0; // <-- MUTE AGENT DURING SETUP
         
-        last_exec_price = 32'h64000000; trade_valid = 1; @(posedge clk); #1; trade_valid = 0; repeat(3) @(posedge clk); #1; // tick 200
-        last_exec_price = 32'h69000000; trade_valid = 1; @(posedge clk); #1; trade_valid = 0; repeat(3) @(posedge clk); #1; // tick 210
-        last_exec_price = 32'h6E000000; trade_valid = 1; @(posedge clk); #1; trade_valid = 0; repeat(3) @(posedge clk); #1; // tick 220
-        last_exec_price = 32'h78000000; trade_valid = 1; @(posedge clk); #1; trade_valid = 0; repeat(3) @(posedge clk); #1; // tick 240
+        last_executed_price = 32'h64000000; trade_valid = 1; @(posedge clk); #1; trade_valid = 0; repeat(3) @(posedge clk); #1; // tick 200
+        last_executed_price = 32'h69000000; trade_valid = 1; @(posedge clk); #1; trade_valid = 0; repeat(3) @(posedge clk); #1; // tick 210
+        last_executed_price = 32'h6E000000; trade_valid = 1; @(posedge clk); #1; trade_valid = 0; repeat(3) @(posedge clk); #1; // tick 220
+        last_executed_price = 32'h78000000; trade_valid = 1; @(posedge clk); #1; trade_valid = 0; repeat(3) @(posedge clk); #1; // tick 240
         
         // ============================================================
         // PHASE 7: Momentum Trader - Uptrend (Buy)
@@ -341,10 +341,10 @@ module agent_execution_unit_tb;
         // ============================================================
         param_table[0] = 32'd0; // <-- MUTE AGENT DURING SETUP
         
-        last_exec_price = 32'h64000000; trade_valid = 1; @(posedge clk); #1; trade_valid = 0; repeat(3) @(posedge clk); #1; // tick 200
-        last_exec_price = 32'h5F000000; trade_valid = 1; @(posedge clk); #1; trade_valid = 0; repeat(3) @(posedge clk); #1; // tick 190
-        last_exec_price = 32'h5A000000; trade_valid = 1; @(posedge clk); #1; trade_valid = 0; repeat(3) @(posedge clk); #1; // tick 180
-        last_exec_price = 32'h50000000; trade_valid = 1; @(posedge clk); #1; trade_valid = 0; repeat(3) @(posedge clk); #1; // tick 160
+        last_executed_price = 32'h64000000; trade_valid = 1; @(posedge clk); #1; trade_valid = 0; repeat(3) @(posedge clk); #1; // tick 200
+        last_executed_price = 32'h5F000000; trade_valid = 1; @(posedge clk); #1; trade_valid = 0; repeat(3) @(posedge clk); #1; // tick 190
+        last_executed_price = 32'h5A000000; trade_valid = 1; @(posedge clk); #1; trade_valid = 0; repeat(3) @(posedge clk); #1; // tick 180
+        last_executed_price = 32'h50000000; trade_valid = 1; @(posedge clk); #1; trade_valid = 0; repeat(3) @(posedge clk); #1; // tick 160
 
         // ============================================================
         // PHASE 8: Momentum Trader - Downtrend (Sell)
@@ -365,10 +365,10 @@ module agent_execution_unit_tb;
         // ============================================================
         param_table[0] = 32'd0; // <-- MUTE AGENT DURING SETUP
         
-        last_exec_price = 32'h64000000; trade_valid = 1; @(posedge clk); #1; trade_valid = 0; repeat(3) @(posedge clk); #1; // tick 200
-        last_exec_price = 32'h64000000; trade_valid = 1; @(posedge clk); #1; trade_valid = 0; repeat(3) @(posedge clk); #1; // tick 200
-        last_exec_price = 32'h65000000; trade_valid = 1; @(posedge clk); #1; trade_valid = 0; repeat(3) @(posedge clk); #1; // tick 202
-        last_exec_price = 32'h66000000; trade_valid = 1; @(posedge clk); #1; trade_valid = 0; repeat(3) @(posedge clk); #1; // tick 204
+        last_executed_price = 32'h64000000; trade_valid = 1; @(posedge clk); #1; trade_valid = 0; repeat(3) @(posedge clk); #1; // tick 200
+        last_executed_price = 32'h64000000; trade_valid = 1; @(posedge clk); #1; trade_valid = 0; repeat(3) @(posedge clk); #1; // tick 200
+        last_executed_price = 32'h65000000; trade_valid = 1; @(posedge clk); #1; trade_valid = 0; repeat(3) @(posedge clk); #1; // tick 202
+        last_executed_price = 32'h66000000; trade_valid = 1; @(posedge clk); #1; trade_valid = 0; repeat(3) @(posedge clk); #1; // tick 204
 
         // ============================================================
         // PHASE 9: Momentum Trader - Sideways (Silent)

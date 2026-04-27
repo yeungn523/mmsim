@@ -1,11 +1,13 @@
-// tb_galois_lfsr.v
-// Self-checking testbench for galois_lfsr.v. Covers reset, seed load, enable gating, early
-// period sanity, bit uniformity, no-zero-lock, reproducibility, seed divergence, and exact
-// sequence match against a Python golden model.
-//
-// ModelSim:
-//   vlog galois_lfsr.v tb_galois_lfsr.v
-//   vsim -do run_lfsr.tcl
+///
+/// @file tb_galois_lfsr.v
+/// @brief Self-checking testbench for galois_lfsr that covers reset, seed load, enable gating,
+///        early-period sanity, bit uniformity, no-zero-lock, reproducibility, seed divergence,
+///        and an exact sequence match against the Python golden model.
+///
+/// ModelSim:
+///   vlog galois_lfsr.v tb_galois_lfsr.v
+///   vsim -do run_lfsr.tcl
+///
 
 `timescale 1ns/1ns
 

@@ -1,3 +1,10 @@
+///
+/// @file tb_price_level_store_no_cancellation_csv.v
+/// @brief Replays a CSV stream of insert/consume commands against the no-cancellation
+///        price_level_store DUT and logs each response, latency, and best-level snapshot to
+///        a sibling CSV for golden-model comparison.
+///
+
 `timescale 1ns/1ns
 
 module tb_price_level_store_no_cancellation_csv;

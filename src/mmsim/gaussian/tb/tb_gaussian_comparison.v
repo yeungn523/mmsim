@@ -1,9 +1,12 @@
-// tb_gaussian_comparison.v
-// ModelSim testbench comparing the CLT-12 and Ziggurat (ROM-based) Gaussian generators.
-//
-// Outputs:
-//   clt12_samples.csv      - sample_index, raw_q115, float_value
-//   ziggurat_samples.csv   - sample_index, raw_q115, float_value
+///
+/// @file tb_gaussian_comparison.v
+/// @brief Compares the CLT-12 and ROM-backed Ziggurat Gaussian generators by sampling each in
+///        parallel and emitting per-sample CSVs for downstream statistical verification.
+///
+/// Outputs:
+///   clt12_samples.csv      -- sample_index, raw_q115, float_value
+///   ziggurat_samples.csv   -- sample_index, raw_q115, float_value
+///
 
 `timescale 1ns/1ns
 

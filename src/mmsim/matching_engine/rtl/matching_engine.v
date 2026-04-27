@@ -23,7 +23,8 @@ module matching_engine #(
     parameter kPriceWidth      = 32,    ///< Bit width of the internal price field.
     parameter kQuantityWidth   = 16,    ///< Bit width of the quantity field.
     parameter kPriceRange      = 480,   ///< Number of addressable price ticks.
-    parameter kAcceptFifoDepth = 32     ///< Depth of the Accept FIFO between Stage A and Stage B.
+    parameter kAcceptFifoDepth = 32,    ///< Depth of the Accept FIFO between Stage A and Stage B.
+    parameter kTickShiftBits   = 23     ///< Left-shift applied to a tick to expose last_executed_price as a Q8.24 price.
 )(
     input  wire                        clk,
     input  wire                        rst_n,
@@ -39,7 +40,9 @@ module matching_engine #(
     output reg                         trade_side,           ///< 0 = buy aggressor, 1 = sell aggressor.
     output reg                         trade_valid,
 
-    // Holds the most recent fill price across packets.
+    // Holds the most recent fill price across packets, exposed as a Q8.24 unsigned price so it
+    // matches the agent execution unit's last_executed_price contract directly. trade_price and
+    // best_*_price remain in raw tick units; only last_executed_price crosses the agent boundary.
     output reg  [kPriceWidth-1:0]      last_executed_price,
     output reg                         last_executed_price_valid,
 
@@ -368,7 +371,7 @@ module matching_engine #(
                             trade_price            <= b_working_trade_price;
                             trade_quantity         <= ask_response_quantity;
                             trade_side             <= 1'b0;
-                            last_executed_price       <= b_working_trade_price;
+                            last_executed_price       <= b_working_trade_price << kTickShiftBits;
                             last_executed_price_valid <= 1'b1;
                             b_working_remaining    <= b_working_remaining - ask_response_quantity;
                             b_packet_trade_count   <= b_packet_trade_count + 1'b1;
@@ -381,7 +384,7 @@ module matching_engine #(
                             trade_price            <= b_working_trade_price;
                             trade_quantity         <= bid_response_quantity;
                             trade_side             <= 1'b1;
-                            last_executed_price       <= b_working_trade_price;
+                            last_executed_price       <= b_working_trade_price << kTickShiftBits;
                             last_executed_price_valid <= 1'b1;
                             b_working_remaining    <= b_working_remaining - bid_response_quantity;
                             b_packet_trade_count   <= b_packet_trade_count + 1'b1;
