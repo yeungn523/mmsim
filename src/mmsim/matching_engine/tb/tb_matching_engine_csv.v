@@ -47,8 +47,7 @@ module tb_matching_engine_csv;
     matching_engine #(
         .kPriceWidth      (kPriceWidth),
         .kQuantityWidth   (kQuantityWidth),
-        .kPriceRange      (kPriceRange),
-        .kAcceptFifoDepth (32)
+        .kPriceRange      (kPriceRange)
     ) dut (
         .clk                        (clock),
         .rst_n                      (reset_n),

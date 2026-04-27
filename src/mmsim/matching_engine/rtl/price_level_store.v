@@ -76,6 +76,14 @@ module price_level_store #(
 
     wire [kPriceIndexWidth-1:0] best_price_index;
 
+    // Pipelines best_price_index by one cycle so the wide priority-encoder fan-in is registered
+    // before driving the M10K read address; this relaxes timing on the best-price read path.
+    reg [kPriceIndexWidth-1:0] best_price_index_r;
+    always @(posedge clk) begin
+        if (!rst_n) best_price_index_r <= {kPriceIndexWidth{1'b0}};
+        else        best_price_index_r <= best_price_index;
+    end
+
     // Drives the synchronous read-modify-write port and resets the output register so
     // port_a_rdata starts at zero rather than X before any read has issued.
     always @(posedge clk) begin : level_quantity_port_a
@@ -87,13 +95,14 @@ module price_level_store #(
         end
     end
 
-    // Drives the synchronous read for the best-price quantity and resets the output register
+    // Drives the synchronous read for the best-price quantity off the registered index so the
+    // priority encoder + wide mux split into two pipeline stages, and resets the output register
     // so best_quantity reads zero before any command has executed.
     always @(posedge clk) begin : level_quantity_port_b
         if (!rst_n) begin
             port_b_rdata <= {kQuantityWidth{1'b0}};
         end else begin
-            port_b_rdata <= level_quantity[best_price_index];
+            port_b_rdata <= level_quantity[best_price_index_r];
         end
     end
 
