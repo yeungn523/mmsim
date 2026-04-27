@@ -23,7 +23,7 @@
 module tb_sim_top;
     localparam kClockPeriod  = 20;
     localparam kRunCycles    = 1000;
-    localparam kWatchdog     = 500000;
+    localparam kWatchdog     = 10000;
 
     localparam NUM_UNITS        = 4;
     localparam SLOTS_PER_UNIT   = 64;
@@ -31,12 +31,14 @@ module tb_sim_top;
     localparam kQuantityWidth   = 16;
     localparam kPriceRange      = 480;
 
-    // Noise trader param encoding:
-    //   bits [31:30] = 2'b00  agent type = noise
-    //   bits [29:20] = 700    emission probability ~68%
-    //   bits [19:10] = 32     max price offset in ticks
-    //   bits [9:0]   = 8      max volume cap
+    localparam kNoiseCount    = 64;
+    localparam kMMCount       = 0;
+    localparam kMomentumCount = 0;
+    localparam kValueCount    = 0;
     localparam [31:0] kNoiseTraderParam = {2'b00, 10'd700, 10'd32, 10'd8};
+    localparam [31:0] kMMTraderParam    = {2'b01, 10'd800, 10'd4,  10'd5};
+    localparam [31:0] kMomentumParam    = {2'b10, 10'd15,  10'd4,  10'd4};
+    localparam [31:0] kValueParam       = {2'b11, 10'd8,   10'd16, 10'd10};
 
     reg clk;
     reg rst_n;
@@ -129,6 +131,9 @@ module tb_sim_top;
         .order_valid         (order_valid),
         .order_ready         (order_ready)
     );
+
+    wire arb_valid_tap;
+    assign arb_valid_tap = u_order_gen.arb_valid;
 
     matching_engine #(
         .kPriceWidth    (kPriceWidth),
@@ -264,7 +269,7 @@ module tb_sim_top;
 
     // Invariant 3: order_fifo full never asserts.
     always @(posedge clk) begin
-        if (rst_n && fifo_full) begin
+        if (rst_n && fifo_full && arb_valid_tap) begin
             $fwrite(events_file, "%0d,FIFO_FULL\n", cycle_count);
             total_fifo_full_events <= total_fifo_full_events + 1;
         end
@@ -442,6 +447,8 @@ module tb_sim_top;
 
     integer unit;
     integer slot;
+    integer global_slot;
+    reg [31:0] slot_param;
     initial begin
         $dumpfile("tb_sim_top.vcd");
         $dumpvars(0, tb_sim_top);
@@ -468,17 +475,27 @@ module tb_sim_top;
         rst_n <= 1'b1;
         tick_n(2);
 
-        // Phase 1: seed all agent parameter slots. addr[15:6] = unit index, addr[5:0] = slot.
+        global_slot = 0;
         for (unit = 0; unit < NUM_UNITS; unit = unit + 1) begin
             for (slot = 0; slot < SLOTS_PER_UNIT; slot = slot + 1) begin
-                write_param(
-                    (unit[15:0] << 6) | slot[15:0],
-                    kNoiseTraderParam
-                );
+                global_slot = unit * SLOTS_PER_UNIT + slot;
+                if      (global_slot < kNoiseCount)
+                    slot_param = kNoiseTraderParam;
+                else if (global_slot < kNoiseCount + kMMCount)
+                    slot_param = kMMTraderParam;
+                else if (global_slot < kNoiseCount + kMMCount + kMomentumCount)
+                    slot_param = kMomentumParam;
+                else if (global_slot < kNoiseCount + kMMCount + kMomentumCount + kValueCount)
+                    slot_param = kValueParam;
+                else
+                    slot_param = kNoiseTraderParam; // fill remainder with noise
+                write_param((unit[15:0] << 6) | slot[15:0], slot_param);
             end
         end
 
-        // Activates 64 agents (16 per unit x 4 units, capped at 16 by the FSM).
+        wait(u_order_gen.gbm_price_valid);
+        tick_n(4);  
+
         active_agent_count <= 16'd64;
         tick_n(2);
 

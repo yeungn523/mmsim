@@ -12,10 +12,11 @@ import matplotlib.gridspec as gridspec
 import matplotlib.pyplot as plt
 import pandas as pd
 
-_EVENTS_FILE: str = "sim_top_events.csv"
-_SNAPSHOTS_FILE: str = "sim_top_snapshots.csv"
-_SUMMARY_FILE: str = "sim_top_summary.csv"
-_PLOT_OUTPUT: str = "sim_top_analysis.png"
+_SIM_DIR = Path(__file__).parent.parent / "sim"
+_EVENTS_FILE: str = str(_SIM_DIR / "sim_top_events.csv")
+_SNAPSHOTS_FILE: str = str(_SIM_DIR / "sim_top_snapshots.csv")
+_SUMMARY_FILE: str = str(_SIM_DIR / "sim_top_summary.csv")
+_PLOT_OUTPUT: str = str(Path(__file__).parent / "sim_top_analysis.png")
 
 _VIOLATION_EVENTS: set[str] = {
     "CROSSED_BOOK",
@@ -39,11 +40,27 @@ def load_csv(path: str) -> pd.DataFrame:
     Returns:
         The parsed DataFrame.
     """
-    csv_path = Path(path)
-    if not csv_path.exists():
+    p = Path(path)
+    if not p.exists():
         print(f"[ERROR] Could not find {path}. Did the simulation run successfully?")
         sys.exit(1)
-    return pd.read_csv(csv_path)
+
+    if "events" in str(p):
+        df = pd.read_csv(p, header=None, skiprows=1, index_col=False,
+                         names=["cycle","event","c2","c3","c4","c5"],
+                         dtype=str)
+        def rejoin(row):
+            parts = [row["c2"], row["c3"], row["c4"], row["c5"]]
+            return ",".join(x for x in parts if pd.notna(x) and x.strip() != "")
+        df["detail"] = df.apply(rejoin, axis=1)
+        df = df[["cycle","event","detail"]].copy()
+        df["cycle"] = pd.to_numeric(df["cycle"], errors="coerce")
+        df = df.dropna(subset=["cycle"])
+        df["cycle"] = df["cycle"].astype(int)
+        df["event"] = df["event"].str.strip()
+        return df
+
+    return pd.read_csv(p)
 
 
 def analyze_violations(events_df: pd.DataFrame) -> bool:
@@ -84,9 +101,11 @@ def analyze_trades(events_df: pd.DataFrame) -> None:
         print("[WARNING] No trade events found in event log.")
         return
 
-    detail = trades["detail"].str.extractall(r"(\w+)=(\d+)").unstack(level=1)[0]
-    detail.columns = detail.columns.droplevel(0)
-    trades = trades.join(detail[["price", "qty", "side"]].apply(pd.to_numeric))
+    detail = trades["detail"].str.extract(
+        r"price=(?P<price>\d+),qty=(?P<qty>\d+),side=(?P<side>\d+)"
+    )
+    trades = trades.join(detail)
+    trades[["price", "qty", "side"]] = trades[["price", "qty", "side"]].apply(pd.to_numeric)
 
     print("\nTrade Statistics:")
     print(f"  Total trades          : {len(trades)}")
@@ -125,6 +144,9 @@ def plot_results(snapshots_df: pd.DataFrame, events_df: pd.DataFrame) -> None:
         return
 
     valid["spread"] = valid["best_ask_price"] - valid["best_bid_price"]
+
+    TICK_SHIFT_BITS = 23
+    valid["last_executed_price_ticks"] = valid["last_executed_price"] / (2 ** TICK_SHIFT_BITS)
 
     trades = events_df[events_df["event"] == "TRADE"].copy()
     trade_cycles = pd.to_numeric(trades["cycle"], errors="coerce").dropna()
@@ -175,7 +197,7 @@ def plot_results(snapshots_df: pd.DataFrame, events_df: pd.DataFrame) -> None:
     if "last_executed_price" in valid.columns:
         ax_last.plot(
             valid["cycle"],
-            valid["last_executed_price"],
+            valid["last_executed_price_ticks"],
             color="darkorange",
             alpha=0.8,
             linewidth=0.8,

@@ -53,6 +53,7 @@ module order_gen_top #(
     wire        arb_valid;
     wire        arb_ready;
     wire        fifo_full;
+    wire        fifo_almost_full;
     wire        fifo_empty;
 
     ziggurat_gaussian u_ziggurat (
@@ -155,7 +156,7 @@ module order_gen_top #(
 
     // Bridges the arbiter's valid/ready to the FIFO's write port; the arbiter advances on
     // accepted writes, so order_ready collapses to !fifo_full.
-    assign arb_ready = !fifo_full;
+    assign arb_ready = !fifo_almost_full && !fifo_full;
 
     // Exposes the FIFO head as the module boundary (showahead = ON, so dout tracks the head
     // combinationally whenever !fifo_empty).
@@ -163,13 +164,15 @@ module order_gen_top #(
 
     order_fifo #(
         .DATA_WIDTH (32),
-        .DEPTH      (FIFO_DEPTH)
+        .DEPTH      (FIFO_DEPTH),
+        .ALMOST_FULL_THRESH (16)
     ) u_fifo (
         .clk   (clk),
         .rst_n (rst_n),
-        .wr_en (arb_valid && !fifo_full),
+        .wr_en (arb_valid && arb_ready),
         .din   (arb_packet),
         .full  (fifo_full),
+        .almost_full (fifo_almost_full),
         .rd_en (order_valid && order_ready),
         .dout  (order_packet),
         .empty (fifo_empty)

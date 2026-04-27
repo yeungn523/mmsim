@@ -1,0 +1,1 @@
+"""Wires the order generation subsystem to the matching engine, forming the complete market simulation datapath."""

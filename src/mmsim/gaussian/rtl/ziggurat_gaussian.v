@@ -52,7 +52,7 @@ module ziggurat_gaussian (
         .width_a                (16),
         .widthad_a              (9),
         .numwords_a             (512),
-        .init_file              ("ziggurat_tables.mif"),
+        .init_file              ("lut/ziggurat_tables.mif"),
         .outdata_reg_a          ("UNREGISTERED"),
         .address_aclr_a         ("NONE"),
         .outdata_aclr_a         ("NONE"),
@@ -87,7 +87,7 @@ module ziggurat_gaussian (
     );
 `else
     // Behavioral shim for simulation.
-`include "ziggurat_tables.vh"
+`include "lut/ziggurat_tables.vh"
     reg [15:0] rom_data_reg;
     assign rom_data_out = rom_data_reg;
     always @(posedge clk) begin
