@@ -25,9 +25,9 @@ module tb_order_gen_top;
     reg         param_wr_en;
     reg  [15:0] param_wr_addr;
     reg  [31:0] param_wr_data;
-    reg         fifo_rd_en;
-    wire [31:0] fifo_dout;
-    wire        fifo_empty;
+    wire        order_ready;
+    wire [31:0] order_packet;
+    wire        order_valid;
 
     integer fd;
     integer cycle;
@@ -46,9 +46,9 @@ module tb_order_gen_top;
         .param_wr_en       (param_wr_en),
         .param_wr_addr     (param_wr_addr),
         .param_wr_data     (param_wr_data),
-        .fifo_rd_en        (fifo_rd_en),
-        .fifo_dout         (fifo_dout),
-        .fifo_empty        (fifo_empty)
+        .order_packet      (order_packet),
+        .order_valid       (order_valid),
+        .order_ready       (order_ready)
     );
 
     initial clk = 1'b0;
@@ -60,25 +60,16 @@ module tb_order_gen_top;
     reg draining;
     initial draining = 1'b0;
 
-    always @(posedge clk) begin
-        fifo_rd_en <= 1'b0;
-        if (draining && !fifo_empty) begin
-            fifo_rd_en <= 1'b1;
-        end
-    end
+    // Drives order_ready high while draining so each presented packet handshakes through.
+    assign order_ready = draining;
 
-    // showahead OFF: data is valid one cycle after rd_en.
-    reg rd_en_d1;
+    // Logs every completed valid/ready transfer.
     always @(posedge clk) begin
-        rd_en_d1 <= fifo_rd_en;
-    end
-
-    always @(posedge clk) begin
-        if (rd_en_d1) begin
+        if (order_valid && order_ready) begin
             $fdisplay(fd, "%0d,%0d,%08h,%0d,%0d,%0d,%0d,%0d",
-                cycle, phase, fifo_dout,
-                fifo_dout[29:28], fifo_dout[31], fifo_dout[30],
-                fifo_dout[24:16], fifo_dout[15:0]);
+                cycle, phase, order_packet,
+                order_packet[29:28], order_packet[31], order_packet[30],
+                order_packet[24:16], order_packet[15:0]);
         end
     end
 
@@ -116,15 +107,21 @@ module tb_order_gen_top;
         end
     endtask
 
+    // Drains the producer by holding order_ready high until order_valid stays low for several
+    // cycles in a row, matching the showahead-OFF FIFO's read latency.
     task flush_fifo;
+        integer idle_cycles;
         begin
-            draining = 1'b1;
-            while (!fifo_empty) begin
+            draining    = 1'b1;
+            idle_cycles = 0;
+            while (idle_cycles < 4) begin
                 @(posedge clk);
+                if (order_valid)
+                    idle_cycles = 0;
+                else
+                    idle_cycles = idle_cycles + 1;
             end
             draining = 1'b0;
-            wait_cycles(4);
-            fifo_rd_en <= 1'b0;
         end
     endtask
 
@@ -155,7 +152,6 @@ module tb_order_gen_top;
         param_wr_en        = 1'b0;
         param_wr_addr      = 16'd0;
         param_wr_data      = 32'd0;
-        fifo_rd_en         = 1'b0;
         draining           = 1'b0;
         phase              = 0;
 

@@ -32,14 +32,13 @@ catch {
     add wave -hex /tb_order_arbiter/order_valid_in
     add wave -hex /tb_order_arbiter/order_packet_in
 
-    add wave -divider "Stall Rails"
-    add wave -color Red /tb_order_arbiter/fifo_almost_full
-    add wave -color Red /tb_order_arbiter/fifo_full
+    add wave -divider "Backpressure"
+    add wave -color Red /tb_order_arbiter/order_ready
 
     add wave -divider "Arbiter Outputs"
     add wave -hex  /tb_order_arbiter/order_granted
-    add wave -color Cyan /tb_order_arbiter/fifo_wr_en
-    add wave -hex  /tb_order_arbiter/fifo_din
+    add wave -color Cyan /tb_order_arbiter/order_valid
+    add wave -hex  /tb_order_arbiter/order_packet
 
     add wave -divider "Internal State"
     add wave -unsigned /tb_order_arbiter/dut/grant_pointer
