@@ -31,8 +31,8 @@ module tb_sim_top;
     localparam kQuantityWidth   = 16;
     localparam kPriceRange      = 480;
 
-    localparam kNoiseCount    = 64;
-    localparam kMMCount       = 0;
+    localparam kNoiseCount    = 48;
+    localparam kMMCount       = 16;
     localparam kMomentumCount = 0;
     localparam kValueCount    = 0;
     localparam [31:0] kNoiseTraderParam = {2'b00, 10'd700, 10'd32, 10'd8};
@@ -346,13 +346,33 @@ module tb_sim_top;
                     end
                 end
                 $fwrite(events_file,
-                    "%0d,RETIRE,trade_count=%0d,fill_qty=%0d,bid=%0d,ask=%0d\n",
+                    "%0d,RETIRE,trade_count=%0d,fill_qty=%0d,bid=%0d,ask=%0d,bid_v=%0d,ask_v=%0d\n",
                     cycle_count,
                     order_retire_trade_count,
                     order_retire_fill_quantity,
                     best_bid_price,
-                    best_ask_price);
+                    best_ask_price,
+                    best_bid_valid,
+                    best_ask_valid);
                 accumulated_fill <= {kQuantityWidth{1'b0}};
+            end
+        end
+    end
+
+    reg crossed_book_prev;
+
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            crossed_book_prev <= 1'b0;
+        end else begin
+            crossed_book_prev <= invariants_active && best_bid_valid && best_ask_valid
+                                && (best_bid_price >= best_ask_price);
+            if (crossed_book_prev && invariants_active && best_bid_valid && best_ask_valid
+                    && (best_bid_price >= best_ask_price)) begin
+                $fwrite(events_file,
+                    "%0d,CROSSED_BOOK,bid=%0d,ask=%0d\n",
+                    cycle_count, best_bid_price, best_ask_price);
+                total_crosses_missed <= total_crosses_missed + 1;
             end
         end
     end

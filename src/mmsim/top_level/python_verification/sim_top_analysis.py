@@ -46,12 +46,15 @@ def load_csv(path: str) -> pd.DataFrame:
         sys.exit(1)
 
     if "events" in str(p):
+        # EXPLICITLY declare all 8 columns to handle the jagged CSV format
         df = pd.read_csv(p, header=None, skiprows=1, index_col=False,
-                         names=["cycle","event","c2","c3","c4","c5"],
+                         names=["cycle","event","c2","c3","c4","c5","c6","c7"],
                          dtype=str)
+        
         def rejoin(row):
-            parts = [row["c2"], row["c3"], row["c4"], row["c5"]]
-            return ",".join(x for x in parts if pd.notna(x) and x.strip() != "")
+            parts = [row["c2"], row["c3"], row["c4"], row["c5"], row["c6"], row["c7"]]
+            return ",".join(str(x) for x in parts if pd.notna(x) and str(x).strip() != "")
+            
         df["detail"] = df.apply(rejoin, axis=1)
         df = df[["cycle","event","detail"]].copy()
         df["cycle"] = pd.to_numeric(df["cycle"], errors="coerce")
@@ -59,6 +62,8 @@ def load_csv(path: str) -> pd.DataFrame:
         df["cycle"] = df["cycle"].astype(int)
         df["event"] = df["event"].str.strip()
         return df
+
+    return pd.read_csv(p)
 
     return pd.read_csv(p)
 
@@ -116,6 +121,67 @@ def analyze_trades(events_df: pd.DataFrame) -> None:
     print(f"  Mean trade quantity   : {trades['qty'].mean():.2f} shares")
     print(f"  Max trade quantity    : {trades['qty'].max()} shares")
 
+def analyze_spread_distribution(events_df: pd.DataFrame) -> None:
+    """Analyzes spread at retirement points for finer-grained spread behavior."""
+    retires = events_df[events_df["event"] == "RETIRE"].copy()
+    if retires.empty:
+        print("[WARNING] No RETIRE events found.")
+        return
+
+    detail = retires["detail"].str.extract(
+        r"trade_count=(?P<trade_count>\d+),fill_qty=(?P<fill_qty>\d+),"
+        r"bid=(?P<bid>\d+),ask=(?P<ask>\d+),bid_v=(?P<bid_v>\d+),ask_v=(?P<ask_v>\d+)"
+    )
+    retires = retires.join(detail)
+    
+    # Cast all extracted columns to numeric
+    retires[["bid", "ask", "trade_count", "fill_qty", "bid_v", "ask_v"]] = \
+        retires[["bid", "ask", "trade_count", "fill_qty", "bid_v", "ask_v"]].apply(pd.to_numeric)
+
+    # Filter out one-sided books BEFORE calculating spread
+    retires = retires[(retires["bid_v"] == 1) & (retires["ask_v"] == 1)].copy()
+
+    retires["spread"] = retires["ask"] - retires["bid"]
+
+    print("\nSpread at Retirement Points:")
+    print(f"  Samples               : {len(retires)}")
+    print(f"  Mean spread           : {retires['spread'].mean():.2f} ticks")
+    print(f"  Median spread         : {retires['spread'].median():.2f} ticks")
+    print(f"  Std spread            : {retires['spread'].std():.2f} ticks")
+    print(f"  Min spread            : {retires['spread'].min()} ticks")
+    print(f"  Max spread            : {retires['spread'].max()} ticks")
+    print(f"  Zero spread events    : {(retires['spread'] == 0).sum()}")
+    print(f"  Negative spread events: {(retires['spread'] < 0).sum()}")
+    print(f"  Spread < 10 ticks     : {(retires['spread'] < 10).sum()} "
+          f"({100*(retires['spread'] < 10).mean():.1f}%)")
+
+    # Histogram of spread distribution
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
+
+    retires["spread"].hist(bins=50, ax=ax1, color="steelblue", alpha=0.7)
+    ax1.axvline(retires["spread"].mean(), color="orange", linestyle="--",
+                label=f"Mean {retires['spread'].mean():.1f}")
+    ax1.axvline(8, color="red", linestyle=":", label="MM min spread (8)")
+    ax1.set_title("Spread Distribution at Retirement")
+    ax1.set_xlabel("Spread (ticks)")
+    ax1.set_ylabel("Count")
+    ax1.legend(fontsize=8)
+
+    # Spread over time to see the sawtooth pattern clearly
+    ax2.plot(retires["cycle"], retires["spread"], linewidth=0.6,
+             color="purple", alpha=0.7)
+    ax2.axhline(8, color="red", linestyle=":", linewidth=1, label="MM min (8)")
+    ax2.axhline(retires["spread"].mean(), color="orange", linestyle="--",
+                linewidth=1, label=f"Mean {retires['spread'].mean():.1f}")
+    ax2.set_title("Spread Over Time (at Retirements)")
+    ax2.set_xlabel("Cycle")
+    ax2.set_ylabel("Spread (ticks)")
+    ax2.legend(fontsize=8)
+
+    plt.tight_layout()
+    spread_plot = str(Path(_PLOT_OUTPUT).parent / "spread_analysis.png")
+    plt.savefig(spread_plot, dpi=150)
+    print(f"  Spread analysis plot saved to {spread_plot}")
 
 def analyze_summary(summary_df: pd.DataFrame) -> None:
     """Prints the per-metric counts captured by the testbench at end of run.
@@ -235,6 +301,7 @@ def main() -> None:
 
     passed = analyze_violations(events_df=events_df)
     analyze_trades(events_df=events_df)
+    analyze_spread_distribution(events_df=events_df)
     analyze_summary(summary_df=summary_df)
     plot_results(snapshots_df=snapshots_df, events_df=events_df)
 
