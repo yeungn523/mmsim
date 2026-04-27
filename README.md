@@ -1,6 +1,4 @@
-# mmsim
-
-Hardware-accelerated stochastic market microstructure simulator.
+# mmsim — Cornell ECE 5760 Final Project
 
 ![Verilog](https://img.shields.io/badge/Verilog-HDL-blue?labelColor=grey)
 ![Board](https://img.shields.io/badge/Board-Terasic%20DE1--SoC-orange?labelColor=grey)
@@ -12,10 +10,9 @@ ___
 
 ## Detailed Description
 
-This project implements a hardware-accelerated stochastic market microstructure simulator as the
-final project for ECE 5760 (Cornell University). The design synthesizes realistic order flow by
-combining hardware Geometric Brownian Motion (GBM) price evolution, Gaussian random number
-generation, pseudo-random LFSR seeding, and multiple agent archetypes (noise, market-maker,
+This project implements a **hardware-accelerated stochastic market microstructure simulator**. 
+The design synthesizes realistic order flow by combining hardware Geometric Brownian Motion (GBM) price evolution, 
+Gaussian random number generation, pseudo-random LFSR seeding, and multiple agent archetypes (noise, market-maker,
 momentum, value). Resulting orders are fed through a pipelined matching engine that maintains
 a limit order book. The system targets the Terasic DE1-SoC development board, which carries an
 Intel Cyclone V 5CSEMA5F31C6 FPGA, and is synthesized with Intel Quartus Prime Lite 18.1. Each
@@ -33,14 +30,14 @@ ___
 - Ziggurat-based Gaussian random number generator and a log-space Geometric Brownian Motion
   core driving the price process. Central Limit Theorem and Euler variants are also included
   for comparison purposes only and are not part of the deployed datapath.
-- Python golden models and ModelSim TCL pipelines for every major RTL block.
+- Python golden models and ModelSim TCL pipelines for every RTL submodule.
 - DE1-SoC top-level integration with HEX display readout of the last executed price.
 
 ___
 
 ## Table of Contents
 
-- [mmsim](#mmsim)
+- [mmsim — Cornell ECE 5760 Final Project](#mmsim--cornell-ece-5760-final-project)
   - [Detailed Description](#detailed-description)
   - [Features](#features)
   - [Table of Contents](#table-of-contents)
@@ -77,7 +74,7 @@ This project is distributed as source only. There is no PyPI package or precompi
 1. Clone the repository into a local working directory.
 
 2. **Configure the local Windows environment for ModelSim and Python imports.** The repository
-   ships a `setup.ps1` PowerShell script that prepends the ModelSim binary directory to `PATH`
+   includes a `setup.ps1` PowerShell script that prepends the ModelSim binary directory to `PATH`
    and points `PYTHONPATH` at `src/` so the `mmsim` package resolves correctly. Open the script
    and update the two hard-coded paths to match the local clone location and ModelSim install
    directory, then dot-source it at the start of every PowerShell session used for simulation:
@@ -122,7 +119,7 @@ The simulator passes orders between blocks as a 32-bit packet written into the a
 
 ### Running Simulations
 
-Each RTL block ships with a ModelSim TCL script under its `sim/` directory. Once `setup.ps1` is
+Each RTL block includes a ModelSim TCL script under its `sim/` directory. Once `setup.ps1` is
 dot-sourced, invoke `vsim` directly against the appropriate TCL script. The matching engine and
 price-level-store flows are wrapped by Python Click CLIs that orchestrate the
 golden-model -> ModelSim -> CSV-comparison pipeline:
