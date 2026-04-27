@@ -1,16 +1,147 @@
-# Hardware-Accelerated Stochastic Market Microstructure Simulator - ECE 5760 Final Project
+# mmsim
+
+Hardware-accelerated stochastic market microstructure simulator.
+
+![Verilog](https://img.shields.io/badge/Verilog-HDL-blue?labelColor=grey)
+![Board](https://img.shields.io/badge/Board-Terasic%20DE1--SoC-orange?labelColor=grey)
+![FPGA](https://img.shields.io/badge/FPGA-Cyclone%20V%205CSEMA5F31C6-orange?labelColor=grey)
+![Quartus](https://img.shields.io/badge/Quartus%20Prime%20Lite-18.1-green?labelColor=grey)
+![ModelSim](https://img.shields.io/badge/ModelSim%20ASE-18.1-green?labelColor=grey)
 
 ___
 
-## Packet Format
+## Detailed Description
 
-32-bit order packet written into the arbiter FIFO:
+This project implements a hardware-accelerated stochastic market microstructure simulator as the
+final project for ECE 5760 (Cornell University). The design synthesizes realistic order flow by
+combining hardware Geometric Brownian Motion (GBM) price evolution, Gaussian random number
+generation, pseudo-random LFSR seeding, and multiple agent archetypes (noise, market-maker,
+momentum, value). Resulting orders are fed through a pipelined matching engine that maintains
+a limit order book. The system targets the Terasic DE1-SoC development board, which carries an
+Intel Cyclone V 5CSEMA5F31C6 FPGA, and is synthesized with Intel Quartus Prime Lite 18.1. Each
+Verilog block is paired with a Python golden model and a ModelSim testbench harness so behavior
+can be verified deterministically before deployment to hardware.
 
-| Bits      | Field        | Description                                           |
-|-----------|--------------|-------------------------------------------------------|
-| `[31]`    | `side`       | `0` = buy, `1` = sell                                 |
-| `[30]`    | `order_type` | `0` = limit, `1` = market                             |
-| `[29:28]` | `agent_type` | `00` = noise, `01` = mm, `10` = momentum, `11` = value|
-| `[27:25]` | `reserved`   | `0`                                                   |
-| `[24:16]` | `price`      | 9-bit tick index (0-479, direct LOB address)          |
-| `[15:0]`  | `volume`     | unsigned 16-bit                                       |
+___
+
+## Features
+
+- Pipelined matching engine with three-stage Accept/Match/Commit flow over a 480-tick limit
+  order book.
+- Time-multiplexed agent execution unit that round-robins through up to 64 agent parameter
+  slots backed by M10K blocks.
+- Ziggurat-based Gaussian random number generator and a log-space Geometric Brownian Motion
+  core driving the price process. Central Limit Theorem and Euler variants are also included
+  for comparison purposes only and are not part of the deployed datapath.
+- Python golden models and ModelSim TCL pipelines for every major RTL block.
+- DE1-SoC top-level integration with HEX display readout of the last executed price.
+
+___
+
+## Table of Contents
+
+- [mmsim](#mmsim)
+  - [Detailed Description](#detailed-description)
+  - [Features](#features)
+  - [Table of Contents](#table-of-contents)
+  - [Dependencies](#dependencies)
+  - [Installation](#installation)
+  - [Usage](#usage)
+    - [Packet Format](#packet-format)
+    - [Running Simulations](#running-simulations)
+  - [Authors](#authors)
+  - [License](#license)
+
+___
+
+## Dependencies
+
+This project requires the following external tools to be installed on the system:
+
+- [Intel Quartus Prime Lite 18.1](https://www.intel.com/content/www/us/en/software-kit/665990/intel-quartus-prime-lite-edition-design-software-version-18-1-for-windows.html)
+  for synthesis and bitstream generation targeting the Cyclone V 5CSEMA5F31C6 on the Terasic
+  DE1-SoC.
+- [Intel ModelSim ASE 18.1](https://www.intel.com/content/www/us/en/software-kit/750368/modelsim-intel-fpgas-standard-edition-software-version-18-1.html)
+  for RTL simulation. The project's PowerShell setup script expects ModelSim at
+  `C:\programs\intelFPGA\18.1\modelsim_ase\win32aloem`.
+- [Python 3.11+](https://www.python.org/downloads/) for the golden model verification scripts.
+- The [click](https://click.palletsprojects.com/) package for the Python verification CLIs (see
+  [Installation](#installation)).
+
+___
+
+## Installation
+
+This project is distributed as source only. There is no PyPI package or precompiled bitstream.
+
+1. Clone the repository into a local working directory.
+
+2. **Configure the local Windows environment for ModelSim and Python imports.** The repository
+   ships a `setup.ps1` PowerShell script that prepends the ModelSim binary directory to `PATH`
+   and points `PYTHONPATH` at `src/` so the `mmsim` package resolves correctly. Open the script
+   and update the two hard-coded paths to match the local clone location and ModelSim install
+   directory, then dot-source it at the start of every PowerShell session used for simulation:
+
+   ```
+   . .\setup.ps1
+   ```
+
+   ***Note,*** dot-sourcing (`. .\setup.ps1`) applies the changes to the current shell. Running
+   the script directly (`.\setup.ps1`) executes it in a child shell and the variables are lost
+   when that shell exits.
+
+3. **Install the Python verification dependency.** To replicate the Python-driven golden model
+   and CSV-comparison testing flow, activate the conda environment intended for this project and
+   install [click](https://click.palletsprojects.com/):
+
+   ```
+   pip install click
+   ```
+
+   ***Note,*** activate the conda environment ***before*** dot-sourcing `setup.ps1`. The
+   activation step prepends the conda environment to `PATH`, which keeps the conda Python
+   ahead of any other interpreter while leaving the ModelSim entries appended by `setup.ps1`
+   reachable.
+
+___
+
+## Usage
+
+### Packet Format
+
+The simulator passes orders between blocks as a 32-bit packet written into the arbiter FIFO:
+
+| Bits      | Field        | Description                                            |
+|-----------|--------------|--------------------------------------------------------|
+| `[31]`    | `side`       | `0` = buy, `1` = sell                                  |
+| `[30]`    | `order_type` | `0` = limit, `1` = market                              |
+| `[29:28]` | `agent_type` | `00` = noise, `01` = mm, `10` = momentum, `11` = value |
+| `[27:25]` | `reserved`   | `0`                                                    |
+| `[24:16]` | `price`      | 9-bit tick index (0-479, direct LOB address)           |
+| `[15:0]`  | `volume`     | unsigned 16-bit                                        |
+
+### Running Simulations
+
+Each RTL block ships with a ModelSim TCL script under its `sim/` directory. Once `setup.ps1` is
+dot-sourced, invoke `vsim` directly against the appropriate TCL script. The matching engine and
+price-level-store flows are wrapped by Python Click CLIs that orchestrate the
+golden-model -> ModelSim -> CSV-comparison pipeline:
+
+```
+python -m mmsim.matching_engine.python_verification.run_matching_engine_csv --stress 1000
+python -m mmsim.matching_engine.python_verification.run_price_level_store_no_cancellation_csv
+```
+
+___
+
+## Authors
+
+- Natalie Yeung ([yeungn523](https://github.com/yeungn523))
+- Guillaume Ah-Hot ([GuillaumeAhhot](https://github.com/GuillaumeAhhot))
+
+___
+
+## License
+
+This project is licensed under the Apache 2.0 License: see the [LICENSE](LICENSE) file for
+details.
