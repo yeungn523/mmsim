@@ -16,7 +16,6 @@ vlog -reportprogress 300 -vlog01compat -work work +incdir+../../gaussian/rtl ../
 vlog -reportprogress 300 -vlog01compat -work work +incdir+../../gbm/rtl ../../gbm/rtl/gbm_logspace.v
 vlog -reportprogress 300 -vlog01compat -work work ../../agents/rtl/agent_execution_unit.v
 vlog -reportprogress 300 -vlog01compat -work work ../rtl/order_arbiter.v
-vlog -reportprogress 300 -vlog01compat -work work ../rtl/order_fifo.v
 vlog -reportprogress 300 -vlog01compat -work work ../rtl/order_gen_top.v
 vlog -reportprogress 300 -vlog01compat -work work ../tb/tb_order_gen_top.v
 
@@ -39,12 +38,10 @@ catch {
     add wave -hex /tb_order_gen_top/dut/unit_order_valid
     add wave -hex /tb_order_gen_top/dut/unit_order_packet
     add wave -hex /tb_order_gen_top/dut/unit_order_granted
-    add wave -divider "FIFO"
-    add wave      /tb_order_gen_top/dut/arb_fifo_wr_en
-    add wave -hex /tb_order_gen_top/dut/arb_fifo_din
-    add wave      /tb_order_gen_top/fifo_empty
-    add wave      /tb_order_gen_top/fifo_rd_en
-    add wave -hex /tb_order_gen_top/fifo_dout
+    add wave -divider "Order Bus"
+    add wave      /tb_order_gen_top/order_valid
+    add wave      /tb_order_gen_top/order_ready
+    add wave -hex /tb_order_gen_top/order_packet
     add wave -divider "Controls"
     add wave -unsigned /tb_order_gen_top/active_agent_count
     add wave           /tb_order_gen_top/phase

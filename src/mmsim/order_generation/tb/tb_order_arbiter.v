@@ -1,6 +1,6 @@
 ///
 /// @file tb_order_arbiter.v
-/// @brief ModelSim testbench for order_arbiter that exercises round-robin grants and FIFO backpressure.
+/// @brief ModelSim testbench for order_arbiter that exercises round-robin grants and downstream backpressure.
 ///
 
 `timescale 1ns/1ps
@@ -15,10 +15,9 @@ module tb_order_arbiter;
     reg  [NUM_UNITS-1:0]     order_valid_in;
     reg  [NUM_UNITS*32-1:0]  order_packet_in;
     wire [NUM_UNITS-1:0]     order_granted;
-    wire                     fifo_wr_en;
-    wire [31:0]              fifo_din;
-    reg                      fifo_almost_full;
-    reg                      fifo_full;
+    wire [31:0]              order_packet;
+    wire                     order_valid;
+    reg                      order_ready;
 
     integer cycle;
     integer fd;
@@ -27,38 +26,36 @@ module tb_order_arbiter;
         .NUM_UNITS (NUM_UNITS),
         .PTR_WIDTH (PTR_WIDTH)
     ) dut (
-        .clk              (clk),
-        .rst_n            (rst_n),
-        .order_valid_in   (order_valid_in),
-        .order_packet_in  (order_packet_in),
-        .order_granted    (order_granted),
-        .fifo_wr_en       (fifo_wr_en),
-        .fifo_din         (fifo_din),
-        .fifo_almost_full (fifo_almost_full),
-        .fifo_full        (fifo_full)
+        .clk             (clk),
+        .rst_n           (rst_n),
+        .order_valid_in  (order_valid_in),
+        .order_packet_in (order_packet_in),
+        .order_granted   (order_granted),
+        .order_packet    (order_packet),
+        .order_valid     (order_valid),
+        .order_ready     (order_ready)
     );
 
-    // 10 ns clock period
+    // 10 ns clock period.
     initial clk = 1'b0;
     always  #5 clk = ~clk;
 
     initial cycle = 0;
     always @(posedge clk) cycle = cycle + 1;
 
-    // Sample 1 ns after posedge so registered outputs are stable.
+    // Logs every accepted handshake (valid && ready) and every stall cycle (valid && !ready).
     integer log_index;
     always @(posedge clk) begin
         #1;
-        if (fifo_wr_en) begin
+        if (order_valid && order_ready) begin
             for (log_index = 0; log_index < NUM_UNITS; log_index = log_index + 1) begin
                 if (order_granted[log_index]) begin
-                    $fdisplay(fd, "%0d,GRANT,%0d,%08h,%0d,%0h",
-                              cycle, log_index, fifo_din,
-                              fifo_wr_en, order_granted);
+                    $fdisplay(fd, "%0d,GRANT,%0d,%08h,1,%0h",
+                              cycle, log_index, order_packet, order_granted);
                 end
             end
         end
-        if (!fifo_wr_en && (fifo_almost_full || fifo_full)) begin
+        if (order_valid && !order_ready) begin
             $fdisplay(fd, "%0d,STALL,-1,00000000,0,%0h",
                       cycle, order_granted);
         end
@@ -90,14 +87,13 @@ module tb_order_arbiter;
             $display("FATAL: cannot open arbiter_log.csv");
             $finish;
         end
-        $fdisplay(fd, "cycle,event_type,unit,packet,wr_en,granted_mask");
+        $fdisplay(fd, "cycle,event_type,unit,packet,ready,granted_mask");
     end
 
     initial begin
-        rst_n            = 1'b0;
-        order_valid_in   = {NUM_UNITS{1'b0}};
-        fifo_almost_full = 1'b0;
-        fifo_full        = 1'b0;
+        rst_n          = 1'b0;
+        order_valid_in = {NUM_UNITS{1'b0}};
+        order_ready    = 1'b1;
         init_packets;
 
         @(posedge clk);
@@ -119,37 +115,26 @@ module tb_order_arbiter;
         order_valid_in = {NUM_UNITS{1'b0}};
         wait_cycles(2);
 
-        // T3: stall on fifo_almost_full; only STALL rows expected.
-        $display("=== T3: stall on fifo_almost_full ===");
-        order_valid_in   = {NUM_UNITS{1'b1}};
-        fifo_almost_full = 1'b1;
-        wait_cycles(6);
-        $display("=== T3: almost_full cleared ===");
-        fifo_almost_full = 1'b0;
-        wait_cycles(4);
-        order_valid_in = {NUM_UNITS{1'b0}};
-        wait_cycles(2);
-
-        // T4: stall on fifo_full.
-        $display("=== T4: stall on fifo_full ===");
+        // T3: stall by dropping order_ready; only STALL rows expected.
+        $display("=== T3: stall on order_ready=0 ===");
         order_valid_in = {NUM_UNITS{1'b1}};
-        fifo_full      = 1'b1;
+        order_ready    = 1'b0;
         wait_cycles(6);
-        $display("=== T4: full cleared ===");
-        fifo_full = 1'b0;
+        $display("=== T3: order_ready cleared ===");
+        order_ready = 1'b1;
         wait_cycles(4);
         order_valid_in = {NUM_UNITS{1'b0}};
         wait_cycles(2);
 
-        // T5: only unit 3 valid; should receive every grant.
-        $display("=== T5: single unit valid (unit 3) ===");
+        // T4: only unit 3 valid; should receive every grant.
+        $display("=== T4: single unit valid (unit 3) ===");
         order_valid_in = 8'b00001000;
         wait_cycles(8);
         order_valid_in = {NUM_UNITS{1'b0}};
         wait_cycles(2);
 
-        // T6: unit 2 deasserts mid-run; pointer must skip cleanly.
-        $display("=== T6: unit 2 deasserts mid-run ===");
+        // T5: unit 2 deasserts mid-run; pointer must skip cleanly.
+        $display("=== T5: unit 2 deasserts mid-run ===");
         order_valid_in = {NUM_UNITS{1'b1}};
         wait_cycles(3);
         order_valid_in[2] = 1'b0;
@@ -157,13 +142,13 @@ module tb_order_arbiter;
         order_valid_in = {NUM_UNITS{1'b0}};
         wait_cycles(2);
 
-        // T7: stall then resume; pointer must continue from saved position.
-        $display("=== T7: stall then resume, pointer continuity ===");
-        order_valid_in   = {NUM_UNITS{1'b1}};
+        // T6: stall then resume; pointer must continue from saved position.
+        $display("=== T6: stall then resume, pointer continuity ===");
+        order_valid_in = {NUM_UNITS{1'b1}};
         wait_cycles(3);
-        fifo_almost_full = 1'b1;
+        order_ready = 1'b0;
         wait_cycles(4);
-        fifo_almost_full = 1'b0;
+        order_ready = 1'b1;
         wait_cycles(6);
         order_valid_in = {NUM_UNITS{1'b0}};
         wait_cycles(2);

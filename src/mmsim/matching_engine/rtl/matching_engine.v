@@ -23,7 +23,7 @@ module matching_engine #(
     parameter kPriceWidth      = 32,    ///< Bit width of the internal price field.
     parameter kQuantityWidth   = 16,    ///< Bit width of the quantity field.
     parameter kPriceRange      = 480,   ///< Number of addressable price ticks.
-    parameter kAcceptFifoDepth = 32,    ///< Depth of the Accept FIFO between Stage A and Stage B.
+    parameter kAcceptFifoDepth = 128,   ///< Depth of the Accept FIFO between Stage A and Stage B.
     parameter kTickShiftBits   = 23     ///< Left-shift applied to a tick to expose last_executed_price as a Q8.24 price.
 )(
     input  wire                        clk,
