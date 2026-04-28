@@ -19,6 +19,10 @@
 ///   5. trade_quantity > 0 on every trade_valid
 ///   6. fill conservation: order_retire_fill_quantity matches accumulated trade_quantity
 ///
+/// ModelSim:
+///   vlog galois_lfsr.v ziggurat_gaussian.v gbm_logspace.v price_level_store.v matching_engine.v order_arbiter.v order_fifo.v order_gen_top.v agent_execution_unit.v top_level.v tb_sim_top.v
+///   vsim -do run_sim_top.tcl
+///
 
 module tb_sim_top;
     localparam kClockPeriod  = 20;

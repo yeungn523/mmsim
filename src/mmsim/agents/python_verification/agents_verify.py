@@ -1,7 +1,7 @@
 """Verifies the ModelSim CSV output of agent_execution_unit against a Python golden model.
 
-Cross-checks per-phase emissions for the noise, value, and momentum strategies and emits
-per-strategy diagnostic plots. The active strategy is selected by _TARGET_TEST.
+Cross-checks per-phase emissions for the noise, value, and momentum strategies and emits per-strategy diagnostic
+plots. The active strategy is selected by _TARGET_TEST.
 """
 
 from pathlib import Path

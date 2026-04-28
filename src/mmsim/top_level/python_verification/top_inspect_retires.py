@@ -1,5 +1,4 @@
-"""Prints the raw detail strings of retired events captured in sim_top_events.csv.
-"""
+"""Prints the raw detail strings of retired events captured in sim_top_events.csv."""
 
 from pathlib import Path
 

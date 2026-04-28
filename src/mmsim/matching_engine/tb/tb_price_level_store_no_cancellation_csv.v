@@ -4,6 +4,10 @@
 ///        price_level_store DUT and logs each response, latency, and best-level snapshot to
 ///        a sibling CSV for golden-model comparison.
 ///
+/// ModelSim:
+///   vlog price_level_store.v tb_price_level_store_no_cancellation_csv.v
+///   vsim -do run_price_level_store_no_cancellation_csv.tcl
+///
 
 `timescale 1ns/1ns
 

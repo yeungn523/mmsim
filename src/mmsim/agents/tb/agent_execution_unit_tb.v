@@ -3,6 +3,10 @@
 /// @brief Phased deterministic testbench for agent_execution_unit; emits one CSV row per
 ///        order_valid pulse for the agents_verify Python golden model to score.
 ///
+/// ModelSim:
+///   vlog galois_lfsr.v agent_execution_unit.v agent_execution_unit_tb.v
+///   vsim -do run_agents.tcl
+///
 
 `timescale 1ns/1ns
 

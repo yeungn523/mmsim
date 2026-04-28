@@ -1,9 +1,9 @@
 """Parses tb_sim_top.v output CSVs and validates integration correctness.
 
-Consumes sim_top_events.csv, sim_top_snapshots.csv, and sim_top_summary.csv produced by the
-testbench, prints invariant pass/fail and trade statistics, and emits a four-panel plot of
-top-of-book prices, spread, trade activity, and last execution price. Exits with code 0 when
-no invariants are violated and 1 otherwise so callers can chain the script into CI pipelines.
+Consumes sim_top_events.csv, sim_top_snapshots.csv, and sim_top_summary.csv produced by the testbench, prints invariant
+pass/fail and trade statistics, and emits a four-panel plot of top-of-book prices, spread, trade activity, and last
+execution price. Exits with code 0 when no invariants are violated and 1 otherwise so callers can chain the script into
+CI pipelines.
 """
 
 import sys

@@ -1,8 +1,7 @@
 """Verifies ModelSim CSV outputs from the CLT-12 and Ziggurat Gaussian generators.
 
-Applies a Kolmogorov-Smirnov normality test against a fitted N(mu, sigma), prints
-tail-probability error tables, and emits a four-panel diagnostic plot. Falls back to
-synthetic reference data when the CSVs are missing.
+Applies a Kolmogorov-Smirnov normality test against a fitted N(mu, sigma), prints tail-probability error tables, and
+emits a four-panel diagnostic plot. Falls back to synthetic reference data when the CSVs are missing.
 """
 
 from pathlib import Path

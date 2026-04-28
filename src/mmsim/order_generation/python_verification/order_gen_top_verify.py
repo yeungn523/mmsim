@@ -1,160 +1,232 @@
-#!/usr/bin/env python3
-"""Structural checker for order_gen_top.v integration test.
+"""Structural checker for the order_gen_top.v integration test.
 
-Does not predict exact values; the GBM+LFSR chain is too deep to replay in Python. Instead
-it asserts per-phase invariants on agent_type, price, reserved bits, round-robin order, and
-volume caps. Usage: python3 order_gen_top_verify.py top_log.csv
+Does not predict exact values because the GBM and LFSR chain is too deep to replay in Python; instead, asserts
+per-phase invariants on agent_type, price, the reserved bit field, the round-robin alternation, and the param-decoded
+volume cap. Usage: python order_gen_top_verify.py top_log.csv.
 """
 
-import sys
-import csv
-import os
-from dataclasses import dataclass
-from typing import List
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
+from __future__ import annotations
 
-# ---------------------------------------------------------------------------
-# Packet dataclass
-# ---------------------------------------------------------------------------
+import csv
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+
+import matplotlib
+
+matplotlib.use("Agg")
+
+import matplotlib.pyplot as plt  # noqa: E402
+
+
+_MAX_PRICE_TICK: int = 479
+_VOLUME_CAP_PARAM_DECODE: int = 63
+_VOLUME_CAP_DEFAULT: int = 10
+_AGENT_NOISE: int = 0b00
+_AGENT_VALUE: int = 0b11
+_PHASE_COUNT: int = 5
+_FAIRNESS_TOLERANCE: float = 0.35
+_RESERVED_FIELD_SHIFT: int = 25
+_RESERVED_FIELD_MASK: int = 0x7
+_PLOT_OUTPUT_PATH: Path = Path("top_verification.png")
+_DEFAULT_CSV_CANDIDATES: tuple[Path, ...] = (
+    Path("sim/top_log.csv"),
+    Path("top_log.csv"),
+    Path("../top_log.csv"),
+)
+
+
 @dataclass
 class Packet:
-    cycle:      int
-    phase:      int
-    raw:        int
-    agent_type: int
-    side:       int
-    order_type: int
-    price:      int
-    volume:     int
+    """Order packet parsed from the integration test CSV."""
 
-def parse_csv(path: str) -> List[Packet]:
-    packets = []
-    with open(path, newline="") as f:
-        reader = csv.DictReader(f)
+    cycle: int
+    """The simulator cycle on which the packet was emitted."""
+    phase: int
+    """The test phase identifier set by the testbench."""
+    raw: int
+    """The 32-bit packet payload before bit-field decoding."""
+    agent_type: int
+    """The 2-bit agent type extracted from the payload."""
+    side: int
+    """The buy/sell side bit."""
+    order_type: int
+    """The market/limit order type bit."""
+    price: int
+    """The 9-bit tick index."""
+    volume: int
+    """The 16-bit unsigned volume."""
+
+
+def main() -> None:
+    """Runs the integration checker against the testbench CSV and emits the verdict."""
+    if len(sys.argv) >= 2:
+        path: Path | None = Path(sys.argv[1])
+    else:
+        path = next(
+            (candidate for candidate in _DEFAULT_CSV_CANDIDATES if candidate.exists()),
+            None,
+        )
+        if path is None:
+            print("Usage: python order_gen_top_verify.py top_log.csv")
+            sys.exit(0)
+
+    print(f"Parsing {path} ...")
+    packets = parse_csv(path=path)
+    print(f"  Total packets: {len(packets)}")
+    counts_by_phase = {
+        phase: sum(1 for packet in packets if packet.phase == phase)
+        for phase in range(_PHASE_COUNT)
+    }
+    for phase, count in counts_by_phase.items():
+        if count:
+            print(f"  Phase {phase}: {count} packets")
+    print()
+
+    passed = run_checks(packets=packets)
+    plot_results(packets=packets)
+    sys.exit(0 if passed else 1)
+
+
+def parse_csv(path: Path) -> list[Packet]:
+    """Parses top_log.csv into a list of Packet objects.
+
+    Args:
+        path: The CSV path emitted by tb_order_gen_top.v.
+
+    Returns:
+        The chronologically ordered list of decoded packets.
+    """
+    packets: list[Packet] = []
+    with path.open(mode="r", newline="") as csv_file:
+        reader = csv.DictReader(csv_file)
         for row in reader:
-            packets.append(Packet(
-                cycle      = int(row["cycle"]),
-                phase      = int(row["phase"]),
-                raw        = int(row["packet"], 16),
-                agent_type = int(row["agent_type"]),
-                side       = int(row["side"]),
-                order_type = int(row["order_type"]),
-                price      = int(row["price"]),
-                volume     = int(row["volume"]),
-            ))
+            packets.append(
+                Packet(
+                    cycle=int(row["cycle"]),
+                    phase=int(row["phase"]),
+                    raw=int(row["packet"], 16),
+                    agent_type=int(row["agent_type"]),
+                    side=int(row["side"]),
+                    order_type=int(row["order_type"]),
+                    price=int(row["price"]),
+                    volume=int(row["volume"]),
+                )
+            )
     return packets
 
-# ---------------------------------------------------------------------------
-# Checker helpers
-# ---------------------------------------------------------------------------
-def check(condition, label, detail=""):
-    if condition:
-        print(f"PASS [{label}]{(' — ' + detail) if detail else ''}")
-        return 1, 0
-    else:
-        print(f"FAIL [{label}]{(' — ' + detail) if detail else ''}")
-        return 0, 1
 
-def structural_checks(pkts, phase_label, allowed_types, vol_cap=None):
-    passes = fails = 0
+def run_checks(packets: list[Packet]) -> bool:
+    """Validates the per-phase invariants documented in the testbench plan.
 
-    # Price always <= 479
-    bad_price = [p for p in pkts if p.price > 479]
-    p, f = check(len(bad_price) == 0, f"{phase_label} price<=479",
-                 f"{len(bad_price)} violations" if bad_price else f"{len(pkts)} packets OK")
-    passes += p; fails += f
+    Notes:
+        Phase 1 must be empty, phase 2 must alternate noise and value packets within a 35% fairness slack, phase 3
+        reuses the phase 2 invariants on a longer trace, and phase 4 must contain only value-investor packets capped
+        at the param-decoded volume.
 
-    # Reserved bits [27:25] == 0
-    bad_reserved = [p for p in pkts if (p.raw >> 25) & 0x7 != 0]
-    p, f = check(len(bad_reserved) == 0, f"{phase_label} reserved=0",
-                 f"{len(bad_reserved)} violations" if bad_reserved else "OK")
-    passes += p; fails += f
+    Args:
+        packets: The parsed packets from the testbench CSV.
 
-    # Agent type only in allowed set
-    bad_type = [p for p in pkts if p.agent_type not in allowed_types]
-    p, f = check(len(bad_type) == 0, f"{phase_label} agent_type in {allowed_types}",
-                 f"{len(bad_type)} violations" if bad_type else f"{len(pkts)} packets OK")
-    passes += p; fails += f
+    Returns:
+        True when every phase passes its invariants, False otherwise.
+    """
+    passes = 0
+    fails = 0
 
-    # Volume cap check if specified
-    if vol_cap is not None:
-        bad_vol = [p for p in pkts if p.volume > vol_cap]
-        p, f = check(len(bad_vol) == 0, f"{phase_label} volume<={vol_cap}",
-                     f"{len(bad_vol)} violations" if bad_vol else "OK")
-        passes += p; fails += f
+    by_phase = {
+        phase: [packet for packet in packets if packet.phase == phase]
+        for phase in range(_PHASE_COUNT)
+    }
 
-    return passes, fails
+    passed_count, failed_count = _check(
+        condition=len(by_phase[1]) == 0,
+        label="phase1 empty",
+        detail=f"got {len(by_phase[1])} packets, expected 0",
+    )
+    passes += passed_count
+    fails += failed_count
 
-# ---------------------------------------------------------------------------
-# Main checker
-# ---------------------------------------------------------------------------
-def run_checks(packets):
-    passes = fails = 0
-
-    # Split by phase
-    ph = {i: [p for p in packets if p.phase == i] for i in range(5)}
-
-    # ---- PHASE 1: no packets when active_agent_count=0 --------------------
-    p, f = check(len(ph[1]) == 0, "phase1 empty",
-                 f"got {len(ph[1])} packets, expected 0")
-    passes += p; fails += f
-
-    # ---- PHASE 2: structural + round-robin alternation --------------------
-    if len(ph[2]) == 0:
+    if not by_phase[2]:
         print("WARN [phase2] no packets received — agents may not have emitted")
     else:
-        p, f = structural_checks(ph[2], "phase2", allowed_types={0b00, 0b11})
-        passes += p; fails += f
+        passed_count, failed_count = _structural_checks(
+            packets=by_phase[2],
+            phase_label="phase2",
+            allowed_types={_AGENT_NOISE, _AGENT_VALUE},
+        )
+        passes += passed_count
+        fails += failed_count
 
-        # Round-robin check
-        types = [p.agent_type for p in ph[2]]
-        val_count = types.count(0b11)
-        noise_count = types.count(0b00)
-        
-        # They should be roughly equal (Noise trader skips ~0.1% of the time)
-        diff = abs(val_count - noise_count)
-        p, f = check(diff <= len(types) * 0.35, "phase2 round-robin fair distribution",
-                     f"Value: {val_count}, Noise: {noise_count}")
-        passes += p; fails += f
+        types = [packet.agent_type for packet in by_phase[2]]
+        value_count = types.count(_AGENT_VALUE)
+        noise_count = types.count(_AGENT_NOISE)
 
-        # Must have both types present
-        p, f = check(any(p.agent_type == 0b11 for p in ph[2]),
-                     "phase2 has value investor packets")
-        passes += p; fails += f
-        p, f = check(any(p.agent_type == 0b00 for p in ph[2]),
-                     "phase2 has noise trader packets")
-        passes += p; fails += f
+        difference = abs(value_count - noise_count)
+        passed_count, failed_count = _check(
+            condition=difference <= len(types) * _FAIRNESS_TOLERANCE,
+            label="phase2 round-robin fair distribution",
+            detail=f"Value: {value_count}, Noise: {noise_count}",
+        )
+        passes += passed_count
+        fails += failed_count
 
-        print(f"  Phase 2 total packets: {len(ph[2])}")
+        passed_count, failed_count = _check(
+            condition=any(packet.agent_type == _AGENT_VALUE for packet in by_phase[2]),
+            label="phase2 has value investor packets",
+        )
+        passes += passed_count
+        fails += failed_count
 
-    # ---- PHASE 3: structural checks with more slots -----------------------
-    if len(ph[3]) == 0:
+        passed_count, failed_count = _check(
+            condition=any(packet.agent_type == _AGENT_NOISE for packet in by_phase[2]),
+            label="phase2 has noise trader packets",
+        )
+        passes += passed_count
+        fails += failed_count
+
+        print(f"  Phase 2 total packets: {len(by_phase[2])}")
+
+    if not by_phase[3]:
         print("WARN [phase3] no packets received")
     else:
-        p, f = structural_checks(ph[3], "phase3", allowed_types={0b00, 0b11})
-        passes += p; fails += f
-        print(f"  Phase 3 total packets: {len(ph[3])}")
+        passed_count, failed_count = _structural_checks(
+            packets=by_phase[3],
+            phase_label="phase3",
+            allowed_types={_AGENT_NOISE, _AGENT_VALUE},
+        )
+        passes += passed_count
+        fails += failed_count
+        print(f"  Phase 3 total packets: {len(by_phase[3])}")
 
-    # ---- PHASE 4: param decode — only value investor, vol<=63 -------------
-    if len(ph[4]) == 0:
+    if not by_phase[4]:
         print("WARN [phase4] no packets received — param decode untestable")
     else:
-        p, f = structural_checks(ph[4], "phase4", allowed_types={0b11}, vol_cap=63)
-        passes += p; fails += f
+        passed_count, failed_count = _structural_checks(
+            packets=by_phase[4],
+            phase_label="phase4",
+            allowed_types={_AGENT_VALUE},
+            volume_cap=_VOLUME_CAP_PARAM_DECODE,
+        )
+        passes += passed_count
+        fails += failed_count
 
-        # Confirm at least some packets arrived — proves slot 0 was loaded
-        p, f = check(len(ph[4]) > 0, "phase4 packets received",
-                     f"{len(ph[4])} packets")
-        passes += p; fails += f
-        print(f"  Phase 4 total packets: {len(ph[4])}")
+        passed_count, failed_count = _check(
+            condition=len(by_phase[4]) > 0,
+            label="phase4 packets received",
+            detail=f"{len(by_phase[4])} packets",
+        )
+        passes += passed_count
+        fails += failed_count
+        print(f"  Phase 4 total packets: {len(by_phase[4])}")
 
-    p, f = check(any(p.volume > 10 for p in ph[4]), "phase4 volume cap actually increased",
-                "at least one packet breached vol>10")
-    passes += p; fails += f
+    passed_count, failed_count = _check(
+        condition=any(packet.volume > _VOLUME_CAP_DEFAULT for packet in by_phase[4]),
+        label="phase4 volume cap actually increased",
+        detail=f"at least one packet breached vol>{_VOLUME_CAP_DEFAULT}",
+    )
+    passes += passed_count
+    fails += failed_count
 
-    # ---- Summary -----------------------------------------------------------
     print()
     print("=" * 55)
     if fails == 0:
@@ -163,109 +235,237 @@ def run_checks(packets):
         print(f"  FAILED: {fails} failure(s), {passes} pass(es)")
     print("=" * 55)
 
-    return fails == 0, packets
+    return fails == 0
 
-# ---------------------------------------------------------------------------
-# Plotter
-# ---------------------------------------------------------------------------
-def plot_results(packets, save_path="top_verification.png"):
+
+def plot_results(
+    packets: list[Packet],
+    save_path: Path = _PLOT_OUTPUT_PATH,
+) -> None:
+    """Plots price, volume, packet timeline, and agent-type-mix diagnostics.
+
+    Args:
+        packets: The parsed packets from the testbench CSV.
+        save_path: The destination for the rendered figure.
+    """
     if not packets:
         print("No packets to plot.")
         return
 
-    fig, axes = plt.subplots(2, 2, figsize=(14, 9))
-    fig.suptitle("order_gen_top Integration Verification", fontsize=14, fontweight='bold')
+    figure, axes = plt.subplots(2, 2, figsize=(14, 9))
+    figure.suptitle(
+        "order_gen_top Integration Verification",
+        fontsize=14,
+        fontweight="bold",
+    )
 
-    phase_colors = {1: 'gray', 2: 'steelblue', 3: 'seagreen', 4: 'darkorange'}
-    type_labels  = {0b00: 'Noise(00)', 0b01: 'MM(01)', 0b10: 'Momentum(10)', 0b11: 'Value(11)'}
-    type_colors  = {0b00: 'steelblue', 0b11: 'darkorange', 0b10: 'seagreen', 0b01: 'gray'}
+    phase_colors = {1: "gray", 2: "steelblue", 3: "seagreen", 4: "darkorange"}
+    type_labels = {
+        0b00: "Noise(00)",
+        0b01: "MM(01)",
+        0b10: "Momentum(10)",
+        0b11: "Value(11)",
+    }
+    type_colors = {0b00: "steelblue", 0b11: "darkorange", 0b10: "seagreen", 0b01: "gray"}
 
-    # Panel 1: price distribution by agent type
-    ax = axes[0][0]
-    for at in [0b00, 0b11]:
-        prices = [p.price for p in packets if p.agent_type == at]
+    axis_price = axes[0][0]
+    for agent_type in (_AGENT_NOISE, _AGENT_VALUE):
+        prices = [packet.price for packet in packets if packet.agent_type == agent_type]
         if prices:
-            ax.hist(prices, bins=40, alpha=0.6,
-                    label=type_labels[at], color=type_colors[at])
-    ax.axvline(479, color='red', linestyle='--', linewidth=1, label='max=479')
-    ax.set_xlabel("Price Tick")
-    ax.set_ylabel("Count")
-    ax.set_title("Price Distribution by Agent Type")
-    ax.legend(fontsize=8)
+            axis_price.hist(
+                prices,
+                bins=40,
+                alpha=0.6,
+                label=type_labels[agent_type],
+                color=type_colors[agent_type],
+            )
+    axis_price.axvline(
+        _MAX_PRICE_TICK,
+        color="red",
+        linestyle="--",
+        linewidth=1,
+        label=f"max={_MAX_PRICE_TICK}",
+    )
+    axis_price.set_xlabel("Price Tick")
+    axis_price.set_ylabel("Count")
+    axis_price.set_title("Price Distribution by Agent Type")
+    axis_price.legend(fontsize=8)
 
-    # Panel 2: volume distribution by phase
-    ax = axes[0][1]
-    for ph in [2, 3, 4]:
-        vols = [p.volume for p in packets if p.phase == ph]
-        if vols:
-            ax.hist(vols, bins=30, alpha=0.6,
-                    label=f'Phase {ph}', color=phase_colors[ph])
-    ax.axvline(63, color='darkorange', linestyle='--', linewidth=1, label='vol_cap=63 (ph4)')
-    ax.axvline(10, color='steelblue',  linestyle='--', linewidth=1, label='vol_cap=10 (ph2/3)')
-    ax.set_xlabel("Volume")
-    ax.set_ylabel("Count")
-    ax.set_title("Volume Distribution by Phase")
-    ax.legend(fontsize=8)
+    axis_volume = axes[0][1]
+    for phase in (2, 3, 4):
+        volumes = [packet.volume for packet in packets if packet.phase == phase]
+        if volumes:
+            axis_volume.hist(
+                volumes,
+                bins=30,
+                alpha=0.6,
+                label=f"Phase {phase}",
+                color=phase_colors[phase],
+            )
+    axis_volume.axvline(
+        _VOLUME_CAP_PARAM_DECODE,
+        color="darkorange",
+        linestyle="--",
+        linewidth=1,
+        label=f"vol_cap={_VOLUME_CAP_PARAM_DECODE} (ph4)",
+    )
+    axis_volume.axvline(
+        _VOLUME_CAP_DEFAULT,
+        color="steelblue",
+        linestyle="--",
+        linewidth=1,
+        label=f"vol_cap={_VOLUME_CAP_DEFAULT} (ph2/3)",
+    )
+    axis_volume.set_xlabel("Volume")
+    axis_volume.set_ylabel("Count")
+    axis_volume.set_title("Volume Distribution by Phase")
+    axis_volume.legend(fontsize=8)
 
-    # Panel 3: packet timeline coloured by agent type
-    ax = axes[1][0]
-    for at in [0b00, 0b11]:
-        pts = [(p.cycle, p.price) for p in packets if p.agent_type == at]
-        if pts:
-            cycles, prices = zip(*pts)
-            ax.scatter(cycles, prices, s=6, alpha=0.5,
-                       label=type_labels[at], color=type_colors[at])
-    ax.set_xlabel("Cycle")
-    ax.set_ylabel("Price Tick")
-    ax.set_title("Packet Timeline (price vs cycle)")
-    ax.legend(fontsize=8)
+    axis_timeline = axes[1][0]
+    for agent_type in (_AGENT_NOISE, _AGENT_VALUE):
+        points = [
+            (packet.cycle, packet.price)
+            for packet in packets
+            if packet.agent_type == agent_type
+        ]
+        if points:
+            cycles, prices = zip(*points)
+            axis_timeline.scatter(
+                cycles,
+                prices,
+                s=6,
+                alpha=0.5,
+                label=type_labels[agent_type],
+                color=type_colors[agent_type],
+            )
+    axis_timeline.set_xlabel("Cycle")
+    axis_timeline.set_ylabel("Price Tick")
+    axis_timeline.set_title("Packet Timeline (price vs cycle)")
+    axis_timeline.legend(fontsize=8)
 
-    # Panel 4: agent type mix per phase (bar)
-    ax = axes[1][1]
-    phases = [2, 3, 4]
-    x = range(len(phases))
-    noise_counts = [sum(1 for p in packets if p.phase == ph and p.agent_type == 0b00)
-                    for ph in phases]
-    value_counts = [sum(1 for p in packets if p.phase == ph and p.agent_type == 0b11)
-                    for ph in phases]
-    width = 0.35
-    ax.bar([xi - width/2 for xi in x], noise_counts, width,
-           label='Noise(00)', color='steelblue')
-    ax.bar([xi + width/2 for xi in x], value_counts, width,
-           label='Value(11)', color='darkorange')
-    ax.set_xticks(list(x))
-    ax.set_xticklabels([f'Phase {ph}' for ph in phases])
-    ax.set_ylabel("Packet Count")
-    ax.set_title("Agent Type Mix per Phase")
-    ax.legend(fontsize=8)
+    axis_mix = axes[1][1]
+    phases = (2, 3, 4)
+    indices = list(range(len(phases)))
+    noise_counts = [
+        sum(1 for packet in packets if packet.phase == phase and packet.agent_type == _AGENT_NOISE)
+        for phase in phases
+    ]
+    value_counts = [
+        sum(1 for packet in packets if packet.phase == phase and packet.agent_type == _AGENT_VALUE)
+        for phase in phases
+    ]
+    bar_width = 0.35
+    axis_mix.bar(
+        [index - bar_width / 2 for index in indices],
+        noise_counts,
+        bar_width,
+        label="Noise(00)",
+        color="steelblue",
+    )
+    axis_mix.bar(
+        [index + bar_width / 2 for index in indices],
+        value_counts,
+        bar_width,
+        label="Value(11)",
+        color="darkorange",
+    )
+    axis_mix.set_xticks(indices)
+    axis_mix.set_xticklabels([f"Phase {phase}" for phase in phases])
+    axis_mix.set_ylabel("Packet Count")
+    axis_mix.set_title("Agent Type Mix per Phase")
+    axis_mix.legend(fontsize=8)
 
     plt.tight_layout()
-    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.savefig(save_path, dpi=150, bbox_inches="tight")
     print(f"Plot saved -> {save_path}")
 
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
+
+def _check(condition: bool, label: str, detail: str = "") -> tuple[int, int]:
+    """Prints PASS/FAIL for a boolean condition and returns the (pass_count, fail_count) delta.
+
+    Args:
+        condition: The boolean check result.
+        label: The check name displayed in the output.
+        detail: An optional human-readable detail appended after a separator.
+
+    Returns:
+        A two-element tuple recording (1, 0) on pass and (0, 1) on fail.
+    """
+    suffix = f" — {detail}" if detail else ""
+    if condition:
+        print(f"PASS [{label}]{suffix}")
+        return 1, 0
+    print(f"FAIL [{label}]{suffix}")
+    return 0, 1
+
+
+def _structural_checks(
+    packets: list[Packet],
+    phase_label: str,
+    allowed_types: set[int],
+    volume_cap: int | None = None,
+) -> tuple[int, int]:
+    """Asserts the structural invariants on a per-phase packet slice.
+
+    Args:
+        packets: The packets belonging to the phase under test.
+        phase_label: The phase identifier used in the output messages.
+        allowed_types: The set of agent_type values permitted in this phase.
+        volume_cap: An optional inclusive volume upper bound; None disables the volume check.
+
+    Returns:
+        A tuple of (pass_count, fail_count) tallying the invariants checked.
+    """
+    passes = 0
+    fails = 0
+
+    bad_price = [packet for packet in packets if packet.price > _MAX_PRICE_TICK]
+    detail = f"{len(bad_price)} violations" if bad_price else f"{len(packets)} packets OK"
+    passed_count, failed_count = _check(
+        condition=len(bad_price) == 0,
+        label=f"{phase_label} price<={_MAX_PRICE_TICK}",
+        detail=detail,
+    )
+    passes += passed_count
+    fails += failed_count
+
+    bad_reserved = [
+        packet
+        for packet in packets
+        if (packet.raw >> _RESERVED_FIELD_SHIFT) & _RESERVED_FIELD_MASK != 0
+    ]
+    detail = f"{len(bad_reserved)} violations" if bad_reserved else "OK"
+    passed_count, failed_count = _check(
+        condition=len(bad_reserved) == 0,
+        label=f"{phase_label} reserved=0",
+        detail=detail,
+    )
+    passes += passed_count
+    fails += failed_count
+
+    bad_type = [packet for packet in packets if packet.agent_type not in allowed_types]
+    detail = f"{len(bad_type)} violations" if bad_type else f"{len(packets)} packets OK"
+    passed_count, failed_count = _check(
+        condition=len(bad_type) == 0,
+        label=f"{phase_label} agent_type in {allowed_types}",
+        detail=detail,
+    )
+    passes += passed_count
+    fails += failed_count
+
+    if volume_cap is not None:
+        bad_volume = [packet for packet in packets if packet.volume > volume_cap]
+        detail = f"{len(bad_volume)} violations" if bad_volume else "OK"
+        passed_count, failed_count = _check(
+            condition=len(bad_volume) == 0,
+            label=f"{phase_label} volume<={volume_cap}",
+            detail=detail,
+        )
+        passes += passed_count
+        fails += failed_count
+
+    return passes, fails
+
+
 if __name__ == "__main__":
-    # Auto-find CSV
-    if len(sys.argv) < 2:
-        candidates = ["sim/top_log.csv", "top_log.csv", "../top_log.csv"]
-        path = next((p for p in candidates if os.path.exists(p)), None)
-        if path is None:
-            print("Usage: python3 order_gen_top_verify.py top_log.csv")
-            sys.exit(0)
-    else:
-        path = sys.argv[1]
-
-    print(f"Parsing {path} ...")
-    packets = parse_csv(path)
-    print(f"  Total packets: {len(packets)}")
-    by_phase = {i: sum(1 for p in packets if p.phase == i) for i in range(5)}
-    for ph, count in by_phase.items():
-        if count:
-            print(f"  Phase {ph}: {count} packets")
-    print()
-
-    ok, packets = run_checks(packets)
-    plot_results(packets)
-    sys.exit(0 if ok else 1)
+    main()

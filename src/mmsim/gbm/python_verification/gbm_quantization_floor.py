@@ -1,11 +1,10 @@
 """Validates the Q8.24 GBM fixed-point pipeline against a float64 reference before RTL handoff.
 
-Answers three quantitative questions used to size the price and sigma formats: whether the
-per-tick noise sigma * sqrt(dt) * Z survives Q8.24 quantization without stochastic vanishing,
-how much Ito drift accumulates over a long horizon when the closed-form -sigma^2 / 2 correction
-is omitted, and whether the fixed-point trajectory tracks a float64 reference within acceptable
-mean-squared error over one million ticks. Each test prints a verdict, plots the relevant
-diagnostics, and dumps a per-tick CSV for cross-checking against the hardware testbench.
+Answers three quantitative questions used to size the price and sigma formats: whether the per-tick noise
+sigma * sqrt(dt) * Z survives Q8.24 quantization without stochastic vanishing, how much Ito drift accumulates over a
+long horizon when the closed-form -sigma^2 / 2 correction is omitted, and whether the fixed-point trajectory tracks a
+float64 reference within acceptable mean-squared error over one million ticks. Each test prints a verdict, plots the
+relevant diagnostics, and dumps a per-tick CSV for cross-checking against the hardware testbench.
 """
 
 import csv
@@ -30,10 +29,10 @@ SIGMA_WIDTH: int = 32
 SIGMA_MAX: int = (1 << SIGMA_WIDTH) - 1
 SIGMA_MIN: int = 1
 
-# E[|Z|] for Z ~ N(0, 1) is sqrt(2/pi) ~ 0.7979. Without correction the effective EMA multiplier
-# becomes alpha + (1 - alpha) * 0.7979 < 1, which forces sigma to zero over long runs (e.g.
-# 0.999975^1e6 = e^-25 ~ 0). Scaling the absolute return by 1.25 ~ sqrt(pi/2) makes the expected
-# scaled |r| equal sigma; the residual 0.26% undershoot is absorbed by the GARCH omega baseline.
+# Scales the absolute return by 1.25 ~ sqrt(pi/2) so the volatility EMA does not collapse sigma to zero. E[|Z|] for
+# Z ~ N(0, 1) is sqrt(2/pi) ~ 0.7979, so without this correction the effective EMA multiplier alpha + (1 - alpha) *
+# 0.7979 stays below 1 and decays sigma over long runs (e.g. 0.999975^1e6 = e^-25 ~ 0). Absorbs the residual 0.26%
+# undershoot via the GARCH omega baseline.
 SCALE_APPROX: float = 1.25
 ALPHA_REAL: float = 0.99
 
@@ -84,9 +83,8 @@ def from_fixed(integer_value: int, fraction_bits: int) -> float:
 def round_shift(value: int, shift_amount: int) -> int:
     """Right-shifts an integer with symmetric round-to-nearest, matching the hardware DSP rounding.
 
-    A plain arithmetic right shift truncates toward negative infinity and skews the diffusion
-    term negative; this routine adds half-LSB before the shift so positive and negative inputs
-    round symmetrically.
+    A plain arithmetic right shift truncates toward negative infinity and skews the diffusion term negative; this
+    routine adds half-LSB before the shift so positive and negative inputs round symmetrically.
 
     Args:
         value: The integer value to shift.
@@ -157,8 +155,8 @@ def mu_ito_tick(
         ito_corrected: Determines whether the closed-form -sigma^2 / 2 correction is included.
 
     Returns:
-        The per-tick drift, equal to (mu_annual - 0.5 * sigma_annual^2) * dt when ito_corrected is
-        True and mu_annual * dt otherwise.
+        The per-tick drift, equal to (mu_annual - 0.5 * sigma_annual^2) * dt when ito_corrected is True and
+        mu_annual * dt otherwise.
     """
     if ito_corrected:
         return (mu_annual - 0.5 * sigma_annual ** 2) * dt
@@ -169,9 +167,9 @@ def q1_quantization_floor() -> dict[str, dict[str, float | str]]:
     """Reports whether sigma * sqrt(dt) * Z survives Q8.24 quantization for each tick interval.
 
     Returns:
-        A mapping from tick-interpretation label to a per-interval result dict containing dt,
-        the per-tick sigma, the noise in Q8.24 LSBs, the sigma resolution in Q0.24 LSBs, and a
-        PASS/WARN/FAIL status flag derived from the noise margin at Z = 1.
+        A mapping from tick-interpretation label to a per-interval result dict containing dt, the per-tick sigma, the
+        noise in Q8.24 LSBs, the sigma resolution in Q0.24 LSBs, and a PASS/WARN/FAIL status flag derived from the
+        noise margin at Z = 1.
     """
     print("=" * 70)
     print("Q1 — QUANTIZATION FLOOR ANALYSIS")
@@ -236,9 +234,9 @@ def q2_ito_bias(
         N: The number of ticks to simulate for the bias estimate.
 
     Returns:
-        A tuple of (uncorrected log-price array, Ito-corrected log-price array, theoretical median).
-        The two arrays have length N + 1 with a leading zero entry; the theoretical median equals
-        the per-tick Ito correction multiplied by N.
+        A tuple of (uncorrected log-price array, Ito-corrected log-price array, theoretical median). The two arrays
+        have length N + 1 with a leading zero entry; the theoretical median equals the per-tick Ito correction
+        multiplied by N.
     """
     print("\n" + "=" * 70)
     print("Q2 — ITO BIAS TEST")
@@ -293,9 +291,8 @@ def q3_fixedpoint_mse(
         N: The number of ticks to simulate on both the float and fixed-point paths.
 
     Returns:
-        A tuple of (float price, fixed-point price in real units, float sigma, fixed-point sigma in
-        real units, real-valued Z samples). All arrays have length N + 1 with the leading entry
-        holding the initial state.
+        A tuple of (float price, fixed-point price in real units, float sigma, fixed-point sigma in real units,
+        real-valued Z samples). All arrays have length N + 1 with the leading entry holding the initial state.
     """
     print("\n" + "=" * 70)
     print("Q3 — FIXED-POINT MSE ANALYSIS")
