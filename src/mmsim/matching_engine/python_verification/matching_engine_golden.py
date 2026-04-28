@@ -10,7 +10,7 @@ from pathlib import Path
 
 import click
 
-from ...utilities import console
+from ...utilities.console import console
 from .price_level_store_no_cancellation_golden import PriceLevelStoreNoCancellation
 
 

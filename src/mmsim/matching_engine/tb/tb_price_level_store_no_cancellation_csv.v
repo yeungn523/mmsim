@@ -166,6 +166,7 @@ module tb_price_level_store_no_cancellation_csv;
                 end
 
                 tick;
+                tick;
 
                 $fwrite(output_file, "%0d,%0d,%0d,%0d,%0d,%0d,%0d\n",
                     read_command,

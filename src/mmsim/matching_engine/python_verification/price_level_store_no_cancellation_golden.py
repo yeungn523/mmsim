@@ -10,7 +10,7 @@ from pathlib import Path
 
 import click
 
-from ...utilities import console
+from ...utilities.console import console
 
 
 # Number of addressable price ticks (must match kPriceRange in the Verilog DUT).

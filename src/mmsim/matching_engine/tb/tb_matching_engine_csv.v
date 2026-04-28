@@ -192,11 +192,7 @@ module tb_matching_engine_csv;
         end
 
         $fwrite(actual_file,
-            "step,packet_hex,side,order_type,agent_type,price,volume,"
-            "trade_count,total_fill_quantity,"
-            "best_bid_price,best_bid_quantity,best_bid_valid,"
-            "best_ask_price,best_ask_quantity,best_ask_valid,"
-            "last_executed_price,last_executed_price_valid\n"
+            "step,packet_hex,side,order_type,agent_type,price,volume,trade_count,total_fill_quantity,best_bid_price,best_bid_quantity,best_bid_valid,best_ask_price,best_ask_quantity,best_ask_valid,last_executed_price,last_executed_price_valid\n"
         );
         $fwrite(trades_file, "step,trade_index,trade_price,trade_quantity,trade_side\n");
 

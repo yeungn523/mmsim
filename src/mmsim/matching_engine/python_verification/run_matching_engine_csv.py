@@ -8,7 +8,7 @@ from pathlib import Path
 
 import click
 
-from ...utilities import console
+from ...utilities.console import console
 
 
 def run_stage(description: str, command: list[str], working_directory: Path) -> bool:
