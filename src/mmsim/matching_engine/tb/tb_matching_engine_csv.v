@@ -8,6 +8,10 @@
 ///   matching_engine_actual.csv        -- post-packet book snapshot, one row per packet
 ///   matching_engine_trades_actual.csv -- one row per trade pulse
 ///
+/// ModelSim:
+///   vlog price_level_store.v matching_engine.v tb_matching_engine_csv.v
+///   vsim -do run_matching_engine_csv.tcl
+///
 
 `timescale 1ns/1ns
 
@@ -47,8 +51,7 @@ module tb_matching_engine_csv;
     matching_engine #(
         .kPriceWidth      (kPriceWidth),
         .kQuantityWidth   (kQuantityWidth),
-        .kPriceRange      (kPriceRange),
-        .kAcceptFifoDepth (32)
+        .kPriceRange      (kPriceRange)
     ) dut (
         .clk                        (clock),
         .rst_n                      (reset_n),

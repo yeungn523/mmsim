@@ -1,118 +1,101 @@
-"""Precomputes the 256-layer Ziggurat tables for the standard normal distribution.
+"""Precomputes Ziggurat lookup tables for the standard normal distribution.
 
-Uses the Marsaglia and Tsang (2000) construction and emits the Q4.12 tables in the three
-formats consumed downstream: a Quartus M10K .mif ROM image, a Verilog header with behavioral
-ROM functions for simulation, and a Python module imported by the golden model.
+Builds the 256-layer Marsaglia and Tsang ziggurat decomposition for N(0, 1) and emits the Q4.12 tables as a Quartus
+MIF, a Verilog include, and a Python module so the float, MIF, Verilog, and golden-model representations agree
+bit-for-bit.
 """
 
 import math
 from pathlib import Path
 
 import numpy as np
-from numpy.typing import NDArray
 from scipy.optimize import brentq
 
 _LAYER_COUNT: int = 256
-_Q_SCALE: int = 4096               # Q4.12 scale factor (2^12)
-_Q_SIGNED_MIN: int = -32768
-_Q_SIGNED_MAX: int = 32767
-_Q_UNSIGNED_MASK: int = 0xFFFF
-_TAIL_SEARCH_LOWER: float = 2.0
-_TAIL_SEARCH_UPPER: float = 4.0
-
-_SCRIPT_DIR: Path = Path(__file__).resolve().parent
-_RTL_DIR: Path = _SCRIPT_DIR.parent / "rtl"
-_MIF_OUTPUT_PATH: Path = _RTL_DIR / "ziggurat_tables.mif"
-_VH_OUTPUT_PATH: Path = _RTL_DIR / "ziggurat_tables.vh"
-_PYTHON_OUTPUT_PATH: Path = _SCRIPT_DIR / "ziggurat_tables_golden.py"
+_Q_SCALE: int = 4096
+_Q_INT16_MIN: int = -32768
+_Q_INT16_MAX: int = 32767
+_GOLDEN_TABLE_ROW_WIDTH: int = 16
+_SCRIPT_DIRECTORY: Path = Path(__file__).resolve().parent
+_LUT_DIRECTORY: Path = _SCRIPT_DIRECTORY.parent / "rtl" / "lut"
+_MIF_PATH: Path = _LUT_DIRECTORY / "ziggurat_tables.mif"
+_VERILOG_HEADER_PATH: Path = _LUT_DIRECTORY / "ziggurat_tables.vh"
+_GOLDEN_MODULE_PATH: Path = _SCRIPT_DIRECTORY / "ziggurat_tables_golden.py"
 
 
 def build_ziggurat_tables(
     layer_count: int = _LAYER_COUNT,
 ) -> tuple[list[float], list[float], float, float]:
-    """Builds the Ziggurat layer coordinates for the standard normal distribution.
+    """Constructs the Marsaglia and Tsang ziggurat decomposition for N(0, 1).
 
-    Solves for the tail-start coordinate `r` such that every layer has equal area, then walks
-    upward from the bottom layer to the peak to produce the layer x- and y-coordinates.
-
-    Notes:
-        The construction follows Marsaglia and Tsang (2000). The bottom layer (index
-        layer_count - 1) includes the bounding-box width and tail area; the peak layer (index 0)
-        is pinned at (0, 1).
+    Solves for the tail-start radius and per-layer area such that all rectangles in the
+    decomposition cover equal area, then walks from the bottom layer to the peak to fill in the
+    right-edge x-coordinates and matching y-values for every layer.
 
     Args:
-        layer_count: The number of Ziggurat layers. Defaults to the module-level constant.
+        layer_count: The number of equal-area ziggurat layers to construct.
 
     Returns:
-        A tuple containing the x-coordinate table, the y-coordinate table, the tail-start
-        coordinate `r`, and the per-layer volume `v`.
+        A tuple of (x_table, y_table, tail_start_radius, layer_area). x_table contains the
+        right-edge x-coordinate of each layer, y_table contains the unnormalized density at each
+        right edge, tail_start_radius is the x-coordinate where the exponential tail begins, and
+        layer_area is the common area shared by every ziggurat layer.
     """
     target_area = math.sqrt(math.pi / 2.0)
 
-    def equations(tail_start: float) -> float:
-        tail = math.sqrt(math.pi / 2.0) * math.erfc(tail_start / math.sqrt(2.0))
-        return (tail_start * _norm_pdf_unnorm(value=tail_start) + tail) - target_area / layer_count
+    def compute_area_residual(radius: float) -> float:
+        tail = math.sqrt(math.pi / 2.0) * math.erfc(radius / math.sqrt(2.0))
+        return (radius * _normal_pdf_unnormalized(value=radius) + tail) - target_area / layer_count
 
-    tail_start = brentq(equations, _TAIL_SEARCH_LOWER, _TAIL_SEARCH_UPPER)
-    layer_volume = (
-        tail_start * _norm_pdf_unnorm(value=tail_start)
-        + math.sqrt(math.pi / 2.0) * math.erfc(tail_start / math.sqrt(2.0))
+    tail_start_radius = brentq(f=compute_area_residual, a=2.0, b=4.0)
+    layer_area = (
+        tail_start_radius * _normal_pdf_unnormalized(value=tail_start_radius)
+        + math.sqrt(math.pi / 2.0) * math.erfc(tail_start_radius / math.sqrt(2.0))
     )
 
     x_table: list[float] = [0.0] * layer_count
     y_table: list[float] = [0.0] * layer_count
 
-    # Layer layer_count - 1 is the bottom layer and includes the bounding-box width.
-    x_table[layer_count - 1] = layer_volume / _norm_pdf_unnorm(value=tail_start)
-    x_table[layer_count - 2] = tail_start
-    y_table[layer_count - 1] = _norm_pdf_unnorm(value=tail_start)
-    y_table[layer_count - 2] = _norm_pdf_unnorm(value=tail_start)
+    # Sets the bottom layer right edge to layer_area / f(tail_start_radius) and pins the layer
+    # above to the tail-start radius, since the recursive build cannot derive these two anchors.
+    x_table[layer_count - 1] = layer_area / _normal_pdf_unnormalized(value=tail_start_radius)
+    x_table[layer_count - 2] = tail_start_radius
+    y_table[layer_count - 1] = _normal_pdf_unnormalized(value=tail_start_radius)
+    y_table[layer_count - 2] = _normal_pdf_unnormalized(value=tail_start_radius)
 
-    # Walks upward from the bottom layer toward the peak.
-    for index in range(layer_count - 3, -1, -1):
-        x_table[index] = math.sqrt(-2.0 * math.log(layer_volume / x_table[index + 1] + y_table[index + 1]))
-        y_table[index] = _norm_pdf_unnorm(value=x_table[index])
+    for layer_index in range(layer_count - 3, -1, -1):
+        x_table[layer_index] = math.sqrt(
+            -2.0 * math.log(layer_area / x_table[layer_index + 1] + y_table[layer_index + 1])
+        )
+        y_table[layer_index] = _normal_pdf_unnormalized(value=x_table[layer_index])
 
-    # Pins the peak layer exactly at (0, 1).
+    # Overrides the recursive estimate for the top layer with the exact N(0, 1) mode at (0, 1).
     x_table[0] = 0.0
     y_table[0] = 1.0
 
-    return x_table, y_table, tail_start, layer_volume
+    return x_table, y_table, tail_start_radius, layer_area
 
 
-def to_q412(value: float, saturate: bool = True) -> int:
-    """Converts a floating-point value to its Q4.12 signed 16-bit representation.
+def write_mif(x_table: list[float], y_table: list[float], output_path: Path) -> None:
+    """Writes a Quartus MIF file for the 512x16 ziggurat ROM.
 
-    Args:
-        value: The floating-point value to quantize.
-        saturate: Determines whether out-of-range values are clamped to the signed 16-bit
-            range. When False, values wrap around modulo 16 bits.
-
-    Returns:
-        The Q4.12 representation as an unsigned 16-bit integer suitable for hex emission.
-    """
-    scaled = round(value * _Q_SCALE)
-    if saturate:
-        scaled = max(_Q_SIGNED_MIN, min(_Q_SIGNED_MAX, scaled))
-    return scaled & _Q_UNSIGNED_MASK
-
-
-def write_mif(
-    x_table: list[float],
-    y_table: list[float],
-    output_path: Path = _MIF_OUTPUT_PATH,
-) -> None:
-    """Writes the Quartus MIF image for the 512x16 ROM.
-
-    The lower 256 words hold the x-table; the upper 256 words hold the y-table.
+    The lower 256 words store x_table and the upper 256 words store y_table, each in Q4.12
+    signed fixed-point packed as unsigned 16-bit hex.
 
     Args:
-        x_table: The x-coordinate table indexed by layer.
-        y_table: The y-coordinate table indexed by layer.
-        output_path: The destination path for the emitted .mif file.
+        x_table: The per-layer right-edge x-coordinates in float units.
+        y_table: The per-layer y-values in float units.
+        output_path: The destination MIF path.
+
+    Raises:
+        ValueError: When either table does not contain exactly _LAYER_COUNT entries.
     """
-    layer_count = len(x_table)
-    assert len(y_table) == layer_count == _LAYER_COUNT
+    if len(x_table) != _LAYER_COUNT or len(y_table) != _LAYER_COUNT:
+        message = (
+            f"Unable to write the MIF file. Both ziggurat tables must contain exactly "
+            f"{_LAYER_COUNT} entries, but got {len(x_table)} and {len(y_table)}."
+        )
+        raise ValueError(message)
 
     lines: list[str] = [
         "-- Ziggurat N(0,1) lookup tables",
@@ -127,36 +110,33 @@ def write_mif(
         "CONTENT BEGIN",
     ]
 
-    for index in range(layer_count):
-        quantized = to_q412(value=x_table[index])
-        lines.append(f"\t{index:03X} : {quantized:04X};  -- x[{index}] = {x_table[index]:.6f}")
+    for index in range(_LAYER_COUNT):
+        x_quantized = _quantize_to_q412(value=x_table[index])
+        lines.append(f"\t{index:03X} : {x_quantized:04X};  -- x[{index}] = {x_table[index]:.6f}")
 
-    for index in range(layer_count):
-        quantized = to_q412(value=y_table[index])
-        lines.append(f"\t{index + layer_count:03X} : {quantized:04X};  -- y[{index}] = {y_table[index]:.6f}")
+    for index in range(_LAYER_COUNT):
+        y_quantized = _quantize_to_q412(value=y_table[index])
+        lines.append(
+            f"\t{index + _LAYER_COUNT:03X} : {y_quantized:04X};  -- y[{index}] = {y_table[index]:.6f}"
+        )
 
     lines.append("END;")
 
     output_path.write_text("\n".join(lines))
-    print(f"Wrote {output_path}  ({2 * layer_count} entries, 512x16 ROM)")
+    print(f"Wrote {output_path}  ({2 * _LAYER_COUNT} entries, 512x16 ROM)")
 
 
-def write_verilog_header(
-    x_table: list[float],
-    y_table: list[float],
-    output_path: Path = _VH_OUTPUT_PATH,
-) -> None:
-    """Writes a Verilog include file with behavioral ROM functions for simulation.
+def write_verilog_header(x_table: list[float], y_table: list[float], output_path: Path) -> None:
+    """Writes a behavioral Verilog include that exposes the ROM as case-statement functions.
 
-    The generated functions return each table entry by index through a case statement, which
-    ModelSim can elaborate without synthesis-specific M10K primitives.
+    The emitted header is intended for ModelSim behavioral simulation. Synthesis builds use the
+    MIF-initialized M10K ROM rather than this header.
 
     Args:
-        x_table: The x-coordinate table indexed by layer.
-        y_table: The y-coordinate table indexed by layer.
-        output_path: The destination path for the emitted Verilog header.
+        x_table: The per-layer right-edge x-coordinates in float units.
+        y_table: The per-layer y-values in float units.
+        output_path: The destination Verilog include path.
     """
-    layer_count = len(x_table)
     lines: list[str] = [
         "// ziggurat_tables.vh",
         "// Auto-generated by gen_ziggurat_tables.py",
@@ -172,26 +152,34 @@ def write_verilog_header(
         "    input [7:0] idx;",
         "    case (idx)",
     ]
-    for index in range(layer_count):
-        quantized = to_q412(value=x_table[index])
-        lines.append(f"        8'd{index}: zig_x_rom = 16'h{quantized:04X}; // {x_table[index]:.6f}")
-    lines.extend([
-        "        default: zig_x_rom = 16'h0000;",
-        "    endcase",
-        "endfunction",
-        "",
-        "function [15:0] zig_y_rom;",
-        "    input [7:0] idx;",
-        "    case (idx)",
-    ])
-    for index in range(layer_count):
-        quantized = to_q412(value=y_table[index])
-        lines.append(f"        8'd{index}: zig_y_rom = 16'h{quantized:04X}; // {y_table[index]:.6f}")
-    lines.extend([
-        "        default: zig_y_rom = 16'h0000;",
-        "    endcase",
-        "endfunction",
-    ])
+    for index in range(_LAYER_COUNT):
+        x_quantized = _quantize_to_q412(value=x_table[index])
+        lines.append(
+            f"        8'd{index}: zig_x_rom = 16'h{x_quantized:04X}; // {x_table[index]:.6f}"
+        )
+    lines.extend(
+        [
+            "        default: zig_x_rom = 16'h0000;",
+            "    endcase",
+            "endfunction",
+            "",
+            "function [15:0] zig_y_rom;",
+            "    input [7:0] idx;",
+            "    case (idx)",
+        ]
+    )
+    for index in range(_LAYER_COUNT):
+        y_quantized = _quantize_to_q412(value=y_table[index])
+        lines.append(
+            f"        8'd{index}: zig_y_rom = 16'h{y_quantized:04X}; // {y_table[index]:.6f}"
+        )
+    lines.extend(
+        [
+            "        default: zig_y_rom = 16'h0000;",
+            "    endcase",
+            "endfunction",
+        ]
+    )
 
     output_path.write_text("\n".join(lines))
     print(f"Wrote {output_path}  (Verilog behavioral ROM functions)")
@@ -200,107 +188,148 @@ def write_verilog_header(
 def write_python_module(
     x_table: list[float],
     y_table: list[float],
-    tail_start: float,
-    layer_volume: float,
-    output_path: Path = _PYTHON_OUTPUT_PATH,
+    tail_start_radius: float,
+    layer_area: float,
+    output_path: Path,
 ) -> None:
-    """Writes the Python module consumed by the golden model.
+    """Writes a Python module that mirrors the hardware ROM for the gaussian_verify golden model.
 
-    Emits both the raw Q4.12 integer tables and the dequantized float tables so the golden
-    model can exercise either representation.
+    The emitted module exposes the Q4.12 quantized tables and recovers the float representation
+    by dividing by the shared scale factor. The float values match the M10K ROM contents
+    bit-for-bit, so the golden model and the FPGA path operate on identical data.
 
     Args:
-        x_table: The x-coordinate table indexed by layer.
-        y_table: The y-coordinate table indexed by layer.
-        tail_start: The tail-start coordinate `r` returned by the Ziggurat construction.
-        layer_volume: The per-layer volume `v` returned by the Ziggurat construction.
-        output_path: The destination path for the emitted Python module.
+        x_table: The per-layer right-edge x-coordinates in float units.
+        y_table: The per-layer y-values in float units.
+        tail_start_radius: The x-coordinate where the exponential tail begins.
+        layer_area: The common per-layer area in the ziggurat decomposition.
+        output_path: The destination Python module path.
     """
-    layer_count = len(x_table)
-    x_quantized = [to_q412(value=entry) for entry in x_table]
-    y_quantized = [to_q412(value=entry) for entry in y_table]
+    x_quantized = [_quantize_to_q412(value=value) for value in x_table]
+    y_quantized = [_quantize_to_q412(value=value) for value in y_table]
 
     lines: list[str] = [
-        '"""Auto-generated Ziggurat tables for the N(0,1) golden model.',
+        '"""Q4.12 Ziggurat lookup tables for the N(0, 1) golden model.',
         "",
-        "Q4.12 quantized tables match the hardware ROM exactly. Float tables are dequantized",
-        "for convenience in the Python golden model.",
+        "Mirrors the hardware ROM bit-for-bit. Auto-generated by gen_ziggurat_tables.py.",
         '"""',
-        f"N_LAYERS = {layer_count}",
-        f"TAIL_START_R = {tail_start:.10f}  # x[N-1], tail begins here",
-        f"LAYER_VOLUME_V = {layer_volume:.10f}  # per-layer area",
-        f"Q_SCALE = {_Q_SCALE}  # Q4.12",
         "",
-        f"X_TABLE_RAW = {x_quantized}",
-        f"Y_TABLE_RAW = {y_quantized}",
+        f"LAYER_COUNT: int = {len(x_table)}",
+        f"TAIL_START_RADIUS: float = {tail_start_radius:.10f}",
+        f"LAYER_AREA: float = {layer_area:.10f}",
+        f"Q_SCALE: int = {_Q_SCALE}",
         "",
-        "X_TABLE = [entry / Q_SCALE for entry in X_TABLE_RAW]",
-        "Y_TABLE = [entry / Q_SCALE for entry in Y_TABLE_RAW]",
+        "X_TABLE_RAW: tuple[int, ...] = (",
+        _format_int_tuple_body(values=x_quantized),
+        ")",
+        "Y_TABLE_RAW: tuple[int, ...] = (",
+        _format_int_tuple_body(values=y_quantized),
+        ")",
+        "",
+        "X_TABLE: tuple[float, ...] = tuple(value / Q_SCALE for value in X_TABLE_RAW)",
+        "Y_TABLE: tuple[float, ...] = tuple(value / Q_SCALE for value in Y_TABLE_RAW)",
+        "",
     ]
 
     output_path.write_text("\n".join(lines))
-    print(f"Wrote {output_path}  (Python golden-model tables)")
+    print(f"Wrote {output_path}  (Python golden model tables)")
 
 
-def _norm_pdf_unnorm(value: float) -> float:
-    """Evaluates the unnormalized standard-normal PDF at the requested point.
+def main() -> None:
+    """Generates the three Ziggurat lookup table artifacts and prints construction diagnostics."""
+    print("Building Ziggurat N(0,1) tables (N=256, Q4.12)...")
+    x_table, y_table, tail_start_radius, layer_area = build_ziggurat_tables(
+        layer_count=_LAYER_COUNT,
+    )
+
+    print(f"  Tail start r = {tail_start_radius:.6f}")
+    print(f"  Layer volume v = {layer_area:.8f}")
+    print(f"  x[0]   = {x_table[0]:.6f}  (should be 0.0)")
+    print(
+        f"  x[{_LAYER_COUNT - 1}] = {x_table[_LAYER_COUNT - 1]:.6f}  "
+        f"(should be ~{tail_start_radius:.4f})"
+    )
+    print(f"  y[0]   = {y_table[0]:.6f}  (should be 1.0)")
+    print(
+        f"  y[{_LAYER_COUNT - 1}] = {y_table[_LAYER_COUNT - 1]:.6f}  "
+        f"(should be ~{math.exp(-0.5 * tail_start_radius * tail_start_radius):.4f})"
+    )
+
+    layer_areas = [
+        (x_table[index] - x_table[index - 1]) * y_table[index]
+        for index in range(1, _LAYER_COUNT)
+    ]
+    print(
+        f"  Layer area uniformity: min={min(layer_areas):.6f}, max={max(layer_areas):.6f}, "
+        f"std={np.std(layer_areas):.2e}"
+    )
+
+    write_mif(x_table=x_table, y_table=y_table, output_path=_MIF_PATH)
+    write_verilog_header(x_table=x_table, y_table=y_table, output_path=_VERILOG_HEADER_PATH)
+    write_python_module(
+        x_table=x_table,
+        y_table=y_table,
+        tail_start_radius=tail_start_radius,
+        layer_area=layer_area,
+        output_path=_GOLDEN_MODULE_PATH,
+    )
+
+    print("\nDone. Files generated:")
+    print(f"  {_MIF_PATH}           -> load into Quartus M10K ROM")
+    print(f"  {_VERILOG_HEADER_PATH}            -> include in Verilog for ModelSim")
+    print(f"  {_GOLDEN_MODULE_PATH}     -> import in cross_check.py")
+
+
+def _normal_pdf_unnormalized(value: float) -> float:
+    """Evaluates the unnormalized standard-normal density used in the ziggurat construction.
 
     Args:
-        value: The point at which to evaluate the unnormalized PDF f(x) = exp(-0.5 * x**2).
+        value: The point at which the density is evaluated.
 
     Returns:
-        The unnormalized PDF value.
+        The value of exp(-0.5 * value * value), the unnormalized N(0, 1) density.
     """
     return math.exp(-0.5 * value * value)
 
 
-def _print_layer_area_uniformity(x_table: list[float], y_table: list[float]) -> None:
-    """Prints the min, max, and standard deviation of the per-layer areas.
+def _quantize_to_q412(value: float, saturate: bool = True) -> int:
+    """Converts a floating-point value to a Q4.12 signed 16-bit integer.
 
     Args:
-        x_table: The x-coordinate table indexed by layer.
-        y_table: The y-coordinate table indexed by layer.
+        value: The value to quantize.
+        saturate: Determines whether out-of-range results are clamped to the signed 16-bit range
+            before the unsigned modulo cast.
+
+    Returns:
+        The unsigned 16-bit representation of the Q4.12 quantized value.
     """
-    areas: list[float] = []
-    for index in range(1, len(x_table)):
-        areas.append((x_table[index] - x_table[index - 1]) * y_table[index])
-    area_array: NDArray[np.float64] = np.array(areas, dtype=np.float64)
-    print(
-        f"  Layer area uniformity: min={min(areas):.6f}, max={max(areas):.6f}, "
-        f"std={float(np.std(area_array)):.2e}"
-    )
+    scaled = round(value * _Q_SCALE)
+    if saturate:
+        scaled = max(_Q_INT16_MIN, min(_Q_INT16_MAX, scaled))
+    return scaled & 0xFFFF
 
 
-def main() -> None:
-    """Runs the full table-generation pipeline and emits all three artifacts."""
-    print(f"Building Ziggurat N(0,1) tables (N={_LAYER_COUNT}, Q4.12)...")
-    x_table, y_table, tail_start, layer_volume = build_ziggurat_tables(layer_count=_LAYER_COUNT)
+def _format_int_tuple_body(
+    values: list[int],
+    items_per_row: int = _GOLDEN_TABLE_ROW_WIDTH,
+    indent: str = "    ",
+) -> str:
+    """Formats a list of integers as the wrapped body of a tuple literal.
 
-    print(f"  Tail start r = {tail_start:.6f}")
-    print(f"  Layer volume v = {layer_volume:.8f}")
-    print(f"  x[0]   = {x_table[0]:.6f}  (should be 0.0)")
-    print(f"  x[{_LAYER_COUNT - 1}] = {x_table[_LAYER_COUNT - 1]:.6f}  (should be ~{tail_start:.4f})")
-    print(f"  y[0]   = {y_table[0]:.6f}  (should be 1.0)")
-    print(
-        f"  y[{_LAYER_COUNT - 1}] = {y_table[_LAYER_COUNT - 1]:.6f}  "
-        f"(should be ~{math.exp(-0.5 * tail_start * tail_start):.4f})"
-    )
+    Args:
+        values: The integer sequence to format.
+        items_per_row: The number of integers placed on a single output line.
+        indent: The leading whitespace prepended to each output row.
 
-    _print_layer_area_uniformity(x_table=x_table, y_table=y_table)
-
-    write_mif(x_table=x_table, y_table=y_table)
-    write_verilog_header(x_table=x_table, y_table=y_table)
-    write_python_module(
-        x_table=x_table,
-        y_table=y_table,
-        tail_start=tail_start,
-        layer_volume=layer_volume,
-    )
-
-    print("\nDone. Files generated:")
-    print(f"  Quartus M10K ROM image:              {_MIF_OUTPUT_PATH}")
-    print(f"  Verilog behavioral ROM header:       {_VH_OUTPUT_PATH}")
-    print(f"  Python golden-model tables module:   {_PYTHON_OUTPUT_PATH}")
+    Returns:
+        A newline-separated string of indented rows, each ending with a trailing comma so that
+        the closing parenthesis can be placed on its own line by the caller.
+    """
+    rows: list[str] = []
+    for start_index in range(0, len(values), items_per_row):
+        chunk = values[start_index:start_index + items_per_row]
+        rows.append(indent + ", ".join(str(value) for value in chunk) + ",")
+    return "\n".join(rows)
 
 
 if __name__ == "__main__":

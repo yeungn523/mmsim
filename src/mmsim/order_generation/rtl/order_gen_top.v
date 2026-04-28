@@ -4,9 +4,10 @@
 ///
 
 module order_gen_top #(
-    parameter NUM_UNITS       = 16,                              ///< Number of agent execution units (must be a power of two).
-    parameter PTR_WIDTH       = 4,                               ///< Bit width of the arbiter pointer (log2(NUM_UNITS)).
+    parameter NUM_UNITS       = 4,                               ///< Number of agent execution units (must be a power of two).
+    parameter PTR_WIDTH       = 2,                               ///< Bit width of the arbiter pointer (log2(NUM_UNITS)).
     parameter SLOTS_PER_UNIT  = 64,                              ///< Parameter M10K slots provisioned per agent unit.
+    parameter FIFO_DEPTH      = 256,                             ///< Depth of the internal output FIFO that absorbs flash bursts.
 
     parameter signed [31:0] GBM_MU_ITO_DT     = 32'sh00000000,   ///< GBM Ito-corrected drift override.
     parameter signed [31:0] GBM_SIGMA_SQRT_DT = 32'sh00000451,   ///< GBM sigma * sqrt(dt) override.
@@ -47,6 +48,13 @@ module order_gen_top #(
     wire [NUM_UNITS-1:0]    unit_order_valid;
     wire [NUM_UNITS*32-1:0] unit_order_packet;
     wire [NUM_UNITS-1:0]    unit_order_granted;
+
+    wire [31:0] arb_packet;
+    wire        arb_valid;
+    wire        arb_ready;
+    wire        fifo_full;
+    wire        fifo_almost_full;
+    wire        fifo_empty;
 
     ziggurat_gaussian u_ziggurat (
         .clk        (clk),
@@ -129,9 +137,9 @@ module order_gen_top #(
         end
     endgenerate
 
-    // Drives the boundary handshake straight from the arbiter; backpressure from order_ready
-    // flows back to each agent through unit_order_granted, so the matching engine's Accept FIFO
-    // is the only buffer in the chain.
+    // Routes the arbiter's valid/ready output through the internal FIFO so flash injections
+    // accumulate in the FIFO instead of stalling agents through the matching engine's
+    // backpressure. The arbiter only sees order_ready=0 once the FIFO genuinely fills.
     order_arbiter #(
         .NUM_UNITS (NUM_UNITS),
         .PTR_WIDTH (PTR_WIDTH)
@@ -141,9 +149,33 @@ module order_gen_top #(
         .order_valid_in  (unit_order_valid),
         .order_packet_in (unit_order_packet),
         .order_granted   (unit_order_granted),
-        .order_packet    (order_packet),
-        .order_valid     (order_valid),
-        .order_ready     (order_ready)
+        .order_packet    (arb_packet),
+        .order_valid     (arb_valid),
+        .order_ready     (arb_ready)
+    );
+
+    // Bridges the arbiter's valid/ready to the FIFO's write port; the arbiter advances on
+    // accepted writes, so order_ready collapses to !fifo_full.
+    assign arb_ready = !fifo_almost_full && !fifo_full;
+
+    // Exposes the FIFO head as the module boundary (showahead = ON, so dout tracks the head
+    // combinationally whenever !fifo_empty).
+    assign order_valid = !fifo_empty;
+
+    order_fifo #(
+        .DATA_WIDTH (32),
+        .DEPTH      (FIFO_DEPTH),
+        .ALMOST_FULL_THRESH (16)
+    ) u_fifo (
+        .clk   (clk),
+        .rst_n (rst_n),
+        .wr_en (arb_valid && arb_ready),
+        .din   (arb_packet),
+        .full  (fifo_full),
+        .almost_full (fifo_almost_full),
+        .rd_en (order_valid && order_ready),
+        .dout  (order_packet),
+        .empty (fifo_empty)
     );
 
 endmodule

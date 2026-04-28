@@ -1,15 +1,7 @@
 # run_price_level_store_no_cancellation_csv.tcl
-# ModelSim simulation script for the CSV-driven price_level_store_no_cancellation testbench.
 #
-# Reads lob_no_cancellation_commands.csv from the sim/ working directory and writes
-# lob_no_cancellation_actual.csv. Expects the golden model to have produced the commands
-# CSV first.
-#
-# Run from ModelSim transcript:
-#   cd <path_to_matching_engine>/sim
-#   do run_price_level_store_no_cancellation_csv.tcl
-# Or headless via the orchestrator:
-#   vsim -c -do "do run_price_level_store_no_cancellation_csv.tcl; quit -f"
+# Usage: vsim -do run_price_level_store_no_cancellation_csv.tcl    (from this directory)
+#        do run_price_level_store_no_cancellation_csv.tcl          (from an open ModelSim session)
 
 if {[file exists work]} {
     vdel -lib work -all

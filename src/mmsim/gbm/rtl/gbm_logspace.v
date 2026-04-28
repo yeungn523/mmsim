@@ -116,7 +116,7 @@ module gbm_logspace #(
         .widthad_a       (13),
         .numwords_a      (8192),
         .outdata_reg_a   ("UNREGISTERED"),
-        .init_file       ("exp_lut.mif"),
+        .init_file       ("lut/exp_lut.mif"),
         .lpm_hint        ("ENABLE_RUNTIME_MOD=NO"),
         .lpm_type        ("altsyncram")
     ) exp_rom (
@@ -125,7 +125,7 @@ module gbm_logspace #(
         .q_a        (lut_data)
     );
 `else
-    `include "exp_lut.vh"
+    `include "lut/exp_lut.vh"
     always @(posedge clk) begin
         lut_data <= exp_lut_lookup(lut_addr);
     end

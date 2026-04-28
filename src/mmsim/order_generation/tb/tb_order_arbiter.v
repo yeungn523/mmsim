@@ -2,6 +2,10 @@
 /// @file tb_order_arbiter.v
 /// @brief ModelSim testbench for order_arbiter that exercises round-robin grants and downstream backpressure.
 ///
+/// ModelSim:
+///   vlog order_arbiter.v tb_order_arbiter.v
+///   vsim -do run_order_generation.tcl
+///
 
 `timescale 1ns/1ps
 

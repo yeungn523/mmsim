@@ -1,19 +1,19 @@
-# =============================================================================
 # run_gbm.tcl
-# ModelSim/Questa simulation script for GBM comparison
-# =============================================================================
+#
+# Usage: vsim -do run_gbm.tcl    (from this directory)
+#        do run_gbm.tcl          (from an open ModelSim session)
 
 set LIB_NAME work
 set TB_TOP   tb_gbm_comparison
 
-# Create work library
+# Recreates the work library to drop stale compilations.
 if { [file exists $LIB_NAME] } {
     vdel -lib $LIB_NAME -all
 }
 vlib $LIB_NAME
 vmap work $LIB_NAME
 
-# Compile source files
+# Compiles the GBM RTL variants and the comparison testbench.
 set compile_ok 1
 
 if { [catch {vlog -sv -work work +incdir+. ../rtl/gbm_euler.v}]         } { set compile_ok 0 }
@@ -25,10 +25,10 @@ if { !$compile_ok } {
     return
 }
 
-# Load simulation
+# Loads the testbench into the simulator.
 vsim -t 1ps -lib work -voptargs="+acc" $TB_TOP
 
-# Waveform setup
+# Configures the wave window for the GBM comparison.
 add wave -divider "Clock / Reset"
 add wave -radix binary      /tb_gbm_comparison/clk
 add wave -radix binary      /tb_gbm_comparison/rst_n

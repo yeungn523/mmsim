@@ -3,6 +3,10 @@
 /// @brief Drives the Euler-Maruyama and log-space GBM candidates with an identical Z-stimulus
 ///        stream so the two implementations can be cross-checked sample-for-sample.
 ///
+/// ModelSim:
+///   vlog gbm_euler.v gbm_logspace.v tb_gbm_comparison.v
+///   vsim -do run_gbm.tcl
+///
 
 `timescale 1ns/1ns
 

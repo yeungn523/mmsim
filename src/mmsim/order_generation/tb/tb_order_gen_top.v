@@ -2,6 +2,10 @@
 /// @file tb_order_gen_top.v
 /// @brief Integration testbench for order_gen_top covering reset, parameter loading, and structural packet checks.
 ///
+/// ModelSim:
+///   vlog galois_lfsr.v ziggurat_gaussian.v gbm_logspace.v agent_execution_unit.v order_arbiter.v order_gen_top.v tb_order_gen_top.v
+///   vsim -do run_sim_top.tcl
+///
 
 `timescale 1ns/1ps
 

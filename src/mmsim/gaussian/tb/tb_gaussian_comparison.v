@@ -7,6 +7,10 @@
 ///   clt12_samples.csv      -- sample_index, raw_q115, float_value
 ///   ziggurat_samples.csv   -- sample_index, raw_q115, float_value
 ///
+/// ModelSim:
+///   vlog galois_lfsr.v clt12_gaussian.v ziggurat_gaussian.v tb_gaussian_comparison.v
+///   vsim -do run_gaussian.tcl
+///
 
 `timescale 1ns/1ns
 

@@ -1,15 +1,7 @@
 # run_matching_engine_csv.tcl
-# ModelSim simulation script for the CSV-driven matching_engine testbench.
 #
-# Reads matching_engine_packets.csv from the sim/ working directory and writes
-# matching_engine_actual.csv plus matching_engine_trades_actual.csv. Expects the
-# golden model to have produced the packets CSV first.
-#
-# Run from ModelSim transcript:
-#   cd <path_to_matching_engine>/sim
-#   do run_matching_engine_csv.tcl
-# Or headless via the orchestrator:
-#   vsim -c -do "do run_matching_engine_csv.tcl; quit -f"
+# Usage: vsim -do run_matching_engine_csv.tcl    (from this directory)
+#        do run_matching_engine_csv.tcl          (from an open ModelSim session)
 
 if {[file exists work]} {
     vdel -lib work -all

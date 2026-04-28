@@ -4,9 +4,10 @@
 /// @file matching_engine.v
 /// @brief Three-stage pipelined matching engine over two no-cancellation price level stores.
 ///
-/// Stage A accepts one order packet per clock into the Accept FIFO when space is available.
-/// Stage B runs the match loop on the head-of-FIFO packet, driving CONSUME commands into the
-/// opposite-side book and emitting trade pulses on every fill. Stage C commits any unmatched
+/// Stage A latches one order packet on an accepted valid/ready handshake whenever Stage B is
+/// idle and the prior packet has retired through Stage C; the upstream FIFO holds queued packets
+/// until then. Stage B runs the match loop on the latched packet, driving CONSUME commands into
+/// the opposite-side book and emitting trade pulses on every fill. Stage C commits any unmatched
 /// limit remainder via a single INSERT to the same-side book. The B-to-C handoff register lets
 /// Stage B start the next packet while Stage C is still committing the previous one.
 ///
@@ -23,13 +24,13 @@ module matching_engine #(
     parameter kPriceWidth      = 32,    ///< Bit width of the internal price field.
     parameter kQuantityWidth   = 16,    ///< Bit width of the quantity field.
     parameter kPriceRange      = 480,   ///< Number of addressable price ticks.
-    parameter kAcceptFifoDepth = 128,   ///< Depth of the Accept FIFO between Stage A and Stage B.
     parameter kTickShiftBits   = 23     ///< Left-shift applied to a tick to expose last_executed_price as a Q8.24 price.
 )(
     input  wire                        clk,
     input  wire                        rst_n,
 
-    // Accepts one order packet per clock while the Accept FIFO has space.
+    // Latches one order packet per accepted handshake whenever Stage B is idle and the prior
+    // packet has fully retired through Stage C; the upstream FIFO absorbs bursts.
     input  wire [31:0]                 order_packet,
     input  wire                        order_valid,
     output wire                        order_ready,
@@ -68,7 +69,7 @@ module matching_engine #(
     localparam [1:0] kCommandConsume = 2'd2;  ///< Consumes shares from the current best price.
 
     // Stage B substate encoding.
-    localparam [2:0] kBIdle       = 3'd0;  ///< Pops the next packet off the Accept FIFO.
+    localparam [2:0] kBIdle       = 3'd0;  ///< Latches the next order packet from the boundary handshake.
     localparam [2:0] kBClassify   = 3'd1;  ///< Routes the packet into match or handoff.
     localparam [2:0] kBMatchCheck = 3'd2;  ///< Inspects the opposite side for a crossable level.
     localparam [2:0] kBMatchExec  = 3'd3;  ///< Issues a CONSUME on the opposite store.
@@ -81,20 +82,7 @@ module matching_engine #(
     localparam [1:0] kCWait   = 2'd2;  ///< Awaits the insert response.
     localparam [1:0] kCSettle = 2'd3;  ///< Lets best_* propagate, then pulses order_retire_valid.
 
-    // Sizes the Accept FIFO pointers and count register.
-    localparam kFifoPtrWidth   = $clog2(kAcceptFifoDepth);
-    localparam kFifoCountWidth = $clog2(kAcceptFifoDepth + 1);
-
-    // Stores raw 32-bit packets in distributed RAM; Stage B decodes on pop.
-    reg [31:0]                  fifo_buffer [0:kAcceptFifoDepth-1];
-    reg [kFifoPtrWidth-1:0]     fifo_head;
-    reg [kFifoPtrWidth-1:0]     fifo_tail;
-    reg [kFifoCountWidth-1:0]   fifo_count;
-
-    // Exposes the head packet combinationally so Stage B can pop and decode in one cycle.
-    wire [31:0] fifo_head_packet = fifo_buffer[fifo_head];
-
-    // Latches Stage B's working packet on FIFO pop and tracks remaining shares through fills.
+    // Latches Stage B's working packet on accepted handshake and tracks remaining shares through fills.
     reg [2:0]                   b_state;
     reg                         b_working_is_buy;
     reg                         b_working_is_market;
@@ -183,16 +171,17 @@ module matching_engine #(
         .best_valid        (best_ask_valid)
     );
 
-    // Holds order_ready high every cycle the Accept FIFO has space so the upstream arbiter
-    // sees a 1-packet/clock interface until a long burst fills the FIFO.
-    assign order_ready = (fifo_count != kAcceptFifoDepth[kFifoCountWidth-1:0]);
-    wire fifo_push     = order_valid && order_ready;
+    // Asserts order_ready only when Stage B is idle and the prior packet has fully retired through
+    // Stage C, so the upstream FIFO holds new packets while the engine processes the current one.
+    assign order_ready = (b_state == kBIdle) && !b_to_c_valid;
+    wire   accept_packet = order_valid && order_ready;
 
-    // Decodes the FIFO head packet for Stage B's pop.
-    wire        head_side    = fifo_head_packet[31];
-    wire        head_type    = fifo_head_packet[30];
-    wire [8:0]  head_price   = fifo_head_packet[24:16];
-    wire [15:0] head_volume  = fifo_head_packet[15:0];
+    // Decodes the incoming order packet directly off the boundary; the producer holds these bits
+    // stable while order_valid is high.
+    wire        head_side    = order_packet[31];
+    wire        head_type    = order_packet[30];
+    wire [8:0]  head_price   = order_packet[24:16];
+    wire [15:0] head_volume  = order_packet[15:0];
 
     // Names the opposite-side best relative to Stage B's working packet.
     wire [kPriceWidth-1:0] opposite_best_price = b_working_is_buy ? best_ask_price : best_bid_price;
@@ -204,9 +193,6 @@ module matching_engine #(
         : (opposite_best_price >= b_working_price);
     wire b_can_match     = opposite_best_valid && (b_working_is_market || b_limit_crosses);
 
-    // Pops the FIFO when Stage B is idle and the prior packet has fully retired, so kBClassify
-    // sees coherent best_* values that include the prior packet's INSERT.
-    wire fifo_pop = (b_state == kBIdle) && (fifo_count != {kFifoCountWidth{1'b0}}) && !b_to_c_valid;
 
     // Routes Stage B's CONSUMEs and Stage C's INSERTs to the right store, granting Stage C
     // priority on the shared bus because it is draining an older packet.
@@ -255,32 +241,6 @@ module matching_engine #(
         end
     end
 
-    // Updates the Accept FIFO pointers and count on push, pop, or both.
-    always @(posedge clk) begin
-        if (!rst_n) begin
-            fifo_head  <= {kFifoPtrWidth{1'b0}};
-            fifo_tail  <= {kFifoPtrWidth{1'b0}};
-            fifo_count <= {kFifoCountWidth{1'b0}};
-        end else begin
-            if (fifo_push) begin
-                fifo_buffer[fifo_tail] <= order_packet;
-                fifo_tail <= (fifo_tail == kAcceptFifoDepth[kFifoPtrWidth-1:0] - 1)
-                              ? {kFifoPtrWidth{1'b0}}
-                              : fifo_tail + 1'b1;
-            end
-            if (fifo_pop) begin
-                fifo_head <= (fifo_head == kAcceptFifoDepth[kFifoPtrWidth-1:0] - 1)
-                              ? {kFifoPtrWidth{1'b0}}
-                              : fifo_head + 1'b1;
-            end
-            case ({fifo_push, fifo_pop})
-                2'b10:   fifo_count <= fifo_count + 1'b1;
-                2'b01:   fifo_count <= fifo_count - 1'b1;
-                default: fifo_count <= fifo_count;
-            endcase
-        end
-    end
-
     // Drives Stage B's substate machine and the trade bus. Stage B is the sole writer of every
     // trade-related output.
     always @(posedge clk) begin
@@ -318,9 +278,10 @@ module matching_engine #(
 
             case (b_state)
                 kBIdle: begin
-                    // Pops the next packet only when the prior one has fully retired through
-                    // Stage C, serializing B with C so kBClassify reads coherent best_* values.
-                    if (fifo_count != {kFifoCountWidth{1'b0}} && !b_to_c_valid) begin
+                    // Latches the next packet on an accepted handshake; order_ready already
+                    // gates this on (kBIdle && !b_to_c_valid) so Stage B is serialized with C
+                    // and kBClassify reads coherent best_* values.
+                    if (accept_packet) begin
                         b_working_is_buy       <= ~head_side;
                         b_working_is_market    <= head_type;
                         b_working_price        <= {{(kPriceWidth - 9){1'b0}}, head_price};
