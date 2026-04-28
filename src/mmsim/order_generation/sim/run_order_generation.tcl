@@ -3,56 +3,55 @@
 # Usage: vsim -do run_order_generation.tcl    (from this directory)
 #        do run_order_generation.tcl          (from an open ModelSim session)
 
-# Recreates the work library to drop stale compilations.
 if {[file exists work]} {
     vdel -lib work -all
 }
 vlib work
 vmap work work
 
-# Compiles the arbiter RTL and its testbench.
+# Compiles RTL dependencies leaves-first, then the testbench.
+vlog -reportprogress 300 -vlog01compat -work work ../../lfsr/galois_lfsr.v
+vlog -reportprogress 300 -vlog01compat -work work +incdir+../../gaussian/rtl ../../gaussian/rtl/ziggurat_gaussian.v
+vlog -reportprogress 300 -vlog01compat -work work +incdir+../../gbm/rtl ../../gbm/rtl/gbm_logspace.v
+vlog -reportprogress 300 -vlog01compat -work work ../../agents/rtl/agent_execution_unit.v
 vlog -reportprogress 300 -vlog01compat -work work ../rtl/order_arbiter.v
-vlog -reportprogress 300 -vlog01compat -work work ../tb/tb_order_arbiter.v
+vlog -reportprogress 300 -vlog01compat -work work ../rtl/order_gen_top.v
+vlog -reportprogress 300 -vlog01compat -work work ../tb/tb_order_gen_top.v
 
 # Loads the testbench with the Altera model libraries.
 vsim -voptargs="+acc" \
      -L altera_mf_ver \
      -L 220model_ver \
-     work.tb_order_arbiter
+     work.tb_order_gen_top
 
-# Adds debug waves; the catch lets this block fail silently in batch/headless mode where the
-# wave window is unavailable.
+# Adds debug waves; the catch lets this block fail silently in batch/headless mode.
 catch {
     add wave -divider "System"
-    add wave -color Yellow /tb_order_arbiter/clk
-    add wave -color Yellow /tb_order_arbiter/rst_n
-
-    add wave -divider "Inputs"
-    add wave -hex /tb_order_arbiter/order_valid_in
-    add wave -hex /tb_order_arbiter/order_packet_in
-
-    add wave -divider "Backpressure"
-    add wave -color Red /tb_order_arbiter/order_ready
-
-    add wave -divider "Arbiter Outputs"
-    add wave -hex  /tb_order_arbiter/order_granted
-    add wave -color Cyan /tb_order_arbiter/order_valid
-    add wave -hex  /tb_order_arbiter/order_packet
-
-    add wave -divider "Internal State"
-    add wave -unsigned /tb_order_arbiter/dut/grant_pointer
-    add wave -hex      /tb_order_arbiter/dut/next_grant
-    add wave           /tb_order_arbiter/dut/found
+    add wave /tb_order_gen_top/clk
+    add wave /tb_order_gen_top/rst_n
+    add wave -divider "GBM Output"
+    add wave -hex /tb_order_gen_top/dut/gbm_price_out
+    add wave -hex /tb_order_gen_top/dut/gbm_sigma_out
+    add wave      /tb_order_gen_top/dut/gbm_price_valid
+    add wave -divider "Agent Buses"
+    add wave -hex /tb_order_gen_top/dut/unit_order_valid
+    add wave -hex /tb_order_gen_top/dut/unit_order_packet
+    add wave -hex /tb_order_gen_top/dut/unit_order_granted
+    add wave -divider "Order Bus"
+    add wave      /tb_order_gen_top/order_valid
+    add wave      /tb_order_gen_top/order_ready
+    add wave -hex /tb_order_gen_top/order_packet
+    add wave -divider "Controls"
+    add wave -unsigned /tb_order_gen_top/active_agent_count
+    add wave           /tb_order_gen_top/phase
 }
 
-# Runs the simulation; the testbench writes arbiter_log.csv and then calls $finish.
 run -all
 
-# Hands the captured CSV off to the Python golden model for verification.
-if {[file exists arbiter_log.csv]} {
+if {[file exists top_log.csv]} {
     puts "--- Starting Python Verification ---"
-    catch {exec python3 ../python_verification/order_arbiter_verify.py arbiter_log.csv} result
+    catch {exec python ../python_verification/order_gen_top_verify.py top_log.csv} result
     puts $result
 } else {
-    puts "ERROR: arbiter_log.csv not found — simulation may have failed before $fclose"
+    puts "ERROR: top_log.csv not found"
 }
