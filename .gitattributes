@@ -1,0 +1,6 @@
+src/mmsim/**/python_verification/** linguist-vendored=true
+
+src/mmsim/**/rtl/lut/*.mif linguist-generated=true
+src/mmsim/**/rtl/lut/*.vh linguist-generated=true
+
+src/mmsim/**/sim/*.tcl linguist-vendored=true
