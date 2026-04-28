@@ -80,7 +80,7 @@ module gbm_logspace #(
     reg signed [31:0]  diffusion;
     reg signed [31:0]  L_new;
     reg        [12:0]  lut_addr;
-    reg        [31:0]  lut_data;
+    wire       [31:0]  lut_data;
     reg        [31:0]  P_new;
     reg        [31:0]  delta_P;
     reg        [63:0]  abs_ret_full;
@@ -126,8 +126,10 @@ module gbm_logspace #(
     );
 `else
     `include "lut/exp_lut.vh"
+    reg [31:0] lut_data_sim;
+    assign lut_data = lut_data_sim;
     always @(posedge clk) begin
-        lut_data <= exp_lut_lookup(lut_addr);
+        lut_data_sim <= exp_lut_lookup(lut_addr);
     end
 `endif
 
@@ -165,7 +167,6 @@ module gbm_logspace #(
             diffusion         <= 32'sd0;
             L_new             <= 32'sh049AEC6F;
             lut_addr          <= 13'd0;
-            lut_data          <= 32'd0;
             P_new             <= 32'h64000000;
             delta_P           <= 32'd0;
             abs_ret_full      <= 64'd0;
