@@ -1,22 +1,9 @@
 #!/usr/bin/env python3
-"""
-golden_order_gen_top.py
-Structural checker for order_gen_top.v integration test.
+"""Structural checker for order_gen_top.v integration test.
 
-Unlike the arbiter golden model this does NOT predict exact values —
-the GBM+LFSR chain is too deep to replay in Python. Instead it checks:
-
-  PHASE 1: Zero packets when active_agent_count=0
-  PHASE 2: All packets have agent_type in {00, 11} only
-           All packets have price <= 479
-           All packets have reserved bits [27:25] == 0
-           Packets alternate agent_type 11 -> 00 -> 11 -> 00 (round-robin)
-  PHASE 3: Same structural checks, more packets
-  PHASE 4: All packets are agent_type 11 (value investor)
-           All packets have volume <= 63 (vol_cap from param decode)
-
-Usage:
-    python3 golden_order_gen_top.py top_log.csv
+Does not predict exact values; the GBM+LFSR chain is too deep to replay in Python. Instead
+it asserts per-phase invariants on agent_type, price, reserved bits, round-robin order, and
+volume caps. Usage: python3 order_gen_top_verify.py top_log.csv
 """
 
 import sys
@@ -265,7 +252,7 @@ if __name__ == "__main__":
         candidates = ["sim/top_log.csv", "top_log.csv", "../top_log.csv"]
         path = next((p for p in candidates if os.path.exists(p)), None)
         if path is None:
-            print("Usage: python3 golden_order_gen_top.py top_log.csv")
+            print("Usage: python3 order_gen_top_verify.py top_log.csv")
             sys.exit(0)
     else:
         path = sys.argv[1]

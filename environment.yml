@@ -1,0 +1,10 @@
+name: mmsim
+channels:
+  - conda-forge
+dependencies:
+  - python>=3.11
+  - click
+  - numpy
+  - scipy
+  - matplotlib
+  - pandas

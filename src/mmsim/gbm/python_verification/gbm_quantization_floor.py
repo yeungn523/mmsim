@@ -1,113 +1,184 @@
-"""
-gbm_quantization_floor.py
-=========================
-Pre-RTL validation script for the GBM fixed-point pipeline.
+"""Validates the Q8.24 GBM fixed-point pipeline against a float64 reference before RTL handoff.
 
-Answers three questions:
-  Q1 - Can Q8.24 represent sigma*sqrt(dt)*Z without stochastic vanishing?
-  Q2 - How much Ito bias accumulates over N ticks without the -sigma^2/2 correction?
-  Q3 - Do Q8.24 price and Q0.24 sigma stay within acceptable MSE vs float64 over 1M ticks?
-
+Answers three quantitative questions used to size the price and sigma formats: whether the
+per-tick noise sigma * sqrt(dt) * Z survives Q8.24 quantization without stochastic vanishing,
+how much Ito drift accumulates over a long horizon when the closed-form -sigma^2 / 2 correction
+is omitted, and whether the fixed-point trajectory tracks a float64 reference within acceptable
+mean-squared error over one million ticks. Each test prints a verdict, plots the relevant
+diagnostics, and dumps a per-tick CSV for cross-checking against the hardware testbench.
 """
 
-import math
-import numpy as np
-import matplotlib.pyplot as plt
 import csv
+import math
 
-# Fixed-point format constants 
-PRICE_FRAC  = 24   # Q8.24  price P(t)
-SIGMA_FRAC  = 24   # Q0.24  volatility sigma (upgraded from Q0.16)
-Z_FRAC      = 12   # Q4.12  Ziggurat Gaussian output
+import matplotlib.pyplot as plt
+import numpy as np
+from numpy.typing import NDArray
 
-PRICE_LSB   = 2 ** -PRICE_FRAC    # ~5.96e-8
-SIGMA_LSB   = 2 ** -SIGMA_FRAC    # ~5.96e-8
-Z_LSB       = 2 ** -Z_FRAC        # ~2.44e-4
+PRICE_FRAC: int = 24
+SIGMA_FRAC: int = 24
+Z_FRAC: int = 12
 
-Q8_24_MAX   = (256 << PRICE_FRAC) - 1
-Q8_24_MIN   = 1
+PRICE_LSB: float = 2 ** -PRICE_FRAC
+SIGMA_LSB: float = 2 ** -SIGMA_FRAC
+Z_LSB: float = 2 ** -Z_FRAC
 
-SIGMA_WIDTH = 32
-SIGMA_MAX   = (1 << SIGMA_WIDTH) - 1
-SIGMA_MIN   = 1
+Q8_24_MAX: int = (256 << PRICE_FRAC) - 1
+Q8_24_MIN: int = 1
 
-# EMA volatility constants 
-# E[|Z|] for Z~N(0,1) is sqrt(2/pi) ~ 0.7979.
-# Without correction, effective EMA multiplier = alpha + (1-alpha)*0.7979 < 1,
-# guaranteeing sigma -> 0 over long runs (e.g. 0.999975^1e6 = e^-25 ~ 0).
-# Fix: scale abs_ret by 1.25 ~ sqrt(pi/2) so E[scaled |r|] ~ sigma.
-# Residual 0.26% undershoot counteracted by omega (GARCH baseline).
-SCALE_APPROX   = 1.25
-ALPHA_REAL     = 0.99
+SIGMA_WIDTH: int = 32
+SIGMA_MAX: int = (1 << SIGMA_WIDTH) - 1
+SIGMA_MIN: int = 1
 
-# Simulation parameters 
-SIGMA_ANNUAL = 0.16
-MU_ANNUAL    = 0.0
-CLOCK_HZ     = 50e6
-P0_REAL      = 100.0
+# E[|Z|] for Z ~ N(0, 1) is sqrt(2/pi) ~ 0.7979. Without correction the effective EMA multiplier
+# becomes alpha + (1 - alpha) * 0.7979 < 1, which forces sigma to zero over long runs (e.g.
+# 0.999975^1e6 = e^-25 ~ 0). Scaling the absolute return by 1.25 ~ sqrt(pi/2) makes the expected
+# scaled |r| equal sigma; the residual 0.26% undershoot is absorbed by the GARCH omega baseline.
+SCALE_APPROX: float = 1.25
+ALPHA_REAL: float = 0.99
 
-TICKS_BIAS   = 10_000_000
-TICKS_MSE    = 1_000_000
+SIGMA_ANNUAL: float = 0.16
+MU_ANNUAL: float = 0.0
+CLOCK_HZ: float = 50e6
+P0_REAL: float = 100.0
 
-RNG_SEED     = 0xDEADBEEF
+TICKS_BIAS: int = 10_000_000
+TICKS_MSE: int = 1_000_000
 
-DT_INTERPRETATIONS = {
-    "physical  (1 tick = 1 clock cycle, 20ns)":
-        1.0 / CLOCK_HZ,
-    "market-1s (1 tick = 1 market second)":
-        1.0 / (252 * 6.5 * 3600),
-    "market-1m (1 tick = 1 market minute)":
-        1.0 / (252 * 6.5 * 60),
-    "scaled    (1 tick = 1/1000 trading day)":
-        1.0 / (252 * 1000),
+RNG_SEED: int = 0xDEADBEEF
+
+DT_INTERPRETATIONS: dict[str, float] = {
+    "physical  (1 tick = 1 clock cycle, 20ns)": 1.0 / CLOCK_HZ,
+    "market-1s (1 tick = 1 market second)": 1.0 / (252 * 6.5 * 3600),
+    "market-1m (1 tick = 1 market minute)": 1.0 / (252 * 6.5 * 60),
+    "scaled    (1 tick = 1/1000 trading day)": 1.0 / (252 * 1000),
 }
 
-# Helpers 
 
-def to_fixed(real_val, frac_bits):
-    return int(round(real_val * (1 << frac_bits)))
+def to_fixed(real_value: float, fraction_bits: int) -> int:
+    """Quantizes a real value to a fixed-point integer with the given fractional resolution.
 
-def from_fixed(int_val, frac_bits):
-    return int_val / (1 << frac_bits)
+    Args:
+        real_value: The real value to quantize.
+        fraction_bits: The number of fractional bits in the target Q-format.
 
-def round_shift(val, shift):
+    Returns:
+        The rounded fixed-point integer representation of the input value.
     """
-    Arithmetic right shift with round-to-nearest.
-    Mirrors Verilog: result = (val + (1 << (shift-1))) >>> shift
-    Plain >>> on signed values truncates toward -inf, causing asymmetric
-    negative bias in the diffusion term. This corrects that.
+    return int(round(real_value * (1 << fraction_bits)))
+
+
+def from_fixed(integer_value: int, fraction_bits: int) -> float:
+    """Recovers the float representation of a fixed-point integer with the given fractional resolution.
+
+    Args:
+        integer_value: The fixed-point integer to convert.
+        fraction_bits: The number of fractional bits used by the integer's Q-format.
+
+    Returns:
+        The float representation of the fixed-point value.
     """
-    if shift <= 0:
-        return val << (-shift)
-    half = 1 << (shift - 1)
-    if val >= 0:
-        return (val + half) >> shift
-    else:
-        return -(((-val) + half) >> shift)
+    return integer_value / (1 << fraction_bits)
 
-def clamp(val, lo, hi):
-    return max(lo, min(hi, val))
 
-def clamp_price(p):
-    return clamp(p, Q8_24_MIN, Q8_24_MAX)
+def round_shift(value: int, shift_amount: int) -> int:
+    """Right-shifts an integer with symmetric round-to-nearest, matching the hardware DSP rounding.
 
-def sigma_tick_from_annual(sigma_annual, dt):
+    A plain arithmetic right shift truncates toward negative infinity and skews the diffusion
+    term negative; this routine adds half-LSB before the shift so positive and negative inputs
+    round symmetrically.
+
+    Args:
+        value: The integer value to shift.
+        shift_amount: The number of bit positions to right-shift; negative values left-shift.
+
+    Returns:
+        The rounded shifted result, suitable for re-quantizing intermediate Q-format products.
+    """
+    if shift_amount <= 0:
+        return value << (-shift_amount)
+    half = 1 << (shift_amount - 1)
+    if value >= 0:
+        return (value + half) >> shift_amount
+    return -(((-value) + half) >> shift_amount)
+
+
+def clamp(value: int, low: int, high: int) -> int:
+    """Clamps an integer to the inclusive range [low, high].
+
+    Args:
+        value: The value to clamp.
+        low: The lower bound of the allowed range.
+        high: The upper bound of the allowed range.
+
+    Returns:
+        The clamped value.
+    """
+    return max(low, min(high, value))
+
+
+def clamp_price(price: int) -> int:
+    """Clamps a Q8.24 price to the legal hardware range [Q8_24_MIN, Q8_24_MAX].
+
+    Args:
+        price: The Q8.24 price integer to clamp.
+
+    Returns:
+        The clamped Q8.24 price.
+    """
+    return clamp(value=price, low=Q8_24_MIN, high=Q8_24_MAX)
+
+
+def sigma_tick_from_annual(sigma_annual: float, dt: float) -> float:
+    """Returns the per-tick volatility implied by the annualized sigma and the chosen tick interval.
+
+    Args:
+        sigma_annual: The annualized volatility.
+        dt: The tick interval in years.
+
+    Returns:
+        The per-tick volatility sigma_annual * sqrt(dt).
+    """
     return sigma_annual * math.sqrt(dt)
 
-def mu_ito_tick(mu_annual, sigma_annual, dt, ito_corrected=True):
+
+def mu_ito_tick(
+    mu_annual: float,
+    sigma_annual: float,
+    dt: float,
+    ito_corrected: bool = True,
+) -> float:
+    """Returns the per-tick log-price drift, including the closed-form Ito correction by default.
+
+    Args:
+        mu_annual: The annualized drift rate.
+        sigma_annual: The annualized volatility used to compute the Ito correction.
+        dt: The tick interval in years.
+        ito_corrected: Determines whether the closed-form -sigma^2 / 2 correction is included.
+
+    Returns:
+        The per-tick drift, equal to (mu_annual - 0.5 * sigma_annual^2) * dt when ito_corrected is
+        True and mu_annual * dt otherwise.
+    """
     if ito_corrected:
         return (mu_annual - 0.5 * sigma_annual ** 2) * dt
     return mu_annual * dt
 
-# Q1: Quantization Floor 
 
-def q1_quantization_floor():
+def q1_quantization_floor() -> dict[str, dict[str, float | str]]:
+    """Reports whether sigma * sqrt(dt) * Z survives Q8.24 quantization for each tick interval.
+
+    Returns:
+        A mapping from tick-interpretation label to a per-interval result dict containing dt,
+        the per-tick sigma, the noise in Q8.24 LSBs, the sigma resolution in Q0.24 LSBs, and a
+        PASS/WARN/FAIL status flag derived from the noise margin at Z = 1.
+    """
     print("=" * 70)
     print("Q1 — QUANTIZATION FLOOR ANALYSIS")
     print("     Can Q8.24 represent sigma*sqrt(dt)*Z without vanishing?")
     print("=" * 70)
 
-    results = {}
+    results: dict[str, dict[str, float | str]] = {}
     all_pass = True
 
     for name, dt in DT_INTERPRETATIONS.items():
@@ -153,9 +224,22 @@ def q1_quantization_floor():
     print(f"\n  Overall Q1 status: {'PASS' if all_pass else 'REVIEW REQUIRED'}")
     return results
 
-# Q2: Ito Bias Test 
 
-def q2_ito_bias(dt, N=TICKS_BIAS):
+def q2_ito_bias(
+    dt: float,
+    N: int = TICKS_BIAS,
+) -> tuple[NDArray[np.float64], NDArray[np.float64], float]:
+    """Estimates the upward log-price drift accumulated when the closed-form Ito correction is omitted.
+
+    Args:
+        dt: The tick interval in years used to derive the per-tick volatility and Ito correction.
+        N: The number of ticks to simulate for the bias estimate.
+
+    Returns:
+        A tuple of (uncorrected log-price array, Ito-corrected log-price array, theoretical median).
+        The two arrays have length N + 1 with a leading zero entry; the theoretical median equals
+        the per-tick Ito correction multiplied by N.
+    """
     print("\n" + "=" * 70)
     print("Q2 — ITO BIAS TEST")
     print(f"     mu=0, sigma={SIGMA_ANNUAL}, N={N:,} ticks")
@@ -191,9 +275,28 @@ def q2_ito_bias(dt, N=TICKS_BIAS):
 
     return log_P_unc, log_P_cor, theo
 
-# Q3: Fixed-Point MSE Analysis 
 
-def q3_fixedpoint_mse(dt, N=TICKS_MSE):
+def q3_fixedpoint_mse(
+    dt: float,
+    N: int = TICKS_MSE,
+) -> tuple[
+    NDArray[np.float64],
+    NDArray[np.float64],
+    NDArray[np.float64],
+    NDArray[np.float64],
+    NDArray[np.float64],
+]:
+    """Compares the Q8.24 fixed-point GBM trajectory against a float64 reference over N ticks.
+
+    Args:
+        dt: The tick interval in years used to derive the per-tick volatility and drift.
+        N: The number of ticks to simulate on both the float and fixed-point paths.
+
+    Returns:
+        A tuple of (float price, fixed-point price in real units, float sigma, fixed-point sigma in
+        real units, real-valued Z samples). All arrays have length N + 1 with the leading entry
+        holding the initial state.
+    """
     print("\n" + "=" * 70)
     print("Q3 — FIXED-POINT MSE ANALYSIS")
     print(f"     Float64 vs Q8.24/Q0.24 fixed-point, N={N:,} ticks")
@@ -217,7 +320,6 @@ def q3_fixedpoint_mse(dt, N=TICKS_MSE):
     print(f"    alpha_fp       = {alpha_fp}  ({from_fixed(alpha_fp, SIGMA_FRAC):.6f})")
     print(f"    hard_floor_fp  = {sigma_init_fp}  (sigma never drops below init)")
 
-    # Float64 path (hardware-matched approximations) 
     P_float   = np.zeros(N + 1)
     sig_float = np.zeros(N + 1)
     P_float[0]   = P0_REAL
@@ -230,12 +332,11 @@ def q3_fixedpoint_mse(dt, N=TICKS_MSE):
         P_new     = P_float[i] + drift + diffusion
         P_float[i+1] = max(0.0, P_new)
 
-        # P0 normalization (matches hardware — no divider needed)
+        # Normalizes the absolute return by P0 to mirror the divider-free hardware path.
         abs_ret = (abs(P_float[i+1] - P_float[i]) / max(P0_REAL, 1e-10)) * SCALE_APPROX
         sig_new = ALPHA_REAL * sig_float[i] + (1 - ALPHA_REAL) * abs_ret
-        sig_float[i+1] = max(sig_float[0], sig_new)   # hard floor at sigma_init
+        sig_float[i+1] = max(sig_float[0], sig_new)
 
-    # Fixed-point path 
     P_int   = np.zeros(N + 1, dtype=np.int64)
     sig_int = np.zeros(N + 1, dtype=np.int64)
     P_int[0]   = P0_fp
@@ -263,7 +364,7 @@ def q3_fixedpoint_mse(dt, N=TICKS_MSE):
         # Stage 3: diffusion  Q8.24 * Q4.12 -> Q12.36 -> Q8.24
         diffusion = round_shift(P_sigma * Z, Z_FRAC)
 
-        # Stage 4: sum and clamp
+        # Sums and clamps the price to the legal Q8.24 hardware range.
         P_new = P + drift + diffusion
         if P_new > Q8_24_MAX:
             overflow_count += 1
@@ -272,23 +373,20 @@ def q3_fixedpoint_mse(dt, N=TICKS_MSE):
         P_new = clamp_price(P_new)
         P_int[i+1] = P_new
 
-        # Stage 5: volatility EMA
-        # abs_ret_norm = |delta_P| / P0  in Q0.24
+        # Updates the volatility EMA using the divider-free abs-return normalization.
         delta_P      = abs(P_new - P)
         abs_ret_norm = (delta_P << SIGMA_FRAC) // max(P0_fp, 1)
         abs_ret_norm = clamp(abs_ret_norm, 0, SIGMA_MAX)
 
-        # Scale 1.25 = 1 + 1/4 via shift-add (no DSP)
+        # Implements the 1.25 scale as x + (x >> 2) so the hardware avoids a DSP multiply.
         abs_ret_scaled = abs_ret_norm + (abs_ret_norm >> 2)
         abs_ret_scaled = clamp(abs_ret_scaled, 0, SIGMA_MAX)
 
-        # EMA + GARCH omega
         sig_new = (round_shift(alpha_fp * sig, SIGMA_FRAC)
                    + round_shift(one_m_alpha * abs_ret_scaled, SIGMA_FRAC))
-        sig_new = clamp(sig_new, sigma_init_fp, SIGMA_MAX)   # hard floor
+        sig_new = clamp(sig_new, sigma_init_fp, SIGMA_MAX)
         sig_int[i+1] = sig_new
 
-    # Metrics 
     P_fixed_real   = P_int   / (1 << PRICE_FRAC)
     sig_fixed_real = sig_int / (1 << SIGMA_FRAC)
 
@@ -346,11 +444,31 @@ def q3_fixedpoint_mse(dt, N=TICKS_MSE):
 
     return P_float, P_fixed_real, sig_float, sig_fixed_real, Z_samples
 
-# Plotting 
 
-def make_plots(P_float, P_fixed, sig_float, sig_fixed, Z_samples,
-               log_P_unc, log_P_corr, theoretical_median, dt):
+def make_plots(
+    P_float: NDArray[np.float64],
+    P_fixed: NDArray[np.float64],
+    sig_float: NDArray[np.float64],
+    sig_fixed: NDArray[np.float64],
+    Z_samples: NDArray[np.float64],
+    log_P_unc: NDArray[np.float64],
+    log_P_corr: NDArray[np.float64],
+    theoretical_median: float,
+    dt: float,
+) -> None:
+    """Plots the price and sigma traces, the log-return distribution, and the Ito-correction ensemble.
 
+    Args:
+        P_float: The float64 reference price array, length N + 1, including the initial value.
+        P_fixed: The Q8.24 fixed-point price array converted to float, length N + 1.
+        sig_float: The float64 reference sigma array, length N + 1, including the initial value.
+        sig_fixed: The Q0.24 fixed-point sigma array converted to float, length N + 1.
+        Z_samples: The float64 Gaussian samples that drove both paths, accepted for signature symmetry.
+        log_P_unc: The uncorrected log-price array returned by q2_ito_bias.
+        log_P_corr: The Ito-corrected log-price array returned by q2_ito_bias.
+        theoretical_median: The closed-form theoretical median log-price after N ticks.
+        dt: The tick interval in years used to annotate the figure.
+    """
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
     fig.suptitle(
         f"GBM Quantization Floor — Q8.24 price / Q0.24 sigma\n"
@@ -362,7 +480,7 @@ def make_plots(P_float, P_fixed, sig_float, sig_fixed, Z_samples,
     N_plot = min(len(P_float) - 1, 500)
     ticks  = np.arange(N_plot + 1)
 
-    # Panel 1: Price trace
+    # Panel 1: float vs fixed-point price trace.
     ax = axes[0, 0]
     ax.plot(ticks, P_float[:N_plot+1], label="Float64", lw=1.2, color="#185FA5")
     ax.plot(ticks, P_fixed[:N_plot+1], label="Q8.24 Fixed", lw=1.0,
@@ -373,7 +491,7 @@ def make_plots(P_float, P_fixed, sig_float, sig_fixed, Z_samples,
     ax.legend(loc="upper left", fontsize=9)
     ax.grid(True, alpha=0.3)
 
-    # Panel 2: Sigma stability (the key panel)
+    # Panel 2: sigma stability — must not collapse.
     ax = axes[0, 1]
     sigma_t = sigma_tick_from_annual(SIGMA_ANNUAL, dt)
     ax.plot(ticks, sig_float[:N_plot+1], label="Float64 sigma",
@@ -388,13 +506,13 @@ def make_plots(P_float, P_fixed, sig_float, sig_fixed, Z_samples,
     ax.legend(loc="upper left", fontsize=9)
     ax.grid(True, alpha=0.3)
 
-    # Panel 3: Log-return distribution
+    # Panel 3: log-return histogram comparison.
     ax = axes[1, 0]
     lr_float = np.diff(np.log(np.maximum(P_float, 1e-10)))
     lr_fixed = np.diff(np.log(np.maximum(P_fixed, 1e-10)))
-    lo = np.percentile(lr_float, 1)
-    hi = np.percentile(lr_float, 99)
-    bins = np.linspace(lo, hi, 80)
+    low  = np.percentile(lr_float, 1)
+    high = np.percentile(lr_float, 99)
+    bins = np.linspace(low, high, 80)
     ax.hist(lr_fixed, bins=bins, alpha=0.3, label="Q8.24 Fixed",
             color="#D85A30", density=True, histtype='stepfilled')
     ax.hist(lr_float, bins=bins, alpha=1.0, label="Float64",
@@ -405,7 +523,7 @@ def make_plots(P_float, P_fixed, sig_float, sig_fixed, Z_samples,
     ax.legend(loc="upper left", fontsize=9)
     ax.grid(True, alpha=0.3)
 
-    # Panel 4: Ito correction — vectorized Monte Carlo ensemble
+    # Panel 4: vectorized Monte Carlo Ito correction ensemble.
     ax = axes[1, 1]
     N_bias = min(len(log_P_unc) - 1, TICKS_BIAS)
     t_bias = np.arange(N_bias + 1)
@@ -446,9 +564,23 @@ def make_plots(P_float, P_fixed, sig_float, sig_fixed, Z_samples,
     plt.savefig("quantization_floor_plots.png", dpi=150, bbox_inches="tight")
     print("\n  Plots saved to quantization_floor_plots.png")
 
-# CSV Export 
 
-def export_csv(P_float, P_fixed, sig_float, sig_fixed, N=5000):
+def export_csv(
+    P_float: NDArray[np.float64],
+    P_fixed: NDArray[np.float64],
+    sig_float: NDArray[np.float64],
+    sig_fixed: NDArray[np.float64],
+    N: int = 5000,
+) -> None:
+    """Writes a tick-by-tick price and sigma comparison CSV between the float and fixed-point paths.
+
+    Args:
+        P_float: The float64 reference price array, length N + 1, including the initial value.
+        P_fixed: The Q8.24 fixed-point price array converted to float, length N + 1.
+        sig_float: The float64 reference sigma array, length N + 1, including the initial value.
+        sig_fixed: The Q0.24 fixed-point sigma array converted to float, length N + 1.
+        N: The maximum number of ticks to write to the CSV.
+    """
     filename = "quantization_floor_results.csv"
     with open(filename, "w", newline="") as f:
         writer = csv.writer(f)
@@ -470,9 +602,9 @@ def export_csv(P_float, P_fixed, sig_float, sig_fixed, N=5000):
     print(f"  Tick-by-tick comparison saved to {filename} "
           f"({min(N, len(P_float))} rows)")
 
-# Main 
 
-def main():
+def main() -> None:
+    """Runs Q1, Q2, and Q3 in sequence and prints the fixed-point format recommendation for the RTL handoff."""
     print("\n" + "#" * 70)
     print("#  GBM QUANTIZATION FLOOR — Pre-RTL Validation")
     print("#  ECE 5760 Market Microstructure Simulator")
@@ -529,6 +661,7 @@ def main():
     print(f"    sigma hard floor = sigma_init_fp = {to_fixed(sigma_t, SIGMA_FRAC)}")
     print(f"    EMA scale        = 1.25 = x + (x>>2)  [hardware shift-add]")
     print()
+
 
 if __name__ == "__main__":
     main()

@@ -1,4 +1,7 @@
 # run_gbm.tcl
+#
+# Usage: vsim -do run_gbm.tcl    (from this directory)
+#        do run_gbm.tcl          (from an open ModelSim session)
 
 set LIB_NAME work
 set TB_TOP   tb_gbm_comparison

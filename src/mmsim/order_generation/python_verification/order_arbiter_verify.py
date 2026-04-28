@@ -1,13 +1,8 @@
 #!/usr/bin/env python3
-"""
-golden_order_arbiter.py
-Golden model + checker for order_arbiter.v
+"""Golden model and checker for order_arbiter.v.
 
-Reads arbiter_log.csv produced by tb_order_arbiter.v, runs the same
-round-robin logic in Python, and compares every grant and stall event.
-
-Usage:
-    python3 golden_order_arbiter.py arbiter_log.csv
+Reads arbiter_log.csv from tb_order_arbiter.v, replays the round-robin logic, and compares
+every grant and stall event. Usage: python3 order_arbiter_verify.py arbiter_log.csv
 """
 
 import sys

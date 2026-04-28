@@ -1,4 +1,7 @@
 # run_price_level_store_no_cancellation_csv.tcl
+#
+# Usage: vsim -do run_price_level_store_no_cancellation_csv.tcl    (from this directory)
+#        do run_price_level_store_no_cancellation_csv.tcl          (from an open ModelSim session)
 
 if {[file exists work]} {
     vdel -lib work -all

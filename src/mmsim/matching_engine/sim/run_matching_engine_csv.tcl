@@ -1,4 +1,7 @@
 # run_matching_engine_csv.tcl
+#
+# Usage: vsim -do run_matching_engine_csv.tcl    (from this directory)
+#        do run_matching_engine_csv.tcl          (from an open ModelSim session)
 
 if {[file exists work]} {
     vdel -lib work -all

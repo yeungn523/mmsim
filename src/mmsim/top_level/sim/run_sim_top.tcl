@@ -1,4 +1,7 @@
 # run_sim_top.tcl
+#
+# Usage: vsim -do run_sim_top.tcl    (from this directory)
+#        do run_sim_top.tcl          (from an open ModelSim session)
 
 set ROOT "C:/Users/gaa59/Desktop/mmsim/src/mmsim"
 

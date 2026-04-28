@@ -1,4 +1,8 @@
 # run_lfsr.tcl
+#
+# Usage: vsim -do run_lfsr.tcl    (from this directory)
+#        do run_lfsr.tcl          (from an open ModelSim session)
+
 vlib work
 vlog -work work galois_lfsr.v
 vlog -sv -work work tb_galois_lfsr.v

@@ -1,4 +1,7 @@
 # run_order_generation.tcl
+#
+# Usage: vsim -do run_order_generation.tcl    (from this directory)
+#        do run_order_generation.tcl          (from an open ModelSim session)
 
 # Recreates the work library to drop stale compilations.
 if {[file exists work]} {
@@ -48,7 +51,7 @@ run -all
 # Hands the captured CSV off to the Python golden model for verification.
 if {[file exists arbiter_log.csv]} {
     puts "--- Starting Python Verification ---"
-    catch {exec python3 ../python_verification/golden_order_arbiter.py arbiter_log.csv} result
+    catch {exec python3 ../python_verification/order_arbiter_verify.py arbiter_log.csv} result
     puts $result
 } else {
     puts "ERROR: arbiter_log.csv not found — simulation may have failed before $fclose"

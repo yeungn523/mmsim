@@ -84,22 +84,18 @@ This project is distributed as source only. There is no PyPI package or precompi
    . .\setup.ps1
    ```
 
-   ***Note,*** dot-sourcing (`. .\setup.ps1`) applies the changes to the current shell. Running
-   the script directly (`.\setup.ps1`) executes it in a child shell and the variables are lost
-   when that shell exits.
+   ***Note,*** dot-sourcing applies the changes to the current shell; running `.\setup.ps1`
+   directly loses them when the child shell exits.
 
-3. **Install the Python verification dependency.** To replicate the Python-driven golden model
-   and CSV-comparison testing flow, activate the conda environment intended for this project and
-   install [click](https://click.palletsprojects.com/):
+3. **Create the `mmsim` conda environment for Python verification.**
 
    ```
-   pip install click
+   conda env create -f environment.yml
+   conda activate mmsim
    ```
 
-   ***Note,*** activate the conda environment ***before*** dot-sourcing `setup.ps1`. The
-   activation step prepends the conda environment to `PATH`, which keeps the conda Python
-   ahead of any other interpreter while leaving the ModelSim entries appended by `setup.ps1`
-   reachable.
+   ***Note,*** activate `mmsim` ***before*** dot-sourcing `setup.ps1` so the conda Python sits
+   ahead of any other interpreter on `PATH`.
 
 ___
 

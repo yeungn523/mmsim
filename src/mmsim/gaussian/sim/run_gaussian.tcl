@@ -1,4 +1,7 @@
 # run_gaussian.tcl
+#
+# Usage: vsim -do run_gaussian.tcl    (from this directory)
+#        do run_gaussian.tcl          (from an open ModelSim session)
 
 if {[file exists work]} {
     vdel -lib work -all

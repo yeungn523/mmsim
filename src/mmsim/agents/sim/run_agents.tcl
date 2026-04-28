@@ -1,4 +1,7 @@
 # run_agents.tcl
+#
+# Usage: vsim -do run_agents.tcl    (from this directory)
+#        do run_agents.tcl          (from an open ModelSim session)
 
 # Quits any existing simulation so re-runs start from a clean slate.
 if {[catch {simstats}] == 0} {

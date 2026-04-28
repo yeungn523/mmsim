@@ -1,4 +1,7 @@
 # run_sim_top.tcl
+#
+# Usage: vsim -do run_sim_top.tcl    (from this directory)
+#        do run_sim_top.tcl          (from an open ModelSim session)
 
 if {[file exists work]} {
     vdel -lib work -all
@@ -47,7 +50,7 @@ run -all
 
 if {[file exists top_log.csv]} {
     puts "--- Starting Python Verification ---"
-    catch {exec python ../python_verification/golden_order_gen_top.py top_log.csv} result
+    catch {exec python ../python_verification/order_gen_top_verify.py top_log.csv} result
     puts $result
 } else {
     puts "ERROR: top_log.csv not found"
