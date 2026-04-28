@@ -379,18 +379,9 @@ Computer_System The_System (
 	// FPGA Side
 	////////////////////////////////////
 
-	// PLL outputs for VGA and M10K clocks
-	.vga_pio_locked_export     (vga_pll_lock),
-	.vga_pio_outclk0_clk       (vga_pll),
-	.m10k_pll_locked_export    (M10k_pll_locked),
-	.m10k_pll_outclk0_clk      (M10k_pll),
-
 	// Global signals
 	.system_pll_ref_clk_clk         (CLOCK_50),
 	.system_pll_ref_reset_reset     (1'b0),
-	
-	// FPGA to HPS (input)
-	.pio_key_external_connection_export         (KEY[0]),
 
 	////////////////////////////////////
 	// HPS Side
