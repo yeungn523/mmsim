@@ -44,6 +44,7 @@ ___
   - [Dependencies](#dependencies)
   - [Installation](#installation)
   - [Usage](#usage)
+    - [Layout](#layout)
     - [Packet Format](#packet-format)
     - [Running Simulations](#running-simulations)
   - [Authors](#authors)
@@ -103,6 +104,39 @@ This project is distributed as source only. There is no PyPI package or precompi
 ___
 
 ## Usage
+
+### Layout
+
+Each hardware block lives in its own subfolder under `src/mmsim/` and follows
+the same four-directory layout:
+
+```
+<block>/
+├── rtl/                  # Verilog HDL source for synthesis
+├── sim/                  # ModelSim TCL scripts (and CSV stimulus where used)
+├── tb/                   # Verilog testbenches
+└── python_verification/  # Python golden models and Click CLIs
+```
+
+Per-block contents:
+
+- **`agents/`** — Time-multiplexed agent execution unit driving noise,
+  market-maker, momentum, and value strategies from M10K-backed parameter
+  slots.
+- **`gaussian/`** — Ziggurat and CLT-12 Gaussian random number generators;
+  shared Ziggurat lookup tables sit under `rtl/lut/`.
+- **`gbm/`** — Log-space and Euler Geometric Brownian Motion price evolution
+  cores; `rtl/lut/` holds the `exp()` LUT and its generator.
+- **`lfsr/`** — Galois LFSR pseudo-random source used to seed the Gaussian
+  and agent blocks.
+- **`matching_engine/`** — Pipelined Accept/Match/Commit matching engine and
+  price-level store backing the 480-tick limit order book; `sim/` carries the
+  CSV stimulus and expected-trade vectors used by the regression CLIs.
+- **`order_generation/`** — Order FIFO, round-robin arbiter, and
+  `order_gen_top` that fans agent output into the matching engine.
+- **`top_level/`** — DE1-SoC integration wrapper and full-system testbench.
+- **`vga_display/`** — VGA visualization for the live system.
+- **`utilities/`** — Shared Python helpers used by all verification CLIs.
 
 ### Packet Format
 

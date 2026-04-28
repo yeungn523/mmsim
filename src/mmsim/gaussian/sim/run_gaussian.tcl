@@ -1,10 +1,4 @@
 # run_gaussian.tcl
-# ModelSim simulation script for Gaussian generator comparison
-# (Ziggurat ROM-based vs CLT-12).
-#
-# Prerequisites:
-#   1. Run gen_ziggurat_tables.py to produce ziggurat_tables.vh and ziggurat_tables.mif
-#   2. Ensure ziggurat_tables.vh is alongside ziggurat_gaussian.v in ../rtl/
 
 if {[file exists work]} {
     vdel -lib work -all

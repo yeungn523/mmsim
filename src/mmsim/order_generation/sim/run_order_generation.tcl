@@ -1,28 +1,24 @@
-# ---------------------------------------------------------------------------
-# run_sim.tcl
-# Run from: order_generation/sim/   (TCL lives here, sources are in ../)
-# Usage:    vsim -c -do run_sim.tcl
-# ---------------------------------------------------------------------------
+# run_order_generation.tcl
 
-# 1. Setup library
+# Recreates the work library to drop stale compilations.
 if {[file exists work]} {
     vdel -lib work -all
 }
 vlib work
 vmap work work
 
-# 2. Compile
+# Compiles the arbiter RTL and its testbench.
 vlog -reportprogress 300 -vlog01compat -work work ../rtl/order_arbiter.v
 vlog -reportprogress 300 -vlog01compat -work work ../tb/tb_order_arbiter.v
 
-# 3. Load simulation
+# Loads the testbench with the Altera model libraries.
 vsim -voptargs="+acc" \
      -L altera_mf_ver \
      -L 220model_ver \
      work.tb_order_arbiter
 
-# 4. Add waves — only when running in GUI (ModelSim interactive, not -c mode)
-#    catch lets this block fail silently in batch/headless mode
+# Adds debug waves; the catch lets this block fail silently in batch/headless mode where the
+# wave window is unavailable.
 catch {
     add wave -divider "System"
     add wave -color Yellow /tb_order_arbiter/clk
@@ -46,10 +42,10 @@ catch {
     add wave           /tb_order_arbiter/dut/found
 }
 
-# 5. Run simulation — TB writes arbiter_log.csv then calls $finish
+# Runs the simulation; the testbench writes arbiter_log.csv and then calls $finish.
 run -all
 
-# 6. Python verification — arbiter_log.csv written to sim/ (cwd)
+# Hands the captured CSV off to the Python golden model for verification.
 if {[file exists arbiter_log.csv]} {
     puts "--- Starting Python Verification ---"
     catch {exec python3 ../python_verification/golden_order_arbiter.py arbiter_log.csv} result

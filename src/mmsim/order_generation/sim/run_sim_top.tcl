@@ -1,8 +1,4 @@
-# ---------------------------------------------------------------------------
 # run_sim_top.tcl
-# Run from: order_generation/sim/
-# Usage:    vsim -c -do run_sim_top.tcl
-# ---------------------------------------------------------------------------
 
 if {[file exists work]} {
     vdel -lib work -all
@@ -10,7 +6,7 @@ if {[file exists work]} {
 vlib work
 vmap work work
 
-# Compile all source files — order matters (leaves before top)
+# Compiles RTL dependencies leaves-first, then the testbench.
 vlog -reportprogress 300 -vlog01compat -work work ../../lfsr/galois_lfsr.v
 vlog -reportprogress 300 -vlog01compat -work work +incdir+../../gaussian/rtl ../../gaussian/rtl/ziggurat_gaussian.v
 vlog -reportprogress 300 -vlog01compat -work work +incdir+../../gbm/rtl ../../gbm/rtl/gbm_logspace.v
@@ -19,13 +15,13 @@ vlog -reportprogress 300 -vlog01compat -work work ../rtl/order_arbiter.v
 vlog -reportprogress 300 -vlog01compat -work work ../rtl/order_gen_top.v
 vlog -reportprogress 300 -vlog01compat -work work ../tb/tb_order_gen_top.v
 
-# Load simulation with Altera libraries
+# Loads the testbench with the Altera model libraries.
 vsim -voptargs="+acc" \
      -L altera_mf_ver \
      -L 220model_ver \
      work.tb_order_gen_top
 
-# Waves — GUI only, silent in batch
+# Adds debug waves; the catch lets this block fail silently in batch/headless mode.
 catch {
     add wave -divider "System"
     add wave /tb_order_gen_top/clk

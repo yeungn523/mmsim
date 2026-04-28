@@ -1,18 +1,15 @@
 # run_sim_top.tcl
-# ModelSim TCL script for tb_sim_top integration testbench.
-# Usage: vsim -c -do "do run_sim_top.tcl; quit -f"
-# TCL file lives in: C:/Users/gaa59/Desktop/mmsim/src/mmsim/top_level/sim/
 
 set ROOT "C:/Users/gaa59/Desktop/mmsim/src/mmsim"
 
-# Create and map work library
+# Recreates and maps the work library.
 if {[file exists work]} {
     vdel -lib work -all
 }
 vlib work
 vmap work work
 
-# Compile RTL dependencies in bottom-up order
+# Compiles RTL dependencies in bottom-up order so each module sees its leaves.
 vlog -work work $ROOT/lfsr/rtl/galois_lfsr.v
 vlog -work work $ROOT/gaussian/rtl/ziggurat_gaussian.v
 vlog -work work $ROOT/gbm/rtl/gbm_logspace.v
@@ -24,16 +21,16 @@ vlog -work work $ROOT/order_generation/rtl/order_gen_top.v
 vlog -work work $ROOT/agents/rtl/agent_execution_unit.v
 vlog -work work $ROOT/top_level/rtl/top_level.v
 
-# Compile testbench
+# Compiles the testbench last.
 vlog -work work $ROOT/top_level/tb/tb_sim_top.v
 
-# Simulate
+# Loads the testbench into the simulator with 1 ns timestep.
 vsim -t 1ns -lib work -L altera_mf_ver tb_sim_top
 
-# Log all signals
+# Logs all signals for post-run analysis.
 log -r /*
 
-# Waveform setup
+# Configures the wave window.
 add wave -divider "Clock / Reset"
 add wave -hex clk
 add wave -hex rst_n
@@ -77,10 +74,10 @@ add wave -hex total_fifo_full_events
 add wave -hex total_conservation_errors
 add wave -hex total_invalid_trade_price
 
-# Run
+# Runs the simulation to completion.
 run -all
 
-# Print summary to transcript
+# Prints the invariant summary to the transcript.
 echo ""
 echo "========================================"
 echo "Invariant Summary"

@@ -1,48 +1,22 @@
 ///
 /// @file agent_execution_unit_tb.v
-/// @brief Phased deterministic testbench for agent_execution_unit that exercises every agent
-///        type with hardcoded stimuli and dumps one CSV row per order_valid pulse for the
-///        Python golden model to score.
-///
-/// Methodology:
-///   - Drives hardcoded deterministic inputs so the Python golden model predicts exact outputs
-///     without simulating the testbench itself.
-///   - Lets the DUT's internal LFSR free-run from a known seed (LFSR_SEED = 32'hCAFEBABE,
-///     POLY = 32'hB4BCD35C). Python replicates the same Galois LFSR to predict emission
-///     decisions and packet values.
-///   - Dumps one CSV row per order_valid pulse via $fwrite, capturing the input snapshot at
-///     the moment of emission so the math can be verified without ambiguity.
-///
-/// CSV format (one row per order_valid pulse):
-///   cycle,phase,side,order_type,agent_type,price,volume,gbm_price_in,param_data_in
-///
-/// Phases:
-///   1-3: Noise trader (always emit, never emit, 50pct emit)
-///   4-6: Value investor (buy, sell, silent)
-///   7:   Momentum trader uptrend (market buy every 4 cycles)
-///   8:   Momentum trader downtrend (market sell every 4 cycles)
-///   9:   Momentum trader sideways (silent)
-///
-/// How to run:
-///   do run_sim.tcl
-///   Output: sim_output.csv in working directory.
+/// @brief Phased deterministic testbench for agent_execution_unit; emits one CSV row per
+///        order_valid pulse for the agents_verify Python golden model to score.
 ///
 
 `timescale 1ns/1ns
 
 module agent_execution_unit_tb;
 
-    // ----------------------------------------------------------------
-    // Parameters matching DUT instantiation
-    // ----------------------------------------------------------------
+    // Parameters matching DUT instantiation.
     localparam [31:0] LFSR_POLY         = 32'hB4BCD35C;
     localparam [31:0] LFSR_SEED         = 32'hCAFEBABE;
     localparam [8:0]  NEAR_NOISE_THRESH = 9'd16;
 
-    localparam CLK_PERIOD = 20; // 50MHz
+    localparam CLK_PERIOD = 20; // 50 MHz
 
-    // MUST remain multiples of 4 (one FSM slot = 4 cycles)
-    // Non-multiples cause param swap mid-slot and corrupt results
+    // Keeps each phase length a multiple of 4 (one FSM slot = 4 cycles); non-multiples cause
+    // param swaps mid-slot and corrupt the captured emissions.
     localparam PHASE1_CYCLES = 400;
     localparam PHASE2_CYCLES = 200;
     localparam PHASE3_CYCLES = 4000;
@@ -53,9 +27,7 @@ module agent_execution_unit_tb;
     localparam PHASE8_CYCLES = 200;
     localparam PHASE9_CYCLES = 200;
 
-    // ----------------------------------------------------------------
-    // DUT signals -- reg for driven signals, wire for outputs
-    // ----------------------------------------------------------------
+    // DUT signals: reg for driven inputs, wire for outputs.
     reg         clk;
     reg         rst_n;
     reg  [31:0] gbm_price;
@@ -68,26 +40,22 @@ module agent_execution_unit_tb;
     wire [31:0] order_packet;
     wire        order_valid;
 
-    // ----------------------------------------------------------------
-    // Testbench internal
-    // ----------------------------------------------------------------
+    // Testbench-internal scoreboard state.
     integer csv_file;
     integer cycle_count;
     integer phase;
     integer emission_count;
     integer i;
 
-    // Simulated M10K -- TB drives param_data based on param_addr
-    // Registered read to match real M10K 1-cycle latency
+    // Simulates the M10K param ROM by driving param_data from param_table; the registered read
+    // matches the real M10K 1-cycle latency.
     reg [31:0] param_table [0:63];
 
     always @(posedge clk) begin
         param_data <= param_table[param_addr];
     end
 
-    // ----------------------------------------------------------------
-    // DUT instantiation
-    // ----------------------------------------------------------------
+    // DUT instantiation.
     agent_execution_unit #(
         .NUM_AGENT_SLOTS  (64),
         .LFSR_POLY        (LFSR_POLY),
@@ -107,15 +75,11 @@ module agent_execution_unit_tb;
         .order_valid       (order_valid)
     );
 
-    // ----------------------------------------------------------------
-    // Clock generation
-    // ----------------------------------------------------------------
+    // Clock generation.
     initial clk = 0;
     always #(CLK_PERIOD/2) clk = ~clk;
 
-    // ----------------------------------------------------------------
-    // Cycle counter
-    // ----------------------------------------------------------------
+    // Cycle counter.
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n)
             cycle_count <= 0;
@@ -123,9 +87,8 @@ module agent_execution_unit_tb;
             cycle_count <= cycle_count + 1;
     end
 
-    // ----------------------------------------------------------------
-    // CSV dump on every order_valid pulse
-    // ----------------------------------------------------------------
+    // Dumps one CSV row per order_valid pulse, capturing the input snapshot at the moment of
+    // emission.
     always @(posedge clk) begin
         if (order_valid) begin
             $fwrite(csv_file, "%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d\n",
@@ -143,22 +106,18 @@ module agent_execution_unit_tb;
         end
     end
 
-    // ----------------------------------------------------------------
-    // Main stimulus
-    // ----------------------------------------------------------------
+    // Main stimulus.
     initial begin
         csv_file = $fopen("sim_output.csv", "w");
         $fwrite(csv_file, "cycle,phase,side,order_type,agent_type,price,volume,gbm_price_in,param_data_in\n");
 
-        // Initialize signals
+        // Initializes the driven signals.
         rst_n              = 0;
         trade_valid        = 0;
         active_agent_count = 16'd1;
         emission_count     = 0;
 
-        // ============================================================
-        // Setup phase 1 WHILE RESET IS LOW
-        // ============================================================
+        // Sets up phase 1 stimuli while reset is held low.
         phase           = 1;
         gbm_price       = 32'h64000000; // Q8.24 = 100.0, tick = 200
         last_executed_price = 32'h64000000;
@@ -171,39 +130,35 @@ module agent_execution_unit_tb;
         param_table[0] = {2'b00, 10'h3FF, 10'd50, 10'd100};
 
         repeat(4) @(posedge clk);
-        @(negedge clk); // Release reset on negedge so FSM wakes perfectly on next posedge
+        @(negedge clk); // Releases reset on negedge so the FSM wakes on the next posedge.
         rst_n = 1;
 
-        // ============================================================
-        // PHASE 1: always emit
-        // ============================================================
+        // Phase 1: always-emit noise trader.
         $display("Phase 1 start: always-emit noise trader, gbm_tick=200, max_offset=50, max_vol=100");
-        
-        repeat(PHASE1_CYCLES) @(posedge clk);
-        #1; // Fix race condition before changing parameters
 
-        // HARDWARE UPDATE: Change params NOW so the FSM reads them for the next slot
+        repeat(PHASE1_CYCLES) @(posedge clk);
+        #1; // Guards against the param-swap/FSM-read race before changing parameters.
+
+        // Updates params here so the FSM reads them on the next slot.
         param_table[0] = {2'b00, 10'h000, 10'd50, 10'd100};
-        
-        // TB UPDATE: Wait 1 cycle for the CSV writer to log the final Phase 1 order
+
+        // Waits one cycle so the CSV writer logs the final Phase 1 order.
         @(posedge clk);
         $display("Phase 1 end: %0d emissions in %0d cycles", emission_count, PHASE1_CYCLES);
 
-        // ============================================================
-        // PHASE 2: never emit
-        // ============================================================
+        // Phase 2: never-emit noise trader.
         phase          = 2;
         emission_count = 0;
         $display("Phase 2 start: never-emit noise trader");
-        
-        // We consumed 1 cycle of Phase 2 waiting for the CSV, so we run for (CYCLES - 1)
+
+        // Subtracts one cycle to compensate for the carry-over consumed by Phase 1's CSV flush.
         repeat(PHASE2_CYCLES - 1) @(posedge clk);
-        #1; // Race condition protection
-        
-        // HARDWARE UPDATE
+        #1; // Guards against the param-swap/FSM-read race.
+
+        // Updates params for Phase 3.
         param_table[0] = {2'b00, 10'd512, 10'd50, 10'd100};
-        
-        // TB UPDATE: Wait 1 cycle for CSV flush
+
+        // Waits one cycle for the CSV flush.
         @(posedge clk);
         $display("Phase 2 end: %0d emissions (expected 0)", emission_count);
         if (emission_count != 0)
@@ -211,18 +166,16 @@ module agent_execution_unit_tb;
         else
             $display("PASS: Phase 2 silence confirmed");
 
-        // ============================================================
-        // PHASE 3: ~50% emit
-        // ============================================================
+        // Phase 3: ~50% emit.
         phase          = 3;
         emission_count = 0;
         $display("Phase 3 start: 50pct emission, running %0d cycles", PHASE3_CYCLES);
-        
-        // Run for (CYCLES - 1)
+
+        // Subtracts one cycle to absorb the Phase 2 CSV-flush carry-over.
         repeat(PHASE3_CYCLES - 1) @(posedge clk);
-        #1; 
-        
-        // TB UPDATE: Wait 1 final cycle so the very last order makes it into the CSV
+        #1;
+
+        // Waits one final cycle so the last order makes it into the CSV.
         @(posedge clk);
         $display("Phase 3 end: %0d emissions out of %0d evaluations", emission_count, PHASE3_CYCLES/4);
 
@@ -232,10 +185,7 @@ module agent_execution_unit_tb;
             $display("WARN: Phase 3 emission count %0d outside 400-600", emission_count);
 
 
-        // ============================================================
-        // SETUP FOR VALUE INVESTOR (PHASES 4-6)
-        // Must pulse trade_valid so exec_price_shift_reg catches it
-        // ============================================================
+        // Pulses trade_valid before phases 4-6 so exec_price_shift_reg catches the seed price.
         last_executed_price = 32'h64000000; // Q8.24 = 100.0, tick = 200
         trade_valid     = 1;
         @(posedge clk);
@@ -245,42 +195,36 @@ module agent_execution_unit_tb;
         repeat(3) @(posedge clk);
         #1;
 
-        // ============================================================
-        // PHASE 4: Value Investor - Undervalued (Buy)
-        // ============================================================
+        // Phase 4: Value Investor undervalued (buy).
         phase          = 4;
         emission_count = 0;
         gbm_price      = 32'h78000000; // Q8.24 = 120.0, tick = 240
-        
-        // Type=11, Threshold=10, Aggression=256, Cap=100
+
+        // Encodes the value-investor param packet: type=11, threshold=10, aggression=256, cap=100.
         param_table[0] = {2'b11, 10'd10, 10'd256, 10'd100};
-        
+
         $display("Phase 4 start: Value Buy (GBM=240, Exec=200, Div=+40 > Thresh 10)");
-        
+
         repeat(PHASE4_CYCLES - 1) @(posedge clk);
         #1;
         @(posedge clk);
         $display("Phase 4 end: %0d emissions", emission_count);
 
 
-        // ============================================================
-        // PHASE 5: Value Investor - Overvalued (Sell)
-        // ============================================================
+        // Phase 5: Value Investor overvalued (sell).
         phase          = 5;
         emission_count = 0;
         gbm_price      = 32'h50000000; // Q8.24 = 80.0, tick = 160
-        
+
         $display("Phase 5 start: Value Sell (GBM=160, Exec=200, Div=-40 < Thresh -10)");
-        
+
         repeat(PHASE5_CYCLES - 1) @(posedge clk);
         #1;
         @(posedge clk);
         $display("Phase 5 end: %0d emissions", emission_count);
 
 
-        // ============================================================
-        // PHASE 6: Value Investor - Within Threshold (Silent)
-        // ============================================================
+        // Phase 6: Value Investor within threshold (silent).
         phase          = 6;
         emission_count = 0;
         gbm_price      = 32'h66000000; // Q8.24 = 102.0, tick = 204
@@ -298,34 +242,27 @@ module agent_execution_unit_tb;
             $display("PASS: Phase 6 silence confirmed");
 
 
-        // ============================================================
-        // SETUP FOR MOMENTUM TRADER - UPTREND (PHASE 7)
-        // We need 4 consecutive trades to fill the shift register
-        // sequence: 200 -> 210 -> 220 -> 240
-        // Result: Oldest (reg_3) = 200. Newest (reg_0) = 240. Delta = +40
-        // ============================================================
-        // Type=10, Threshold=10, Aggression=256, Cap=100
+        // Primes the shift register with four consecutive uptrend trades (200, 210, 220, 240) so
+        // reg_3 = 200 (oldest), reg_0 = 240 (newest), delta = +40. Encodes the momentum-trader
+        // param packet: type=10, threshold=10, aggression=256, cap=100.
         param_table[0] = {2'b10, 10'd10, 10'd256, 10'd100};
-        
+
         last_executed_price = 32'h64000000; trade_valid = 1; @(posedge clk); #1; trade_valid = 0; repeat(3) @(posedge clk); #1; // tick 200
         last_executed_price = 32'h69000000; trade_valid = 1; @(posedge clk); #1; trade_valid = 0; repeat(3) @(posedge clk); #1; // tick 210
         last_executed_price = 32'h6E000000; trade_valid = 1; @(posedge clk); #1; trade_valid = 0; repeat(3) @(posedge clk); #1; // tick 220
         last_executed_price = 32'h78000000; trade_valid = 1; @(posedge clk); #1; trade_valid = 0; repeat(3) @(posedge clk); #1; // tick 240
-        
-        // ============================================================
-        // SETUP FOR MOMENTUM TRADER - UPTREND (PHASE 7)
-        // ============================================================
-        param_table[0] = 32'd0; // <-- MUTE AGENT DURING SETUP
-        
+
+        // Re-primes the shift register with the agent muted so the setup pulses do not pollute
+        // the Phase 7 emission count.
+        param_table[0] = 32'd0;
+
         last_executed_price = 32'h64000000; trade_valid = 1; @(posedge clk); #1; trade_valid = 0; repeat(3) @(posedge clk); #1; // tick 200
         last_executed_price = 32'h69000000; trade_valid = 1; @(posedge clk); #1; trade_valid = 0; repeat(3) @(posedge clk); #1; // tick 210
         last_executed_price = 32'h6E000000; trade_valid = 1; @(posedge clk); #1; trade_valid = 0; repeat(3) @(posedge clk); #1; // tick 220
         last_executed_price = 32'h78000000; trade_valid = 1; @(posedge clk); #1; trade_valid = 0; repeat(3) @(posedge clk); #1; // tick 240
-        
-        // ============================================================
-        // PHASE 7: Momentum Trader - Uptrend (Buy)
-        // ============================================================
-        param_table[0] = {2'b10, 10'd10, 10'd256, 10'd100}; // <-- WAKE AGENT UP
+
+        // Phase 7: Momentum Trader uptrend (buy).
+        param_table[0] = {2'b10, 10'd10, 10'd256, 10'd100}; // Re-enables the agent for the phase under test.
         phase          = 7;
         emission_count = 0;
         
@@ -336,20 +273,17 @@ module agent_execution_unit_tb;
         @(posedge clk);
         $display("Phase 7 end: %0d emissions", emission_count);
 
-        // ============================================================
-        // SETUP FOR MOMENTUM TRADER - DOWNTREND (PHASE 8)
-        // ============================================================
-        param_table[0] = 32'd0; // <-- MUTE AGENT DURING SETUP
-        
+        // Primes the shift register with four consecutive downtrend trades (200, 190, 180, 160)
+        // with the agent muted so only Phase 8 emissions are counted.
+        param_table[0] = 32'd0;
+
         last_executed_price = 32'h64000000; trade_valid = 1; @(posedge clk); #1; trade_valid = 0; repeat(3) @(posedge clk); #1; // tick 200
         last_executed_price = 32'h5F000000; trade_valid = 1; @(posedge clk); #1; trade_valid = 0; repeat(3) @(posedge clk); #1; // tick 190
         last_executed_price = 32'h5A000000; trade_valid = 1; @(posedge clk); #1; trade_valid = 0; repeat(3) @(posedge clk); #1; // tick 180
         last_executed_price = 32'h50000000; trade_valid = 1; @(posedge clk); #1; trade_valid = 0; repeat(3) @(posedge clk); #1; // tick 160
 
-        // ============================================================
-        // PHASE 8: Momentum Trader - Downtrend (Sell)
-        // ============================================================
-        param_table[0] = {2'b10, 10'd10, 10'd256, 10'd100}; // <-- WAKE AGENT UP
+        // Phase 8: Momentum Trader downtrend (sell).
+        param_table[0] = {2'b10, 10'd10, 10'd256, 10'd100}; // Re-enables the agent for the phase under test.
         phase          = 8;
         emission_count = 0;
         
@@ -360,20 +294,17 @@ module agent_execution_unit_tb;
         @(posedge clk);
         $display("Phase 8 end: %0d emissions", emission_count);
 
-        // ============================================================
-        // SETUP FOR MOMENTUM TRADER - SIDEWAYS (PHASE 9)
-        // ============================================================
-        param_table[0] = 32'd0; // <-- MUTE AGENT DURING SETUP
-        
+        // Primes the shift register with four near-flat trades (200, 200, 202, 204) with the
+        // agent muted so only Phase 9 emissions are counted.
+        param_table[0] = 32'd0;
+
         last_executed_price = 32'h64000000; trade_valid = 1; @(posedge clk); #1; trade_valid = 0; repeat(3) @(posedge clk); #1; // tick 200
         last_executed_price = 32'h64000000; trade_valid = 1; @(posedge clk); #1; trade_valid = 0; repeat(3) @(posedge clk); #1; // tick 200
         last_executed_price = 32'h65000000; trade_valid = 1; @(posedge clk); #1; trade_valid = 0; repeat(3) @(posedge clk); #1; // tick 202
         last_executed_price = 32'h66000000; trade_valid = 1; @(posedge clk); #1; trade_valid = 0; repeat(3) @(posedge clk); #1; // tick 204
 
-        // ============================================================
-        // PHASE 9: Momentum Trader - Sideways (Silent)
-        // ============================================================
-        param_table[0] = {2'b10, 10'd10, 10'd256, 10'd100}; // <-- WAKE AGENT UP
+        // Phase 9: Momentum Trader sideways (silent).
+        param_table[0] = {2'b10, 10'd10, 10'd256, 10'd100}; // Re-enables the agent for the phase under test.
         phase          = 9;
         emission_count = 0;
         
@@ -389,12 +320,10 @@ module agent_execution_unit_tb;
         else
             $display("PASS: Phase 9 silence confirmed");
 
-        // ============================================================
-        // SIMULATION COMPLETE
-        // ============================================================
+        // Closes out the simulation and hands the CSV off to the verifier.
         $fclose(csv_file);
         $display("Done. Output: sim_output.csv");
-        $display("Next: update and run python agent_golden_model.py");
+        $display("Next: update and run python agents_verify.py");
         $stop;
     end
 
