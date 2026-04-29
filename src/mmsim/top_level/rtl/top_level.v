@@ -362,7 +362,7 @@ HexDigit Digit5(HEX5, hex5_hex0[23:20]);
 // -------------------------------------------------------
 wire vga_pll_lock;
 wire vga_pll;        // 25 MHz VGA pixel clock from PLL
-wire M10k_pll;       // M10K memory clock from PLL
+wire M10k_pll;       // M10K memory clock from PLL (currently unused; reserved)
 wire M10k_pll_locked;
 
 // -------------------------------------------------------
@@ -480,14 +480,19 @@ Computer_System The_System (
 	.hps_io_hps_io_usb1_inst_D7     (HPS_USB_DATA[7]),
 	.hps_io_hps_io_usb1_inst_STP    (HPS_USB_STP),
 	.hps_io_hps_io_usb1_inst_DIR    (HPS_USB_DIR),
-	.hps_io_hps_io_usb1_inst_NXT    (HPS_USB_NXT)
+	.hps_io_hps_io_usb1_inst_NXT    (HPS_USB_NXT),
+
+	// VGA PLL output drives the 25 MHz pixel clock domain used by vga_driver and the chart's M10K read port. The
+	// matching engine's M10Ks already run on CLOCK_50 so no separate M10K PLL is needed.
+	.vga_pio_locked_export     (vga_pll_lock),
+	.vga_pio_outclk0_clk       (vga_pll)
 );
 
 // Derives the market simulator's active-low reset directly from KEY[0]; holding KEY[0] asserts reset.
 wire core_rst_n = KEY[0];
 
-// Configures the round-robin slot count from the slide switches; the parameter loader inputs stay
-// tied off until a PIO is wired through Qsys.
+// Configures the round-robin slot count from the slide switches; the parameter loader inputs stay tied off until a
+// PIO is wired through Qsys.
 wire [15:0] active_agent_count = {6'd0, SW};
 wire        param_wr_en        = 1'b0;
 wire [15:0] param_wr_addr      = 16'd0;
@@ -498,8 +503,8 @@ wire [31:0] order_packet;
 wire        order_valid;
 wire        order_ready;
 
-// Captures every matching engine output. Only last_executed_price feeds back into order generation;
-// the rest stay as named wires so future visualization or logging blocks can pick them up.
+// Captures every matching engine output. Only last_executed_price feeds back into order generation; the rest stay as
+// named wires so future visualization or logging blocks can pick them up.
 wire [31:0] me_trade_price;
 wire [15:0] me_trade_quantity;
 wire        me_trade_side;
@@ -516,8 +521,31 @@ wire        me_order_retire_valid;
 wire [15:0] me_order_retire_trade_count;
 wire [15:0] me_order_retire_fill_quantity;
 
-// Generates orders by composing the ziggurat Gaussian, the GBM price source, the agent units, and
-// the round-robin arbiter; presents the resulting packet on the valid/ready bus.
+// Depth tap wires from the matching engine to the VGA renderer. The renderer drives the tick index combinationally on
+// the pixel clock; the price level stores' time-multiplexed port B returns the bid-side and ask-side resting quantities
+// one cycle later.
+wire [8:0]  depth_rd_addr;
+wire [15:0] me_bid_depth_rd_data;
+wire [15:0] me_ask_depth_rd_data;
+
+// Carries the chart aggregator, history buffer, and renderer pipeline plus the vga_driver pixel-coordinate feedback.
+wire [31:0] chart_window_min_price;
+wire [31:0] chart_window_max_price;
+wire        chart_window_valid;
+wire [8:0]  chart_rd_offset;
+wire [8:0]  chart_rd_top_pixel_y;
+wire [8:0]  chart_rd_bottom_pixel_y;
+wire [9:0]  vga_next_x;
+wire [9:0]  vga_next_y;
+wire [7:0]  vga_color_in;
+
+// Crosses the active-high vga_reset into the pixel-clock domain through a two-stage synchronizer.
+reg  vga_rst_sync_a;
+reg  vga_rst_sync_b;
+wire vga_rst_pixel = vga_rst_sync_b;
+
+// Generates orders by composing the ziggurat Gaussian, the GBM price source, the agent units, and the round-robin
+// arbiter; presents the resulting packet on the valid/ready bus.
 order_gen_top u_order_gen (
 	.clk                 (CLOCK_50),
 	.rst_n               (core_rst_n),
@@ -532,8 +560,8 @@ order_gen_top u_order_gen (
 	.order_ready         (order_ready)
 );
 
-// Matches each accepted order through the three-stage pipeline over the two no-cancellation price
-// level stores and republishes trade and top-of-book observations.
+// Matches each accepted order through the three-stage pipeline over the two no-cancellation price level stores and
+// republishes trade and top-of-book observations.
 matching_engine u_matching_engine (
 	.clk                        (CLOCK_50),
 	.rst_n                      (core_rst_n),
@@ -554,12 +582,80 @@ matching_engine u_matching_engine (
 	.best_ask_valid             (me_best_ask_valid),
 	.order_retire_valid         (me_order_retire_valid),
 	.order_retire_trade_count   (me_order_retire_trade_count),
-	.order_retire_fill_quantity (me_order_retire_fill_quantity)
+	.order_retire_fill_quantity (me_order_retire_fill_quantity),
+	.depth_rd_addr              (depth_rd_addr),
+	.bid_depth_rd_data          (me_bid_depth_rd_data),
+	.ask_depth_rd_data          (me_ask_depth_rd_data)
 );
 
-// Drives the six HEX digits with the upper 24 bits of the most recent execution price (Q8.24).
-// HEX5:HEX4 show the integer byte, HEX3:HEX2 show the upper fractional byte, HEX1:HEX0 show the
-// next fractional byte.
+// Aggregates trades into fixed wall-clock windows; each closed window emits the min and max prices plus a valid pulse.
+tick_window_aggregator u_tick_window_aggregator (
+	.clk              (CLOCK_50),
+	.rst_n            (core_rst_n),
+	.trade_valid      (me_trade_valid),
+	.trade_price      (me_trade_price),
+	.window_min_price (chart_window_min_price),
+	.window_max_price (chart_window_max_price),
+	.window_valid     (chart_window_valid)
+);
+
+// Drives the two-stage VGA reset synchronizer; vga_rst_pixel is the destination-domain reset.
+always @(posedge vga_pll or posedge vga_reset) begin
+	if (vga_reset) begin
+		vga_rst_sync_a <= 1'b1;
+		vga_rst_sync_b <= 1'b1;
+	end else begin
+		vga_rst_sync_a <= 1'b0;
+		vga_rst_sync_b <= vga_rst_sync_a;
+	end
+end
+
+// Caches one (top, bottom) pixel-Y pair per closed window and serves it back on the pixel clock through the M10K CDC.
+circular_buffer u_chart_history (
+	.wr_clk            (CLOCK_50),
+	.rst_n             (core_rst_n),
+	.wr_en             (chart_window_valid),
+	.wr_min_price      (chart_window_min_price),
+	.wr_max_price      (chart_window_max_price),
+	.rd_clk            (vga_pll),
+	.rd_offset         (chart_rd_offset),
+	.rd_top_pixel_y    (chart_rd_top_pixel_y),
+	.rd_bottom_pixel_y (chart_rd_bottom_pixel_y)
+);
+
+// Walks the screen at the pixel clock and forwards the upcoming pixel coordinate one cycle ahead of color registration.
+vga_driver u_vga_driver (
+	.clock   (vga_pll),
+	.reset   (vga_rst_pixel),
+	.color_in(vga_color_in),
+	.next_x  (vga_next_x),
+	.next_y  (vga_next_y),
+	.hsync   (VGA_HS),
+	.vsync   (VGA_VS),
+	.red     (VGA_R),
+	.green   (VGA_G),
+	.blue    (VGA_B),
+	.sync    (VGA_SYNC_N),
+	.clk     (VGA_CLK),
+	.blank   (VGA_BLANK_N)
+);
+
+// Maps each pixel coordinate to RGB332 by combining the rolling chart history on the left half and the bid/ask depth
+// ladder on the right half; outputs feed back into vga_driver.color_in.
+renderer u_renderer (
+	.next_x            (vga_next_x),
+	.next_y            (vga_next_y),
+	.rd_offset         (chart_rd_offset),
+	.rd_top_pixel_y    (chart_rd_top_pixel_y),
+	.rd_bottom_pixel_y (chart_rd_bottom_pixel_y),
+	.depth_rd_addr     (depth_rd_addr),
+	.bid_depth_rd_data (me_bid_depth_rd_data),
+	.ask_depth_rd_data (me_ask_depth_rd_data),
+	.color_in          (vga_color_in)
+);
+
+// Drives the six HEX digits with the upper 24 bits of the most recent execution price (Q8.24). HEX5:HEX4 show the
+// integer byte, HEX3:HEX2 show the upper fractional byte, HEX1:HEX0 show the next fractional byte.
 assign hex5_hex0 = me_last_executed_price[31:8];
 
 // Ties LEDR low so the LED bar pins have a defined driver; Quartus warns otherwise.
