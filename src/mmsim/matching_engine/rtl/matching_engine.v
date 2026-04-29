@@ -60,7 +60,14 @@ module matching_engine #(
     // cannot derive per-packet trade counts from the trade bus alone.
     output reg                         order_retire_valid,
     output reg  [kQuantityWidth-1:0]   order_retire_trade_count,    ///< Trade pulses emitted for this packet.
-    output reg  [kQuantityWidth-1:0]   order_retire_fill_quantity   ///< Total shares filled across this packet.
+    output reg  [kQuantityWidth-1:0]   order_retire_fill_quantity,  ///< Total shares filled across this packet.
+
+    // VGA depth-read tap forwarded to both books. HPS drives a single tick index and the engine
+    // returns the bid-side and ask-side quantities at that tick; adds one cycle of staleness to
+    // each best-quantity readout (see price_level_store).
+    input  wire [8:0]                  depth_rd_addr,
+    output wire [kQuantityWidth-1:0]   bid_depth_rd_data,
+    output wire [kQuantityWidth-1:0]   ask_depth_rd_data
 );
 
     // Book command opcodes (must match price_level_store).
@@ -148,7 +155,9 @@ module matching_engine #(
         .response_valid    (bid_response_valid),
         .best_price        (best_bid_price),
         .best_quantity     (best_bid_quantity),
-        .best_valid        (best_bid_valid)
+        .best_valid        (best_bid_valid),
+        .depth_rd_addr     (depth_rd_addr),
+        .depth_rd_data     (bid_depth_rd_data)
     );
 
     price_level_store #(
@@ -168,7 +177,9 @@ module matching_engine #(
         .response_valid    (ask_response_valid),
         .best_price        (best_ask_price),
         .best_quantity     (best_ask_quantity),
-        .best_valid        (best_ask_valid)
+        .best_valid        (best_ask_valid),
+        .depth_rd_addr     (depth_rd_addr),
+        .depth_rd_data     (ask_depth_rd_data)
     );
 
     // Asserts order_ready only when Stage B is idle and the prior packet has fully retired through

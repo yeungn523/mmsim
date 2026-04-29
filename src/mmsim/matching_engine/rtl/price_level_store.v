@@ -29,7 +29,12 @@ module price_level_store #(
     // Top-of-book interface (combinational, always available).
     output wire [kPriceWidth-1:0]      best_price,        ///< Best resting price for the configured side.
     output wire [kQuantityWidth-1:0]   best_quantity,     ///< Aggregate share count at the best price.
-    output wire                        best_valid         ///< Asserts when at least one price holds shares.
+    output wire                        best_valid,        ///< Asserts when at least one price holds shares.
+
+    // Depth-read tap shared with the HPS-side VGA visualization. Time-multiplexes port B of the level_quantity
+    // M10K. This is viable since order packets hence a new best price can only be generated once every 4 cycles.
+    input  wire [8:0]                  depth_rd_addr,     ///< Tick index HPS is querying.
+    output wire [kQuantityWidth-1:0]   depth_rd_data      ///< Quantity at the most recently latched depth_rd_addr.
 );
 
     // Command opcodes.
@@ -95,16 +100,43 @@ module price_level_store #(
         end
     end
 
-    // Drives the synchronous read for the best-price quantity off the registered index so the
-    // priority encoder + wide mux split into two pipeline stages, and resets the output register
-    // so best_quantity reads zero before any command has executed.
-    always @(posedge clk) begin : level_quantity_port_b
+    // Time-multiplexes port B between best_quantity and the VGA depth tap so a single M10K
+    // serves both paths. port_b_phase selects the address each cycle; port_b_phase_r is the
+    // delay-aligned copy that demuxes the read result back to the path that issued it.
+    reg                         port_b_phase;
+    reg                         port_b_phase_r;
+    reg  [kPriceIndexWidth-1:0] port_b_addr_muxed;
+    reg  [kQuantityWidth-1:0]   port_b_q;
+    reg  [kQuantityWidth-1:0]   depth_rd_data_reg;
+
+    always @(posedge clk) begin
         if (!rst_n) begin
-            port_b_rdata <= {kQuantityWidth{1'b0}};
+            port_b_phase   <= 1'b0;
+            port_b_phase_r <= 1'b0;
         end else begin
-            port_b_rdata <= level_quantity[best_price_index_r];
+            port_b_phase   <= ~port_b_phase;
+            port_b_phase_r <= port_b_phase;
         end
     end
+
+    always @(*) begin
+        port_b_addr_muxed = port_b_phase ? depth_rd_addr[kPriceIndexWidth-1:0]
+                                         : best_price_index_r;
+    end
+
+    always @(posedge clk) begin : level_quantity_port_b
+        if (!rst_n) begin
+            port_b_q          <= {kQuantityWidth{1'b0}};
+            port_b_rdata      <= {kQuantityWidth{1'b0}};
+            depth_rd_data_reg <= {kQuantityWidth{1'b0}};
+        end else begin
+            port_b_q <= level_quantity[port_b_addr_muxed];
+            if (port_b_phase_r) depth_rd_data_reg <= port_b_q;
+            else                port_b_rdata      <= port_b_q;
+        end
+    end
+
+    assign depth_rd_data = depth_rd_data_reg;
 
     // Implements a two-stage pipelined priority encoder that resolves best_price_index from the
     // occupancy bitmap. Stage 1 reduces each group of kGroupSize prices to a per-group winner

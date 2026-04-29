@@ -109,29 +109,29 @@ module gbm_logspace #(
                       + $signed({{2{diffusion[31]}}, diffusion});
 
     // M10K ROM
-`ifdef SYNTHESIS
-    altsyncram #(
-        .operation_mode  ("ROM"),
-        .width_a         (32),
-        .widthad_a       (13),
-        .numwords_a      (8192),
-        .outdata_reg_a   ("UNREGISTERED"),
-        .init_file       ("lut/exp_lut.mif"),
-        .lpm_hint        ("ENABLE_RUNTIME_MOD=NO"),
-        .lpm_type        ("altsyncram")
-    ) exp_rom (
-        .clock0     (clk),
-        .address_a  (lut_addr),
-        .q_a        (lut_data)
-    );
-`else
-    `include "lut/exp_lut.vh"
-    reg [31:0] lut_data_sim;
-    assign lut_data = lut_data_sim;
-    always @(posedge clk) begin
-        lut_data_sim <= exp_lut_lookup(lut_addr);
-    end
-`endif
+    `ifdef SYNTHESIS
+        altsyncram #(
+            .operation_mode  ("ROM"),
+            .width_a         (32),
+            .widthad_a       (13),
+            .numwords_a      (8192),
+            .outdata_reg_a   ("UNREGISTERED"),
+            .init_file       ("lut/exp_lut.mif"),
+            .lpm_hint        ("ENABLE_RUNTIME_MOD=NO"),
+            .lpm_type        ("altsyncram")
+        ) exp_rom (
+            .clock0     (clk),
+            .address_a  (lut_addr),
+            .q_a        (lut_data)
+        );
+    `else
+        `include "lut/exp_lut.vh"
+        reg [31:0] lut_data_sim;
+        assign lut_data = lut_data_sim;
+        always @(posedge clk) begin
+            lut_data_sim <= exp_lut_lookup(lut_addr);
+        end
+    `endif
 
     // Parameter Load
     always @(posedge clk or negedge rst_n) begin

@@ -33,7 +33,9 @@ module order_gen_top #(
 
     output wire [31:0] order_packet,                             ///< Packet driven onto the bus while order_valid is high.
     output wire        order_valid,                              ///< Asserts when the arbiter is presenting a packet.
-    input  wire        order_ready                               ///< Consumer accepts the packet when high alongside order_valid.
+    input  wire        order_ready,                              ///< Consumer accepts the packet when high alongside order_valid.
+
+    output wire [31:0] gbm_sigma_out                              ///< Live GBM volatility estimate (Q0.24); surfaced for VGA readout.
 );
 
     localparam SLOTS_LOG2 = 6;  // log2(64), adjust if SLOTS_PER_UNIT changes.
@@ -42,7 +44,6 @@ module order_gen_top #(
     wire        zig_valid_out;
 
     wire [31:0] gbm_price_out;
-    wire [31:0] gbm_sigma_out;
     wire        gbm_price_valid;
 
     wire [NUM_UNITS-1:0]    unit_order_valid;
