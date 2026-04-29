@@ -360,15 +360,17 @@ HexDigit Digit5(HEX5, hex5_hex0[23:20]);
 // -------------------------------------------------------
 // PLL clocks from Qsys
 // -------------------------------------------------------
+// vga_pll is the 25.175 MHz pixel clock (outclk0 of VGA_PLL inside Computer_System); vga_pll_lock asserts once the PLL
+// is stable. Both are driven by Computer_System through the exported VGA_PLL interfaces below.
 wire vga_pll_lock;
-wire vga_pll;        // 25 MHz VGA pixel clock from PLL
-wire M10k_pll;       // M10K memory clock from PLL (currently unused; reserved)
-wire M10k_pll_locked;
+wire vga_pll;
 
 // -------------------------------------------------------
-// VGA reset (active high, directly from KEY[0])
+// VGA reset (active high)
 // -------------------------------------------------------
-wire vga_reset = ~KEY[0];
+// Asserted whenever KEY[0] is held (manual reset) or the VGA PLL has not yet locked, so vga_driver and the chart M10K
+// read port stay in reset until the pixel clock is stable.
+wire vga_reset = ~KEY[0] | ~vga_pll_lock;
 
 //=======================================================
 //  Structural coding - Qsys Computer_System
@@ -482,10 +484,12 @@ Computer_System The_System (
 	.hps_io_hps_io_usb1_inst_DIR    (HPS_USB_DIR),
 	.hps_io_hps_io_usb1_inst_NXT    (HPS_USB_NXT),
 
-	// VGA PLL output drives the 25 MHz pixel clock domain used by vga_driver and the chart's M10K read port. The
-	// matching engine's M10Ks already run on CLOCK_50 so no separate M10K PLL is needed.
-	.vga_pio_locked_export     (vga_pll_lock),
-	.vga_pio_outclk0_clk       (vga_pll)
+	// VGA PLL reference: the PLL inside VGA_PLL takes CLOCK_50 as its reference and produces the 25.175 MHz pixel clock
+	// on outclk0; the matching engine's M10Ks already run on CLOCK_50 so no separate M10K PLL is needed.
+	.vga_pll_ref_clk_clk       (CLOCK_50),
+	.vga_pll_ref_reset_reset   (1'b0),
+	.vga_pll_locked_export     (vga_pll_lock),
+	.vga_pll_outclk0_clk       (vga_pll)
 );
 
 // Derives the market simulator's active-low reset directly from KEY[0]; holding KEY[0] asserts reset.
