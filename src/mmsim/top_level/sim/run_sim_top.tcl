@@ -3,7 +3,7 @@
 # Usage: vsim -do run_sim_top.tcl    (from this directory)
 #        do run_sim_top.tcl          (from an open ModelSim session)
 
-set ROOT "C:/Users/gaa59/Desktop/mmsim/src/mmsim"
+set ROOT [file normalize [file join [pwd] .. ..]]
 
 # Recreates and maps the work library.
 if {[file exists work]} {
