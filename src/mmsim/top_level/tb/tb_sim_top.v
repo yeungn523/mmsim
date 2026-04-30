@@ -26,8 +26,8 @@
 
 module tb_sim_top;
     localparam kClockPeriod  = 20;
-    localparam kRunCycles    = 1000;
-    localparam kWatchdog     = 10000;
+    localparam kRunCycles    = 10000;
+    localparam kWatchdog     = 100000;
 
     localparam NUM_UNITS        = 4;
     localparam SLOTS_PER_UNIT   = 64;
@@ -35,10 +35,10 @@ module tb_sim_top;
     localparam kQuantityWidth   = 16;
     localparam kPriceRange      = 480;
 
-    localparam kNoiseCount    = 48;
+    localparam kNoiseCount    = 16;
     localparam kMMCount       = 16;
-    localparam kMomentumCount = 0;
-    localparam kValueCount    = 0;
+    localparam kMomentumCount = 16;
+    localparam kValueCount    = 16;
     localparam [31:0] kNoiseTraderParam = {2'b00, 10'd700, 10'd32, 10'd8};
     localparam [31:0] kMMTraderParam    = {2'b01, 10'd800, 10'd4,  10'd5};
     localparam [31:0] kMomentumParam    = {2'b10, 10'd15,  10'd4,  10'd4};
