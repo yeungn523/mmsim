@@ -357,18 +357,20 @@ HexDigit Digit3(HEX3, hex5_hex0[15:12]);
 HexDigit Digit4(HEX4, hex5_hex0[19:16]);
 HexDigit Digit5(HEX5, hex5_hex0[23:20]);
 
-// -------------------------------------------------------
-// PLL clocks from Qsys
-// -------------------------------------------------------
-wire vga_pll_lock;
-wire vga_pll;        // 25 MHz VGA pixel clock from PLL
-wire M10k_pll;       // M10K memory clock from PLL
-wire M10k_pll_locked;
+// Agent param memory wires
+wire [16*10-1:0] agent_param_rd_addr;
+wire [16*32-1:0] agent_param_rd_data;
+// Per-agent read signals unpacked from the flat buses
+wire [9:0]  agent_addr   [0:15];
+wire [31:0] agent_rdata  [0:15];
 
-// -------------------------------------------------------
-// VGA reset (active high, directly from KEY[0])
-// -------------------------------------------------------
-wire vga_reset = ~KEY[0];
+genvar i;
+generate
+    for (i = 0; i < 16; i = i + 1) begin : gen_agent_wires
+        assign agent_addr[i] = agent_param_rd_addr[i*10 +: 10];
+        assign agent_param_rd_data[i*32 +: 32] = agent_rdata[i];
+    end
+endgenerate
 
 //=======================================================
 //  Structural coding - Qsys Computer_System
@@ -403,7 +405,158 @@ Computer_System The_System (
 	.memory_mem_odt        (HPS_DDR3_ODT),
 	.memory_mem_dm         (HPS_DDR3_DM),
 	.memory_oct_rzqin      (HPS_DDR3_RZQ),
-		  
+	
+	// SDRAM
+	.sdram_clk_clk      (DRAM_CLK),
+	.sdram_addr         (DRAM_ADDR),
+	.sdram_ba           (DRAM_BA),
+	.sdram_cas_n        (DRAM_CAS_N),
+	.sdram_cke          (DRAM_CKE),
+	.sdram_cs_n         (DRAM_CS_N),
+	.sdram_dq           (DRAM_DQ),
+	.sdram_dqm          ({DRAM_UDQM, DRAM_LDQM}),
+	.sdram_ras_n        (DRAM_RAS_N),
+	.sdram_we_n         (DRAM_WE_N),
+	
+	// Shared On-Chip Memory for Orderbook (exported from Qsys)
+	.orderbook_mem_address    (ob_mem_addr),
+	.orderbook_mem_write      (ob_mem_write),
+	.orderbook_mem_writedata  (ob_mem_writedata),
+	.orderbook_mem_chipselect (1'b1),        
+	.orderbook_mem_clken      (1'b1),        
+	.orderbook_mem_byteenable (4'b1111), 
+	.orderbook_mem_readdata   (),
+
+
+	// Agent 0
+	.agent_0_address    (agent_addr[0]),
+	.agent_0_clken      (1'b1),
+	.agent_0_chipselect (1'b1),
+	.agent_0_write      (1'b0),
+	.agent_0_writedata  (32'd0),
+	.agent_0_byteenable (4'b1111),
+	.agent_0_readdata   (agent_rdata[0]),
+	// Agent 1
+	.agent_1_address    (agent_addr[1]),
+	.agent_1_clken      (1'b1),
+	.agent_1_chipselect (1'b1),
+	.agent_1_write      (1'b0),
+	.agent_1_writedata  (32'd0),
+	.agent_1_byteenable (4'b1111),
+	.agent_1_readdata   (agent_rdata[1]),
+	// Agent 2
+	.agent_2_address    (agent_addr[2]),
+	.agent_2_clken      (1'b1),
+	.agent_2_chipselect (1'b1),
+	.agent_2_write      (1'b0),
+	.agent_2_writedata  (32'd0),
+	.agent_2_byteenable (4'b1111),
+	.agent_2_readdata   (agent_rdata[2]),
+	// Agent 3
+	.agent_3_address    (agent_addr[3]),
+	.agent_3_clken      (1'b1),
+	.agent_3_chipselect (1'b1),
+	.agent_3_write      (1'b0),
+	.agent_3_writedata  (32'd0),
+	.agent_3_byteenable (4'b1111),
+	.agent_3_readdata   (agent_rdata[3]),
+	// Agent 4
+	.agent_4_address    (agent_addr[4]),
+	.agent_4_clken      (1'b1),
+	.agent_4_chipselect (1'b1),
+	.agent_4_write      (1'b0),
+	.agent_4_writedata  (32'd0),
+	.agent_4_byteenable (4'b1111),
+	.agent_4_readdata   (agent_rdata[4]),
+	// Agent 5
+	.agent_5_address    (agent_addr[5]),
+	.agent_5_clken      (1'b1),
+	.agent_5_chipselect (1'b1),
+	.agent_5_write      (1'b0),
+	.agent_5_writedata  (32'd0),
+	.agent_5_byteenable (4'b1111),
+	.agent_5_readdata   (agent_rdata[5]),
+	// Agent 6
+	.agent_6_address    (agent_addr[6]),
+	.agent_6_clken      (1'b1),
+	.agent_6_chipselect (1'b1),
+	.agent_6_write      (1'b0),
+	.agent_6_writedata  (32'd0),
+	.agent_6_byteenable (4'b1111),
+	.agent_6_readdata   (agent_rdata[6]),
+	// Agent 7
+	.agent_7_address    (agent_addr[7]),
+	.agent_7_clken      (1'b1),
+	.agent_7_chipselect (1'b1),
+	.agent_7_write      (1'b0),
+	.agent_7_writedata  (32'd0),
+	.agent_7_byteenable (4'b1111),
+	.agent_7_readdata   (agent_rdata[7]),
+	// Agent 8
+	.agent_8_address    (agent_addr[8]),
+	.agent_8_clken      (1'b1),
+	.agent_8_chipselect (1'b1),
+	.agent_8_write      (1'b0),
+	.agent_8_writedata  (32'd0),
+	.agent_8_byteenable (4'b1111),
+	.agent_8_readdata   (agent_rdata[8]),
+	// Agent 9
+	.agent_9_address    (agent_addr[9]),
+	.agent_9_clken      (1'b1),
+	.agent_9_chipselect (1'b1),
+	.agent_9_write      (1'b0),
+	.agent_9_writedata  (32'd0),
+	.agent_9_byteenable (4'b1111),
+	.agent_9_readdata   (agent_rdata[9]),
+	// Agent 10
+	.agent_10_address    (agent_addr[10]),
+	.agent_10_clken      (1'b1),
+	.agent_10_chipselect (1'b1),
+	.agent_10_write      (1'b0),
+	.agent_10_writedata  (32'd0),
+	.agent_10_byteenable (4'b1111),
+	.agent_10_readdata   (agent_rdata[10]),
+	// Agent 11
+	.agent_11_address    (agent_addr[11]),
+	.agent_11_clken      (1'b1),
+	.agent_11_chipselect (1'b1),
+	.agent_11_write      (1'b0),
+	.agent_11_writedata  (32'd0),
+	.agent_11_byteenable (4'b1111),
+	.agent_11_readdata   (agent_rdata[11]),
+	// Agent 12
+	.agent_12_address    (agent_addr[12]),
+	.agent_12_clken      (1'b1),
+	.agent_12_chipselect (1'b1),
+	.agent_12_write      (1'b0),
+	.agent_12_writedata  (32'd0),
+	.agent_12_byteenable (4'b1111),
+	.agent_12_readdata   (agent_rdata[12]),
+	// Agent 13
+	.agent_13_address    (agent_addr[13]),
+	.agent_13_clken      (1'b1),
+	.agent_13_chipselect (1'b1),
+	.agent_13_write      (1'b0),
+	.agent_13_writedata  (32'd0),
+	.agent_13_byteenable (4'b1111),
+	.agent_13_readdata   (agent_rdata[13]),
+	// Agent 14
+	.agent_14_address    (agent_addr[14]),
+	.agent_14_clken      (1'b1),
+	.agent_14_chipselect (1'b1),
+	.agent_14_write      (1'b0),
+	.agent_14_writedata  (32'd0),
+	.agent_14_byteenable (4'b1111),
+	.agent_14_readdata   (agent_rdata[14]),
+	// Agent 15
+	.agent_15_address    (agent_addr[15]),
+	.agent_15_clken      (1'b1),
+	.agent_15_chipselect (1'b1),
+	.agent_15_write      (1'b0),
+	.agent_15_writedata  (32'd0),
+	.agent_15_byteenable (4'b1111),
+	.agent_15_readdata   (agent_rdata[15]),
+	
 	// Ethernet
 	.hps_io_hps_io_gpio_inst_GPIO35  (HPS_ENET_INT_N),
 	.hps_io_hps_io_emac1_inst_TX_CLK (HPS_ENET_GTX_CLK),
@@ -480,26 +633,41 @@ Computer_System The_System (
 	.hps_io_hps_io_usb1_inst_D7     (HPS_USB_DATA[7]),
 	.hps_io_hps_io_usb1_inst_STP    (HPS_USB_STP),
 	.hps_io_hps_io_usb1_inst_DIR    (HPS_USB_DIR),
-	.hps_io_hps_io_usb1_inst_NXT    (HPS_USB_NXT)
+	.hps_io_hps_io_usb1_inst_NXT    (HPS_USB_NXT),
+
+	// VGA Subsystem
+	.vga_pll_ref_clk_clk     (CLOCK2_50),
+	.vga_pll_ref_reset_reset (1'b0),
+	.vga_CLK                 (VGA_CLK),
+	.vga_BLANK               (VGA_BLANK_N),
+	.vga_SYNC                (VGA_SYNC_N),
+	.vga_HS                  (VGA_HS),
+	.vga_VS                  (VGA_VS),
+	.vga_R                   (VGA_R),
+	.vga_G                   (VGA_G),
+	.vga_B                   (VGA_B)
 );
 
 // Derives the market simulator's active-low reset directly from KEY[0]; holding KEY[0] asserts reset.
 wire core_rst_n = KEY[0];
 
-// Configures the round-robin slot count from the slide switches; the parameter loader inputs stay
-// tied off until a PIO is wired through Qsys.
+// Configures the round-robin slot count from the slide switches; the parameter loader inputs stay tied off until a
+// PIO is wired through Qsys.
 wire [15:0] active_agent_count = {6'd0, SW};
 wire        param_wr_en        = 1'b0;
 wire [15:0] param_wr_addr      = 16'd0;
 wire [31:0] param_wr_data      = 32'd0;
 
 // Carries the order packet and the valid/ready handshake between order generation and the matching engine.
+// gen_order_valid is order_gen_top's raw output and me_order_ready is matching_engine's raw output.
 wire [31:0] order_packet;
-wire        order_valid;
-wire        order_ready;
+wire        gen_order_valid;
+wire        me_order_ready;
+wire        order_valid_tick;
+wire        order_ready_tick;
 
-// Captures every matching engine output. Only last_executed_price feeds back into order generation;
-// the rest stay as named wires so future visualization or logging blocks can pick them up.
+// Captures every matching engine output. Only last_executed_price feeds back into order generation; the rest stay as
+// named wires so future visualization or logging blocks can pick them up.
 wire [31:0] me_trade_price;
 wire [15:0] me_trade_quantity;
 wire        me_trade_side;
@@ -515,6 +683,29 @@ wire        me_best_ask_valid;
 wire        me_order_retire_valid;
 wire [15:0] me_order_retire_trade_count;
 wire [15:0] me_order_retire_fill_quantity;
+wire [1:0]  me_order_retire_agent_type;
+wire [31:0] gbm_sigma;
+
+
+wire [15:0] me_bid_depth_rd_data;
+wire [15:0] me_ask_depth_rd_data;
+
+localparam [29:0] speed = 30'd500_000;  // ~100 trades/sec at 50 MHz; will be HPS-tunable via a control PIO later.
+
+reg  [29:0] counter;
+wire        AnalogClock;
+
+always @(posedge CLOCK_50) begin
+	if (!core_rst_n || counter >= speed)
+		counter <= 30'd0;
+	else
+		counter <= counter + 30'd1;
+end
+
+assign AnalogClock      = (counter == 30'd0);
+assign order_valid_tick = gen_order_valid & AnalogClock;
+assign order_ready_tick = me_order_ready  & AnalogClock;
+
 
 // Generates orders by composing the ziggurat Gaussian, the GBM price source, the agent units, and
 // the round-robin arbiter; presents the resulting packet on the valid/ready bus.
@@ -529,26 +720,28 @@ order_gen_top u_order_gen (
     .last_executed_price (me_last_executed_price),
     .trade_valid         (me_trade_valid),
     .active_agent_count  (active_agent_count),
-    .param_wr_en         (param_wr_en),
-    .param_wr_addr       (param_wr_addr),
-    .param_wr_data       (param_wr_data),
+    .param_rd_addr       (agent_param_rd_addr),
+    .param_rd_data       (agent_param_rd_data),
+    
     .order_packet        (order_packet),
-    .order_valid         (order_valid),
-    .order_ready         (order_ready),
+    .order_valid         (gen_order_valid), 
+    .order_ready         (me_order_ready),   
+    
     .inject_packet       (inject_packet),
     .inject_trigger      (inject_trigger),
     .inject_count        (inject_count),
     .inject_active       (inject_active)
 );
 
-// Matches each accepted order through the three-stage pipeline over the two no-cancellation price
-// level stores and republishes trade and top-of-book observations.
+// Matches each accepted order through the three-stage pipeline over the two no-cancellation price level stores and
+// republishes trade and top-of-book observations. Sees order_valid_tick instead of the raw generator valid so it only
+// admits orders on AnalogClock cycles; both endpoints therefore agree the handshake is complete only on those cycles.
 matching_engine u_matching_engine (
 	.clk                        (CLOCK_50),
 	.rst_n                      (core_rst_n),
 	.order_packet               (order_packet),
-	.order_valid                (order_valid),
-	.order_ready                (order_ready),
+	.order_valid                (order_valid_tick),
+	.order_ready                (me_order_ready),
 	.trade_price                (me_trade_price),
 	.trade_quantity             (me_trade_quantity),
 	.trade_side                 (me_trade_side),
@@ -562,16 +755,235 @@ matching_engine u_matching_engine (
 	.best_ask_quantity          (me_best_ask_quantity),
 	.best_ask_valid             (me_best_ask_valid),
 	.order_retire_valid         (me_order_retire_valid),
+	.order_retire_agent_type    (me_order_retire_agent_type),
 	.order_retire_trade_count   (me_order_retire_trade_count),
-	.order_retire_fill_quantity (me_order_retire_fill_quantity)
+	.order_retire_fill_quantity (me_order_retire_fill_quantity),
+	.depth_rd_addr              (depth_rd_addr),
+	.bid_depth_rd_data          (me_bid_depth_rd_data),
+	.ask_depth_rd_data          (me_ask_depth_rd_data)
 );
 
-// Drives the six HEX digits with the upper 24 bits of the most recent execution price (Q8.24).
-// HEX5:HEX4 show the integer byte, HEX3:HEX2 show the upper fractional byte, HEX1:HEX0 show the
-// next fractional byte.
+
+wire [9:0]  ob_mem_addr;
+wire        ob_mem_write;
+wire [31:0] ob_mem_writedata;
+
+
+orderbook_writer u_ob_writer (
+    .clk                        (CLOCK_50),
+    .rst_n                      (core_rst_n),
+    .analog_clock               (AnalogClock),
+    .depth_rd_addr              (depth_rd_addr),
+    .bid_depth_rd_data          (me_bid_depth_rd_data),
+    .ask_depth_rd_data          (me_ask_depth_rd_data),
+    .last_executed_price        (me_last_executed_price),
+    .last_executed_price_valid  (me_last_executed_price_valid),
+    .best_bid_price             (me_best_bid_price),
+    .best_bid_valid             (me_best_bid_valid),
+    .best_ask_price             (me_best_ask_price),
+    .best_ask_valid             (me_best_ask_valid),
+    
+    // The corrected Retire Bus for volume tracking
+    .order_retire_valid         (me_order_retire_valid),
+    .order_retire_agent_type    (me_order_retire_agent_type),
+    .order_retire_fill_quantity (me_order_retire_fill_quantity),
+    
+    .mem_address                (ob_mem_addr),
+    .mem_write                  (ob_mem_write),
+    .mem_writedata              (ob_mem_writedata),
+    .mem_chipselect             (),
+    .mem_clken                  (),
+    .mem_byteenable             ()
+);
+
+
+// Drives the six HEX digits with the upper 24 bits of the most recent execution price (Q8.24). HEX5:HEX4 show the
+// integer byte, HEX3:HEX2 show the upper fractional byte, HEX1:HEX0 show the next fractional byte.
 assign hex5_hex0 = me_last_executed_price[31:8];
 
 // Ties LEDR low so the LED bar pins have a defined driver; Quartus warns otherwise.
 assign LEDR = 10'd0;
 
+endmodule
+
+///
+/// @file orderbook_writer.v
+/// @brief Scans the matching engine depth tap and metadata outputs and writes
+///        them into the shared orderbook M10K for HPS/VGA consumption.
+///
+module orderbook_writer #(
+    parameter kPriceRange    = 400,
+    parameter kTickShiftBits = 23
+)(
+    input  wire        clk,
+    input  wire        rst_n,
+    input  wire        analog_clock,       ///< AnalogClock pulse — one per admitted order cycle.
+    
+    // Matching engine depth tap
+    output reg  [8:0]  depth_rd_addr,
+    input  wire [15:0] bid_depth_rd_data,
+    input  wire [15:0] ask_depth_rd_data,
+    
+    // Matching engine scalar outputs
+    input  wire [31:0] last_executed_price,       ///< Q8.24
+    input  wire        last_executed_price_valid,
+    input  wire [31:0] best_bid_price,            ///< raw tick
+    input  wire        best_bid_valid,
+    input  wire [31:0] best_ask_price,            ///< raw tick
+    input  wire        best_ask_valid,
+    
+    // Matching engine retire bus (Pipeline-safe volume tracking)
+    input  wire        order_retire_valid,
+    input  wire [1:0]  order_retire_agent_type,
+    input  wire [15:0] order_retire_fill_quantity,
+    
+    // Orderbook M10K s1 port
+    output reg  [9:0]  mem_address,
+    output reg         mem_write,
+    output reg  [31:0] mem_writedata,
+    output wire        mem_chipselect,
+    output wire        mem_clken,
+    output wire [3:0]  mem_byteenable
+);
+    assign mem_chipselect = 1'b1;
+    assign mem_clken      = 1'b1;
+    assign mem_byteenable = 4'b1111;
+
+    // FSM states
+    localparam [2:0] kStateScanSetup  = 3'd0; 
+    localparam [2:0] kStateScanRead   = 3'd1; 
+    localparam [2:0] kStateScanAsk    = 3'd2; 
+    localparam [2:0] kStateMetaWrite  = 3'd3; 
+    localparam [2:0] kStateDone       = 3'd4; 
+
+    reg [2:0]  state;
+    reg [8:0]  scan_addr;  
+    reg [3:0]  meta_idx;   
+
+    reg [15:0] latched_bid;
+
+    // Cumulative Volume Counters (Replaced Claude's trade counters)
+    reg [31:0] cumulative_volume;
+    reg [31:0] frame_counter;
+    reg [31:0] noise_volume;
+    reg [31:0] mm_volume;
+    reg [31:0] momentum_volume;
+    reg [31:0] value_volume;
+
+    // Latch last executed price and best prices when valid
+    reg [31:0] last_exec_latch;
+    reg [31:0] best_bid_latch;
+    reg [31:0] best_ask_latch;
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            last_exec_latch <= 32'd0;
+            best_bid_latch  <= 32'd0;
+            best_ask_latch  <= 32'd0;
+        end else begin
+            if (last_executed_price_valid)
+                last_exec_latch <= last_executed_price;
+            if (best_bid_valid)
+                best_bid_latch  <= best_bid_price << kTickShiftBits;
+            if (best_ask_valid)
+                best_ask_latch  <= best_ask_price << kTickShiftBits;
+        end
+    end
+
+    // Volume snooping — accumulate volume per agent type on the safe retire bus
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            cumulative_volume <= 32'd0;
+            noise_volume      <= 32'd0;
+            mm_volume         <= 32'd0;
+            momentum_volume   <= 32'd0;
+            value_volume      <= 32'd0;
+        end else if (order_retire_valid && order_retire_fill_quantity > 0) begin
+            cumulative_volume <= cumulative_volume + order_retire_fill_quantity;
+            case (order_retire_agent_type)
+                2'd0: noise_volume    <= noise_volume    + order_retire_fill_quantity;
+                2'd1: mm_volume       <= mm_volume       + order_retire_fill_quantity;
+                2'd2: momentum_volume <= momentum_volume + order_retire_fill_quantity;
+                2'd3: value_volume    <= value_volume    + order_retire_fill_quantity;
+            endcase
+        end
+    end
+
+    // Main scan FSM — synchronized to AnalogClock
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            state         <= kStateDone;
+            scan_addr     <= 9'd0;
+            meta_idx      <= 4'd0;
+            depth_rd_addr <= 9'd0;
+            mem_address   <= 10'd0;
+            mem_write     <= 1'b0;
+            mem_writedata <= 32'd0;
+            frame_counter <= 32'd0;
+            latched_bid   <= 16'd0;
+        end else begin
+            mem_write <= 1'b0; // default deassert
+
+            case (state)
+                kStateDone: begin
+                    if (analog_clock) begin
+                        frame_counter <= frame_counter + 32'd1;
+                        scan_addr     <= 9'd0;
+                        depth_rd_addr <= 9'd0;
+                        state         <= kStateScanSetup;
+                    end
+                end
+
+                kStateScanSetup: begin
+                    state <= kStateScanRead;
+                end
+
+                kStateScanRead: begin
+                    latched_bid   <= bid_depth_rd_data;
+                    mem_address   <= {1'b0, scan_addr}; 
+                    mem_writedata <= {16'd0, bid_depth_rd_data};
+                    mem_write     <= 1'b1;
+                    state         <= kStateScanAsk;
+                end
+
+                kStateScanAsk: begin
+                    mem_address   <= 10'd400 + {1'b0, scan_addr};
+                    mem_writedata <= {16'd0, ask_depth_rd_data};
+                    mem_write     <= 1'b1;
+
+                    if (scan_addr == kPriceRange - 1) begin
+                        meta_idx <= 4'd0;
+                        state    <= kStateMetaWrite;
+                    end else begin
+                        scan_addr     <= scan_addr + 9'd1;
+                        depth_rd_addr <= scan_addr + 9'd1;
+                        state         <= kStateScanSetup;
+                    end
+                end
+
+                kStateMetaWrite: begin
+                    mem_write <= 1'b1;
+                    case (meta_idx)
+                        4'd0: begin mem_address <= 10'd800; mem_writedata <= last_exec_latch;   end
+                        4'd1: begin mem_address <= 10'd801; mem_writedata <= best_bid_latch;    end
+                        4'd2: begin mem_address <= 10'd802; mem_writedata <= best_ask_latch;    end
+                        4'd3: begin mem_address <= 10'd803; mem_writedata <= cumulative_volume; end
+                        4'd4: begin mem_address <= 10'd804; mem_writedata <= frame_counter;     end
+                        4'd5: begin mem_address <= 10'd805; mem_writedata <= noise_volume;      end
+                        4'd6: begin mem_address <= 10'd806; mem_writedata <= mm_volume;         end
+                        4'd7: begin mem_address <= 10'd807; mem_writedata <= momentum_volume;   end
+                        default: begin mem_address <= 10'd808; mem_writedata <= value_volume;   end
+                    endcase
+
+                    if (meta_idx == 4'd8) begin
+                        state <= kStateDone;
+                    end else begin
+                        meta_idx <= meta_idx + 4'd1;
+                    end
+                end
+
+                default: state <= kStateDone;
+            endcase
+        end
+    end
 endmodule

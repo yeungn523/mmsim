@@ -14,11 +14,12 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 _SIM_DIR: Path = Path(__file__).parent.parent / "sim"
+_FIGURES_DIR: Path = Path(__file__).parent.parent / "figures"
 _EVENTS_CSV: Path = _SIM_DIR / "sim_top_events.csv"
 _SNAPSHOTS_CSV: Path = _SIM_DIR / "sim_top_snapshots.csv"
 _SUMMARY_CSV: Path = _SIM_DIR / "sim_top_summary.csv"
-_PLOT_OUTPUT_PATH: Path = Path(__file__).parent / "top_verify.png"
-_SPREAD_PLOT_PATH: Path = Path(__file__).parent / "top_verify_spread.png"
+_PLOT_OUTPUT_PATH: Path = _FIGURES_DIR / "top_verify.png"
+_SPREAD_PLOT_PATH: Path = _FIGURES_DIR / "top_verify_spread.png"
 
 _TICK_SHIFT_BITS: int = 23
 _MARKET_MAKER_MIN_SPREAD: int = 8
@@ -394,6 +395,8 @@ def main() -> None:
     print("=" * 50)
     print("sim_top Integration Test Analysis")
     print("=" * 50)
+
+    _FIGURES_DIR.mkdir(parents=True, exist_ok=True)
 
     events_df = load_events_dataframe(csv_path=_EVENTS_CSV)
     snapshots_df = load_dataframe(csv_path=_SNAPSHOTS_CSV)
