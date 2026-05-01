@@ -1,7 +1,7 @@
 ///////////////////////////////////////////////////////////////////////////////
 // vga_test.c
 // compile: gcc vga_test.c -o vga_test -O2 -lm -std=c99
-// run:     sudo ./vga_test
+// run:     ./vga_test
 ///////////////////////////////////////////////////////////////////////////////
 #include <fcntl.h>
 #include <math.h>
@@ -44,10 +44,18 @@
 // ============================================================
 #define BAR_H         40
 #define CHART_Y0      BAR_H
-#define CHART_H       440
+#define CHART_H       330
 
 #define CANDLE_X0     0
 #define CANDLE_W      320
+
+#define VOL_X0        0
+#define VOL_W         CANDLE_W
+#define VOL_Y0        COMP_Y0
+#define VOL_H         COMP_H
+#define VOL_Y1        (VOL_Y0 + VOL_H - 1)
+
+#define VOL_MAX_BARS  MAX_CANDLES
 
 #define DEPTH_X0      320
 #define DEPTH_W       320
@@ -102,6 +110,12 @@ static uint32_t open_price  = 200;
 static uint32_t last_frame  = 0xFFFFFFFF;
 static int      axis_min    = 150;
 static int      axis_max    = 250;
+
+// Per candle volume array
+static uint32_t vol_hist[MAX_CANDLES];
+static int      vol_head  = 0;
+static int      vol_count = 0;
+static uint32_t vol_max = 1;
 
 // Y axis label tracking
 static int last_label_rows[20];
@@ -244,42 +258,70 @@ void dummy_tick(void) {
         if (bp >= 0 && bp < NUM_LEVELS) ob_mem[bp]       = (uint32_t)qty;
         if (ap >= 0 && ap < NUM_LEVELS) ob_mem[400 + ap] = (uint32_t)qty;
     }
+    // Occasional iceberg / wall
     if (rand()%35==0) { int w=mp-(3+rand()%10); if(w>=0&&w<NUM_LEVELS) ob_mem[w]+=60+rand()%100; }
     if (rand()%35==0) { int w=mp+(3+rand()%10); if(w>=0&&w<NUM_LEVELS) ob_mem[400+w]+=60+rand()%100; }
+
     exec = mp + (rand()%3) - 1;
     if (exec < 0) exec = 0;
     if (exec >= NUM_LEVELS) exec = NUM_LEVELS - 1;
     OB_EXEC     = (uint32_t)exec;
     OB_BEST_BID = (uint32_t)(mp - 1);
     OB_BEST_ASK = (uint32_t)(mp + 1);
-    OB_VOLUME++;
+
+    // Derive tick volume from spread tightness + random burst
+    // Tight spread → more activity; occasional volume spike
+    {
+        uint32_t base_vol = 20 + (uint32_t)(40.0 * (double)rand()/RAND_MAX);
+        if (rand()%20 == 0) base_vol += 80 + rand()%120;  // spike ~5% of ticks
+        OB_VOLUME += base_vol;
+    }
+
     OB_FRAME++;
 }
 
 void update_candle(void) {
     uint32_t price = OB_EXEC;
-    if (window_tick == 0) { cur_open = price; cur_high = price; cur_low = price; }
+    static uint32_t vol_at_open = 0;
+
+    if (window_tick == 0) {
+        cur_open    = price;
+        cur_high    = price;
+        cur_low     = price;
+        vol_at_open = OB_VOLUME;
+    }
     if (price > cur_high) cur_high = price;
     if (price < cur_low)  cur_low  = price;
     cur_close = price;
+
     if (++window_tick >= TICKS_PER_CANDLE) {
         Candle c;
         c.open  = cur_open;  c.close = cur_close;
         c.high  = cur_high;  c.low   = cur_low;
         c.green = (cur_close >= cur_open);
         candles[candle_head] = c;
-        candle_head = (candle_head + 1) % MAX_CANDLES;
-        if (candle_count < MAX_CANDLES) candle_count++;
-        window_tick = 0;
-        cur_high = 0; cur_low = UINT32_MAX;
 
-        // Push a new trader composition column — dummy random for now
-        // Replace these four values with real agent trade counts from ob_mem
+        // Volume — use candle_head, advance vol_head/vol_count
         {
-            int r0 = 40 + rand()%40;   // noise
-            int r1 = 30 + rand()%40;   // market makers
-            int r2 = 20 + rand()%40;   // momentum
-            int r3 = 10 + rand()%40;   // value
+            uint32_t candle_vol = OB_VOLUME - vol_at_open;
+            vol_hist[candle_head] = candle_vol;   // indexed by candle_head, not comp_head
+
+            if (candle_vol >= vol_max) {
+                vol_max = candle_vol;
+            } else if (vol_count == MAX_CANDLES) {
+                int j;
+                vol_max = 1;
+                for (j = 0; j < MAX_CANDLES; j++)
+                    if (vol_hist[j] > vol_max) vol_max = vol_hist[j];
+            }
+        }
+
+        // Trader composition
+        {
+            int r0 = 40 + rand()%40;
+            int r1 = 30 + rand()%40;
+            int r2 = 20 + rand()%40;
+            int r3 = 10 + rand()%40;
             int total = r0 + r1 + r2 + r3;
             comp_hist[comp_head][0] = (uint8_t)(r0 * 255 / total);
             comp_hist[comp_head][1] = (uint8_t)(r1 * 255 / total);
@@ -287,9 +329,18 @@ void update_candle(void) {
             comp_hist[comp_head][3] = 255 - comp_hist[comp_head][0]
                                           - comp_hist[comp_head][1]
                                           - comp_hist[comp_head][2];
-            comp_head = (comp_head + 1) % COMP_MAX_COLS;
-            if (comp_count < COMP_MAX_COLS) comp_count++;
         }
+
+        candle_head = (candle_head + 1) % MAX_CANDLES;
+        comp_head   = (comp_head   + 1) % COMP_MAX_COLS;
+        vol_head    = candle_head;   // vol_head always mirrors candle_head
+
+        if (candle_count < MAX_CANDLES)   candle_count++;
+        if (comp_count   < COMP_MAX_COLS) comp_count++;
+        if (vol_count    < MAX_CANDLES)   vol_count++;   // was never incremented
+
+        window_tick = 0;
+        cur_high = 0; cur_low = UINT32_MAX;
     }
 }
 
@@ -316,7 +367,9 @@ void render_candles(void) {
     int new_label_rows[20];
     int new_label_count = 0;
 
-    // Erase old grid labels — shifted to char col 1 to avoid overscan clip
+    int chart_bottom = COMP_Y0 - 1;
+
+    // Erase old grid labels
     for (i = 0; i < last_label_count; i++)
         VGA_text(1, last_label_rows[i], "   ");
 
@@ -332,11 +385,11 @@ void render_candles(void) {
         grid_start = ((axis_min / grid_step) + 1) * grid_step;
         for (grid_p = grid_start; grid_p < axis_max; grid_p += grid_step) {
             int gy = candle_price_to_y(grid_p);
+            if (gy > chart_bottom) continue;
             if (grid_line_count < 20) {
                 grid_y_lines[grid_line_count++] = gy;
                 sprintf(buf, "%3d", grid_p);
                 int crow = gy >> 3;
-                // Write at col 1 not col 0 — avoids overscan cutoff
                 VGA_text(1, crow, buf);
                 if (new_label_count < 20) new_label_rows[new_label_count++] = crow;
             }
@@ -348,31 +401,100 @@ void render_candles(void) {
     n       = candle_count;
     start_x = (n < MAX_CANDLES) ? CANDLE_X0 : CANDLE_X0 + CANDLE_W - n * SLOT;
 
-    int c_high[MAX_CANDLES], c_low[MAX_CANDLES], c_top[MAX_CANDLES], c_bot[MAX_CANDLES];
+    int c_high[MAX_CANDLES], c_low[MAX_CANDLES];
+    int c_top[MAX_CANDLES],  c_bot[MAX_CANDLES];
+    int c_close_y[MAX_CANDLES];   // close price y for area shading
     short c_body_col[MAX_CANDLES], c_wick_col[MAX_CANDLES];
+
     for (i = 0; i < n; i++) {
         idx = (candle_head - n + i + MAX_CANDLES) % MAX_CANDLES;
         Candle *c = &candles[idx];
-        c_high[i] = candle_price_to_y((int)c->high);
-        c_low[i]  = candle_price_to_y((int)c->low);
+        c_high[i]    = candle_price_to_y((int)c->high);
+        c_low[i]     = candle_price_to_y((int)c->low);
+        c_close_y[i] = candle_price_to_y((int)c->close);
         int y_open  = candle_price_to_y((int)c->open);
-        int y_close = candle_price_to_y((int)c->close);
+        int y_close = c_close_y[i];
         c_top[i] = (y_open < y_close) ? y_open : y_close;
         c_bot[i] = (y_open > y_close) ? y_open : y_close;
         if (c_top[i] == c_bot[i]) c_bot[i] = c_top[i] + 1;
+        if (c_high[i] > chart_bottom) c_high[i] = chart_bottom;
+        if (c_low[i]  > chart_bottom) c_low[i]  = chart_bottom;
+        if (c_top[i]  > chart_bottom) c_top[i]  = chart_bottom;
+        if (c_bot[i]  > chart_bottom) c_bot[i]  = chart_bottom;
+        if (c_close_y[i] > chart_bottom) c_close_y[i] = chart_bottom;
         c_body_col[i] = c->green ? dim_green    : dim_red;
         c_wick_col[i] = c->green ? bright_green : bright_red;
     }
-    int exec_y = candle_price_to_y((int)OB_EXEC);
 
-    // Row-major render
-    for (y = CHART_Y0; y <= 479; y++) {
+    // Also include the current in-progress candle as the rightmost close
+    // so shading extends all the way to the live price
+    int cur_close_y = candle_price_to_y((int)cur_close);
+    if (cur_close_y > chart_bottom) cur_close_y = chart_bottom;
+
+    int exec_y = candle_price_to_y((int)OB_EXEC);
+    if (exec_y > chart_bottom) exec_y = chart_bottom;
+
+    for (y = CHART_Y0; y <= chart_bottom; y++) {
         int is_grid = 0;
         for (g = 0; g < grid_line_count; g++)
             if (y == grid_y_lines[g]) { is_grid = 1; break; }
 
         for (x = CANDLE_X0; x < CANDLE_X0 + CANDLE_W - 1; x++) {
             short col = black;
+
+            // ── Area shading ──────────────────────────────────────────
+            // Find which slot this x falls in and interpolate close_y
+            // between the centre of that candle and the next one
+            {
+                int slot_i = (x - start_x) / SLOT;
+                int slot_x = (x - start_x) % SLOT;
+
+                // centre x of current and next candle
+                if (slot_i >= 0 && slot_i < n) {
+                    int x_cur  = start_x + slot_i * SLOT + BODY_W / 2;
+                    int y_cur  = c_close_y[slot_i];
+
+                    // next close: either next candle or live cur_close
+                    int y_next;
+                    if (slot_i + 1 < n)
+                        y_next = c_close_y[slot_i + 1];
+                    else
+                        y_next = cur_close_y;
+
+                    int x_next = x_cur + SLOT;
+                    int dx     = x_next - x_cur;
+
+                    // linear interpolation of close price y at this x
+                    int interp_y;
+                    if (dx > 0)
+                        interp_y = y_cur + ((y_next - y_cur) * (x - x_cur)) / dx;
+                    else
+                        interp_y = y_cur;
+
+                    if (interp_y > chart_bottom) interp_y = chart_bottom;
+
+                    // Paint shading below the interpolated close line
+                    if (y > interp_y) {
+                        int depth     = y - interp_y;
+                        int max_depth = chart_bottom - interp_y;
+                        if (max_depth < 1) max_depth = 1;
+                        // 3 discrete bands fading to black toward bottom
+                        if      (depth < max_depth / 3)
+                            col = RGB(0, 4, 8);    // bright teal-blue near line
+                        else if (depth < (max_depth * 2) / 3)
+                            col = RGB(0, 2, 5);    // mid
+                        else
+                            col = RGB(0, 1, 3);    // dim near bottom
+                    }
+
+                    // Draw the close line itself as a 1px bright trace
+                    if (y == interp_y)
+                        col = RGB(0, 20, 31);      // bright cyan line
+                }
+            }
+            // ── End area shading ──────────────────────────────────────
+
+            // Exec price dashed line (overrides shading)
             if (y == exec_y && ((x >> 2) & 1)) {
                 col = yellow;
             } else {
@@ -381,17 +503,20 @@ void render_candles(void) {
                 if (n > 0 && slot_i >= 0 && slot_i < n && slot_x < BODY_W) {
                     if (y >= c_high[slot_i] && y <= c_low[slot_i]) {
                         if (y >= c_top[slot_i] && y <= c_bot[slot_i])
-                            col = c_body_col[slot_i];
+                            col = c_body_col[slot_i];   // body overrides shading
                         else if (slot_x == BODY_W / 2)
-                            col = c_wick_col[slot_i];
+                            col = c_wick_col[slot_i];   // wick overrides shading
                     }
                 }
                 if (col == black && is_grid) col = dark_gray;
             }
+
             VGA_PIXEL(x, y, col);
         }
     }
-    VGA_vline(CANDLE_X0 + CANDLE_W - 1, CHART_Y0, 479, gray);
+
+    VGA_hline(CANDLE_X0, CANDLE_X0 + CANDLE_W - 1, COMP_Y0 - 1, gray);
+    VGA_vline(CANDLE_X0 + CANDLE_W - 1, CHART_Y0, chart_bottom, gray);
 }
 
 // Depth histogram — top-right panel, fixed 0-399 axis, DEPTH_H tall
@@ -466,6 +591,65 @@ void render_depth(void) {
             VGA_hline(DEPTH_X0 + half, DEPTH_X0 + DEPTH_W - 1, y, black);
         }
     }
+    
+    VGA_text(40, 6, "Depth of Market");
+
+}
+
+// Volume histogram — bottom-left panel (VOL_X0..VOL_W x VOL_Y0..VOL_Y1)
+// Scrolling bar chart, one bar per candle, newest on the right.
+// Bar height is proportional to that candle's cumulative OB_VOLUME.
+void render_volume_histogram(void) {
+    int i, x, y;
+    int n = vol_count;
+
+    uint32_t max_vol = 1;
+    for (i = 0; i < n; i++) {
+        int idx = (vol_head - n + i + MAX_CANDLES) % MAX_CANDLES;
+        if (vol_hist[idx] > max_vol) max_vol = vol_hist[idx];
+    }
+
+    // Precompute the 3 reference y positions
+    int ref_y[3];
+    ref_y[0] = VOL_Y0 + (VOL_H * 1) / 4;   // 75% level (near top)
+    ref_y[1] = VOL_Y0 + (VOL_H * 2) / 4;   // 50% level (middle)
+    ref_y[2] = VOL_Y0 + (VOL_H * 3) / 4;   // 25% level (near bottom)
+
+    for (y = VOL_Y0; y <= VOL_Y1; y++) {
+        int y_frac = ((VOL_Y1 - y) * 255) / (VOL_H - 1);
+
+        // Check if this row is a reference line
+        int is_ref = (y == ref_y[0] || y == ref_y[1] || y == ref_y[2]);
+
+        for (x = VOL_X0; x < VOL_X0 + VOL_W; x++) {
+            int slot   = (x - VOL_X0) / SLOT;
+            int slot_x = (x - VOL_X0) % SLOT;
+
+            if (slot_x == SLOT - 1) { VGA_PIXEL(x, y, black); continue; }
+
+            if (slot >= n) {
+                // No bar here — still draw ref line through empty space
+                VGA_PIXEL(x, y, is_ref && ((x >> 2) & 1) ? dark_gray : black);
+                continue;
+            }
+
+            int hist_idx = (vol_head - n + slot + MAX_CANDLES) % MAX_CANDLES;
+            uint32_t v   = vol_hist[hist_idx];
+            int bar_frac = (int)(((uint64_t)v * 255) / max_vol);
+
+            if (y_frac <= bar_frac) {
+                int intensity = 10 + (int)(((uint64_t)v * 53) / max_vol);
+                VGA_PIXEL(x, y, RGB(0, intensity, intensity));
+            } else if (is_ref && ((x >> 2) & 1)) {
+                // Dashed ref line visible above the bar
+                VGA_PIXEL(x, y, dark_gray);
+            } else {
+                VGA_PIXEL(x, y, black);
+            }
+        }
+    }
+
+    VGA_hline(VOL_X0, VOL_X0 + VOL_W - 1, VOL_Y0, gray);
 }
 
 // Trader composition chart — bottom-right panel
@@ -555,7 +739,7 @@ int main(void) {
             VGA_text(76, gy >> 3, buf);
         }
     }
-
+    
     {
         // Vertically stacked labels in the right-hand strip of the comp panel
         // Order matches bar stacking: trader type 3 (value) at top, 0 (noise) at bottom
@@ -579,6 +763,10 @@ int main(void) {
     comp_head  = 0;
     comp_count = 0;
     memset(comp_hist, 0, sizeof(comp_hist));
+    vol_head  = 0;
+    vol_count = 0;
+    memset(vol_hist,  0, sizeof(vol_hist));
+    vol_max = 1;
 
     printf("Running. Ctrl+C to exit.\n");
 
@@ -591,6 +779,7 @@ int main(void) {
         render_topbar();
         render_candles();
         render_depth();
+        render_volume_histogram();
         render_comp();
         usleep(80000);
     }
