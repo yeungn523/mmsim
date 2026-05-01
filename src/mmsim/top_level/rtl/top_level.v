@@ -357,21 +357,6 @@ HexDigit Digit3(HEX3, hex5_hex0[15:12]);
 HexDigit Digit4(HEX4, hex5_hex0[19:16]);
 HexDigit Digit5(HEX5, hex5_hex0[23:20]);
 
-// -------------------------------------------------------
-// PLL clocks from Qsys
-// -------------------------------------------------------
-// vga_pll is the 25.175 MHz pixel clock (outclk0 of VGA_PLL inside Computer_System); vga_pll_lock asserts once the PLL
-// is stable. Both are driven by Computer_System through the exported VGA_PLL interfaces below.
-wire vga_pll_lock;
-wire vga_pll;
-
-// -------------------------------------------------------
-// VGA reset (active high)
-// -------------------------------------------------------
-// Asserted whenever KEY[0] is held (manual reset) or the VGA PLL has not yet locked, so vga_driver and the chart M10K
-// read port stay in reset until the pixel clock is stable.
-wire vga_reset = ~KEY[0] | ~vga_pll_lock;
-
 //=======================================================
 //  Structural coding - Qsys Computer_System
 //=======================================================
@@ -484,12 +469,17 @@ Computer_System The_System (
 	.hps_io_hps_io_usb1_inst_DIR    (HPS_USB_DIR),
 	.hps_io_hps_io_usb1_inst_NXT    (HPS_USB_NXT),
 
-	// VGA PLL reference: the PLL inside VGA_PLL takes CLOCK_50 as its reference and produces the 25.175 MHz pixel clock
-	// on outclk0; the matching engine's M10Ks already run on CLOCK_50 so no separate M10K PLL is needed.
-	.vga_pll_ref_clk_clk       (CLOCK_50),
-	.vga_pll_ref_reset_reset   (1'b0),
-	.vga_pll_locked_export     (vga_pll_lock),
-	.vga_pll_outclk0_clk       (vga_pll)
+	// VGA Subsystem
+	.vga_pll_ref_clk_clk     (CLOCK2_50),
+	.vga_pll_ref_reset_reset (1'b0),
+	.vga_CLK                 (VGA_CLK),
+	.vga_BLANK               (VGA_BLANK_N),
+	.vga_SYNC                (VGA_SYNC_N),
+	.vga_HS                  (VGA_HS),
+	.vga_VS                  (VGA_VS),
+	.vga_R                   (VGA_R),
+	.vga_G                   (VGA_G),
+	.vga_B                   (VGA_B)
 );
 
 // Derives the market simulator's active-low reset directly from KEY[0]; holding KEY[0] asserts reset.
@@ -503,9 +493,12 @@ wire [15:0] param_wr_addr      = 16'd0;
 wire [31:0] param_wr_data      = 32'd0;
 
 // Carries the order packet and the valid/ready handshake between order generation and the matching engine.
+// gen_order_valid is order_gen_top's raw output and me_order_ready is matching_engine's raw output.
 wire [31:0] order_packet;
-wire        order_valid;
-wire        order_ready;
+wire        gen_order_valid;
+wire        me_order_ready;
+wire        order_valid_tick;
+wire        order_ready_tick;
 
 // Captures every matching engine output. Only last_executed_price feeds back into order generation; the rest stay as
 // named wires so future visualization or logging blocks can pick them up.
@@ -524,32 +517,32 @@ wire        me_best_ask_valid;
 wire        me_order_retire_valid;
 wire [15:0] me_order_retire_trade_count;
 wire [15:0] me_order_retire_fill_quantity;
+wire [31:0] gbm_sigma;
 
-// Depth tap wires from the matching engine to the VGA renderer. The renderer drives the tick index combinationally on
-// the pixel clock; the price level stores' time-multiplexed port B returns the bid-side and ask-side resting quantities
-// one cycle later.
-wire [8:0]  depth_rd_addr;
+
+wire [8:0]  depth_rd_addr = 9'd0;
 wire [15:0] me_bid_depth_rd_data;
 wire [15:0] me_ask_depth_rd_data;
 
-// Carries the chart aggregator, history buffer, and renderer pipeline plus the vga_driver pixel-coordinate feedback.
-wire [31:0] chart_window_min_price;
-wire [31:0] chart_window_max_price;
-wire        chart_window_valid;
-wire [8:0]  chart_rd_offset;
-wire [8:0]  chart_rd_top_pixel_y;
-wire [8:0]  chart_rd_bottom_pixel_y;
-wire [9:0]  vga_next_x;
-wire [9:0]  vga_next_y;
-wire [7:0]  vga_color_in;
+localparam [29:0] speed = 30'd500_000;  // ~100 trades/sec at 50 MHz; will be HPS-tunable via a control PIO later.
 
-// Crosses the active-high vga_reset into the pixel-clock domain through a two-stage synchronizer.
-reg  vga_rst_sync_a;
-reg  vga_rst_sync_b;
-wire vga_rst_pixel = vga_rst_sync_b;
+reg  [29:0] counter;
+wire        AnalogClock;
+
+always @(posedge CLOCK_50) begin
+	if (!core_rst_n || counter >= speed)
+		counter <= 30'd0;
+	else
+		counter <= counter + 30'd1;
+end
+
+assign AnalogClock      = (counter == 30'd0);
+assign order_valid_tick = gen_order_valid & AnalogClock;
+assign order_ready_tick = me_order_ready  & AnalogClock;
 
 // Generates orders by composing the ziggurat Gaussian, the GBM price source, the agent units, and the round-robin
-// arbiter; presents the resulting packet on the valid/ready bus.
+// arbiter; presents the resulting packet on the valid/ready bus. Sees order_ready_tick instead of the raw matching
+// engine ready so it only dequeues on AnalogClock cycles.
 order_gen_top u_order_gen (
 	.clk                 (CLOCK_50),
 	.rst_n               (core_rst_n),
@@ -560,18 +553,20 @@ order_gen_top u_order_gen (
 	.param_wr_addr       (param_wr_addr),
 	.param_wr_data       (param_wr_data),
 	.order_packet        (order_packet),
-	.order_valid         (order_valid),
-	.order_ready         (order_ready)
+	.order_valid         (gen_order_valid),
+	.order_ready         (order_ready_tick),
+	.gbm_sigma_out       (gbm_sigma)
 );
 
 // Matches each accepted order through the three-stage pipeline over the two no-cancellation price level stores and
-// republishes trade and top-of-book observations.
+// republishes trade and top-of-book observations. Sees order_valid_tick instead of the raw generator valid so it only
+// admits orders on AnalogClock cycles; both endpoints therefore agree the handshake is complete only on those cycles.
 matching_engine u_matching_engine (
 	.clk                        (CLOCK_50),
 	.rst_n                      (core_rst_n),
 	.order_packet               (order_packet),
-	.order_valid                (order_valid),
-	.order_ready                (order_ready),
+	.order_valid                (order_valid_tick),
+	.order_ready                (me_order_ready),
 	.trade_price                (me_trade_price),
 	.trade_quantity             (me_trade_quantity),
 	.trade_side                 (me_trade_side),
@@ -590,72 +585,6 @@ matching_engine u_matching_engine (
 	.depth_rd_addr              (depth_rd_addr),
 	.bid_depth_rd_data          (me_bid_depth_rd_data),
 	.ask_depth_rd_data          (me_ask_depth_rd_data)
-);
-
-// Aggregates trades into fixed wall-clock windows; each closed window emits the min and max prices plus a valid pulse.
-tick_window_aggregator u_tick_window_aggregator (
-	.clk              (CLOCK_50),
-	.rst_n            (core_rst_n),
-	.trade_valid      (me_trade_valid),
-	.trade_price      (me_trade_price),
-	.window_min_price (chart_window_min_price),
-	.window_max_price (chart_window_max_price),
-	.window_valid     (chart_window_valid)
-);
-
-// Drives the two-stage VGA reset synchronizer; vga_rst_pixel is the destination-domain reset.
-always @(posedge vga_pll or posedge vga_reset) begin
-	if (vga_reset) begin
-		vga_rst_sync_a <= 1'b1;
-		vga_rst_sync_b <= 1'b1;
-	end else begin
-		vga_rst_sync_a <= 1'b0;
-		vga_rst_sync_b <= vga_rst_sync_a;
-	end
-end
-
-// Caches one (top, bottom) pixel-Y pair per closed window and serves it back on the pixel clock through the M10K CDC.
-circular_buffer u_chart_history (
-	.wr_clk            (CLOCK_50),
-	.rst_n             (core_rst_n),
-	.wr_en             (chart_window_valid),
-	.wr_min_price      (chart_window_min_price),
-	.wr_max_price      (chart_window_max_price),
-	.rd_clk            (vga_pll),
-	.rd_offset         (chart_rd_offset),
-	.rd_top_pixel_y    (chart_rd_top_pixel_y),
-	.rd_bottom_pixel_y (chart_rd_bottom_pixel_y)
-);
-
-// Walks the screen at the pixel clock and forwards the upcoming pixel coordinate one cycle ahead of color registration.
-vga_driver u_vga_driver (
-	.clock   (vga_pll),
-	.reset   (vga_rst_pixel),
-	.color_in(vga_color_in),
-	.next_x  (vga_next_x),
-	.next_y  (vga_next_y),
-	.hsync   (VGA_HS),
-	.vsync   (VGA_VS),
-	.red     (VGA_R),
-	.green   (VGA_G),
-	.blue    (VGA_B),
-	.sync    (VGA_SYNC_N),
-	.clk     (VGA_CLK),
-	.blank   (VGA_BLANK_N)
-);
-
-// Maps each pixel coordinate to RGB332 by combining the rolling chart history on the left half and the bid/ask depth
-// ladder on the right half; outputs feed back into vga_driver.color_in.
-renderer u_renderer (
-	.next_x            (vga_next_x),
-	.next_y            (vga_next_y),
-	.rd_offset         (chart_rd_offset),
-	.rd_top_pixel_y    (chart_rd_top_pixel_y),
-	.rd_bottom_pixel_y (chart_rd_bottom_pixel_y),
-	.depth_rd_addr     (depth_rd_addr),
-	.bid_depth_rd_data (me_bid_depth_rd_data),
-	.ask_depth_rd_data (me_ask_depth_rd_data),
-	.color_in          (vga_color_in)
 );
 
 // Drives the six HEX digits with the upper 24 bits of the most recent execution price (Q8.24). HEX5:HEX4 show the

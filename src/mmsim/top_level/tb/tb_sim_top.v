@@ -85,11 +85,11 @@ module tb_sim_top;
     // Taps the per-tick occupancy bitmaps inside each book for the trade-price invariant.
     wire bid_level_valid_tap [0:kPriceRange-1];
     wire ask_level_valid_tap [0:kPriceRange-1];
-    genvar lv;
+    genvar i;
     generate
-        for (lv = 0; lv < kPriceRange; lv = lv + 1) begin : gen_level_taps
-            assign bid_level_valid_tap[lv] = tb_sim_top.u_matching_engine.bid_book.level_valid[lv];
-            assign ask_level_valid_tap[lv] = tb_sim_top.u_matching_engine.ask_book.level_valid[lv];
+        for (i = 0; i < kPriceRange; i = i + 1) begin : gen_level_taps
+            assign bid_level_valid_tap[i] = tb_sim_top.u_matching_engine.bid_book.level_valid[i];
+            assign ask_level_valid_tap[i] = tb_sim_top.u_matching_engine.ask_book.level_valid[i];
         end
     endgenerate
 

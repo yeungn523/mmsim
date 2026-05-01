@@ -6,7 +6,7 @@
 module order_gen_top #(
     parameter NUM_UNITS       = 4,                               ///< Number of agent execution units (must be a power of two).
     parameter PTR_WIDTH       = 2,                               ///< Bit width of the arbiter pointer (log2(NUM_UNITS)).
-    parameter SLOTS_PER_UNIT  = 64,                              ///< Parameter M10K slots provisioned per agent unit.
+    parameter SLOTS_PER_UNIT  = 1024,                            ///< Parameter M10K slots provisioned per agent unit.
     parameter FIFO_DEPTH      = 256,                             ///< Depth of the internal output FIFO that absorbs flash bursts.
 
     parameter signed [31:0] GBM_MU_ITO_DT     = 32'sh00000000,   ///< GBM Ito-corrected drift override.
@@ -38,7 +38,7 @@ module order_gen_top #(
     output wire [31:0] gbm_sigma_out                              ///< Live GBM volatility estimate (Q0.24); surfaced for VGA readout.
 );
 
-    localparam SLOTS_LOG2 = 6;  // log2(64), adjust if SLOTS_PER_UNIT changes.
+    localparam SLOTS_LOG2 = 10;  // log2(1024), adjust if SLOTS_PER_UNIT changes.
 
     wire [15:0] zig_gauss_out;
     wire        zig_valid_out;
@@ -92,18 +92,18 @@ module order_gen_top #(
         .price_valid      (gbm_price_valid)
     );
 
-    genvar g;
+    genvar i;
     generate
-        for (g = 0; g < NUM_UNITS; g = g + 1) begin : gen_agent_unit
+        for (i = 0; i < NUM_UNITS; i = i + 1) begin : gen_agent_unit
 
             wire        unit_wr_en;
-            wire [5:0]  unit_wr_slot;
+            wire [9:0]  unit_wr_slot;
             wire [15:0] unit_param_addr;
 
-            assign unit_wr_en   = param_wr_en && (param_wr_addr[15:SLOTS_LOG2] == g);
+            assign unit_wr_en   = param_wr_en && (param_wr_addr[15:SLOTS_LOG2] == i);
             assign unit_wr_slot = param_wr_addr[SLOTS_LOG2-1:0];
 
-            reg [31:0] param_mem [0:SLOTS_PER_UNIT-1];
+            reg [31:0] param_mem [0:SLOTS_PER_UNIT-1] /* synthesis ramstyle = "no_rw_check, M10K" */;
             reg [31:0] unit_param_data_reg;
 
             always @(posedge clk) begin
@@ -118,7 +118,7 @@ module order_gen_top #(
             agent_execution_unit #(
                 .NUM_AGENT_SLOTS   (SLOTS_PER_UNIT),
                 .LFSR_POLY         (LFSR_POLY),
-                .LFSR_SEED         (LFSR_SEED_BASE + g),
+                .LFSR_SEED         (LFSR_SEED_BASE + i),
                 .NEAR_NOISE_THRESH (NEAR_NOISE_THRESH)
             ) u_agent (
                 .clk                 (clk),
@@ -130,9 +130,9 @@ module order_gen_top #(
                 .param_addr          (unit_param_addr),
                 .param_data          (unit_param_data_reg),
                 .active_agent_count  (active_agent_count),
-                .order_packet        (unit_order_packet[g*32 +: 32]),
-                .order_valid         (unit_order_valid[g]),
-                .order_granted       (unit_order_granted[g])
+                .order_packet        (unit_order_packet[i*32 +: 32]),
+                .order_valid         (unit_order_valid[i]),
+                .order_granted       (unit_order_granted[i])
             );
 
         end
