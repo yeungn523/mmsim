@@ -6,7 +6,7 @@
 module order_gen_top #(
     parameter NUM_UNITS       = 4,                               ///< Number of agent execution units (must be a power of two).
     parameter PTR_WIDTH       = 2,                               ///< Bit width of the arbiter pointer (log2(NUM_UNITS)).
-    parameter SLOTS_PER_UNIT  = 1024,                            ///< Parameter M10K slots provisioned per agent unit.
+    parameter SLOTS_PER_UNIT  = 64,                              ///< Parameter M10K slots provisioned per agent unit.
     parameter FIFO_DEPTH      = 256,                             ///< Depth of the internal output FIFO that absorbs flash bursts.
 
     parameter signed [31:0] GBM_MU_ITO_DT     = 32'sh00000000,   ///< GBM Ito-corrected drift override.
@@ -34,16 +34,21 @@ module order_gen_top #(
     output wire [31:0] order_packet,                             ///< Packet driven onto the bus while order_valid is high.
     output wire        order_valid,                              ///< Asserts when the arbiter is presenting a packet.
     input  wire        order_ready,                              ///< Consumer accepts the packet when high alongside order_valid.
-
-    output wire [31:0] gbm_sigma_out                              ///< Live GBM volatility estimate (Q0.24); surfaced for VGA readout.
+    
+    // flash injection
+    input  wire [31:0] inject_packet,
+    input  wire        inject_trigger,
+    input  wire [31:0] inject_count,
+    output wire        inject_active
 );
 
-    localparam SLOTS_LOG2 = 10;  // log2(1024), adjust if SLOTS_PER_UNIT changes.
+    localparam SLOTS_LOG2 = 6;  // log2(64), adjust if SLOTS_PER_UNIT changes.
 
     wire [15:0] zig_gauss_out;
     wire        zig_valid_out;
 
     wire [31:0] gbm_price_out;
+    wire [31:0] gbm_sigma_out;
     wire        gbm_price_valid;
 
     wire [NUM_UNITS-1:0]    unit_order_valid;
@@ -56,6 +61,41 @@ module order_gen_top #(
     wire        fifo_full;
     wire        fifo_almost_full;
     wire        fifo_empty;
+    wire [31:0] fifo_dout;
+
+    // flash injection fsm
+    reg [31:0]  inject_remaining;
+    reg         inject_busy;
+    reg [31:0]  inject_packet_reg;
+    reg         inject_trigger_prev;
+
+    wire inject_trigger_rise = inject_trigger && !inject_trigger_prev;
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            inject_remaining    <= 32'd0;
+            inject_busy         <= 1'b0;
+            inject_packet_reg   <= 32'd0;
+            inject_trigger_prev <= 1'b0;
+        end else begin
+            inject_trigger_prev <= inject_trigger;
+
+            if (inject_trigger_rise && !inject_busy) begin
+                inject_busy       <= 1'b1;
+                inject_remaining  <= inject_count;
+                inject_packet_reg <= inject_packet;
+            end else if (inject_busy && order_ready) begin
+                if (inject_remaining <= 32'd1) begin
+                    inject_busy      <= 1'b0;
+                    inject_remaining <= 32'd0;
+                end else begin
+                    inject_remaining <= inject_remaining - 32'd1;
+                end
+            end
+        end
+    end
+
+    assign inject_active = inject_busy;
 
     ziggurat_gaussian u_ziggurat (
         .clk        (clk),
@@ -92,18 +132,18 @@ module order_gen_top #(
         .price_valid      (gbm_price_valid)
     );
 
-    genvar i;
+    genvar g;
     generate
-        for (i = 0; i < NUM_UNITS; i = i + 1) begin : gen_agent_unit
+        for (g = 0; g < NUM_UNITS; g = g + 1) begin : gen_agent_unit
 
             wire        unit_wr_en;
-            wire [9:0]  unit_wr_slot;
+            wire [5:0]  unit_wr_slot;
             wire [15:0] unit_param_addr;
 
-            assign unit_wr_en   = param_wr_en && (param_wr_addr[15:SLOTS_LOG2] == i);
+            assign unit_wr_en   = param_wr_en && (param_wr_addr[15:SLOTS_LOG2] == g);
             assign unit_wr_slot = param_wr_addr[SLOTS_LOG2-1:0];
 
-            reg [31:0] param_mem [0:SLOTS_PER_UNIT-1] /* synthesis ramstyle = "no_rw_check, M10K" */;
+            reg [31:0] param_mem [0:SLOTS_PER_UNIT-1];
             reg [31:0] unit_param_data_reg;
 
             always @(posedge clk) begin
@@ -118,7 +158,7 @@ module order_gen_top #(
             agent_execution_unit #(
                 .NUM_AGENT_SLOTS   (SLOTS_PER_UNIT),
                 .LFSR_POLY         (LFSR_POLY),
-                .LFSR_SEED         (LFSR_SEED_BASE + i),
+                .LFSR_SEED         (LFSR_SEED_BASE + g),
                 .NEAR_NOISE_THRESH (NEAR_NOISE_THRESH)
             ) u_agent (
                 .clk                 (clk),
@@ -130,9 +170,9 @@ module order_gen_top #(
                 .param_addr          (unit_param_addr),
                 .param_data          (unit_param_data_reg),
                 .active_agent_count  (active_agent_count),
-                .order_packet        (unit_order_packet[i*32 +: 32]),
-                .order_valid         (unit_order_valid[i]),
-                .order_granted       (unit_order_granted[i])
+                .order_packet        (unit_order_packet[g*32 +: 32]),
+                .order_valid         (unit_order_valid[g]),
+                .order_granted       (unit_order_granted[g])
             );
 
         end
@@ -159,24 +199,27 @@ module order_gen_top #(
     // accepted writes, so order_ready collapses to !fifo_full.
     assign arb_ready = !fifo_almost_full && !fifo_full;
 
-    // Exposes the FIFO head as the module boundary (showahead = ON, so dout tracks the head
-    // combinationally whenever !fifo_empty).
-    assign order_valid = !fifo_empty;
+    // injection mux: when inject_busy, bypass FIFO and present
+    // inject_packet_reg directly to matching engine.
+    // FIFO rd_en is suppressed during injection so no agent
+    // orders are lost - they resume naturally when inject_busy clears.
+    assign order_valid  = inject_busy ? 1'b1              : !fifo_empty;
+    assign order_packet = inject_busy ? inject_packet_reg : fifo_dout;
 
     order_fifo #(
         .DATA_WIDTH (32),
         .DEPTH      (FIFO_DEPTH),
         .ALMOST_FULL_THRESH (16)
     ) u_fifo (
-        .clk   (clk),
-        .rst_n (rst_n),
-        .wr_en (arb_valid && arb_ready),
-        .din   (arb_packet),
-        .full  (fifo_full),
+        .clk         (clk),
+        .rst_n       (rst_n),
+        .wr_en       (arb_valid && arb_ready),
+        .din         (arb_packet),
+        .full        (fifo_full),
         .almost_full (fifo_almost_full),
-        .rd_en (order_valid && order_ready),
-        .dout  (order_packet),
-        .empty (fifo_empty)
+        .rd_en       (!inject_busy && !fifo_empty && order_ready),
+        .dout        (fifo_dout),
+        .empty       (fifo_empty)
     );
 
 endmodule
