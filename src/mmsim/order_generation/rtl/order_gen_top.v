@@ -2,51 +2,44 @@
 /// @file order_gen_top.v
 /// @brief Top-level order generation subsystem composing the GBM source, agent units, and the round-robin arbiter.
 ///
-
 module order_gen_top #(
-    parameter NUM_UNITS       = 4,                               ///< Number of agent execution units (must be a power of two).
-    parameter PTR_WIDTH       = 2,                               ///< Bit width of the arbiter pointer (log2(NUM_UNITS)).
-    parameter SLOTS_PER_UNIT  = 64,                              ///< Parameter M10K slots provisioned per agent unit.
-    parameter FIFO_DEPTH      = 256,                             ///< Depth of the internal output FIFO that absorbs flash bursts.
-
-    parameter signed [31:0] GBM_MU_ITO_DT     = 32'sh00000000,   ///< GBM Ito-corrected drift override.
-    parameter signed [31:0] GBM_SIGMA_SQRT_DT = 32'sh00000451,   ///< GBM sigma * sqrt(dt) override.
-    parameter        [31:0] GBM_SIGMA_INIT    = 32'h00000451,    ///< GBM initial sigma override.
-    parameter        [31:0] GBM_ALPHA         = 32'h00FD70A4,    ///< GBM EWMA smoothing factor override.
-    parameter        [31:0] GBM_P0_RECIP      = 32'h00028F5C,    ///< GBM reciprocal of the reference price override.
-
-    parameter [31:0] LFSR_SEED_BASE    = 32'hCAFEBABE,           ///< Base seed for per-unit LFSRs (unit i seeds with BASE + i).
-    parameter [31:0] LFSR_POLY         = 32'hB4BCD35C,           ///< Galois polynomial shared by every per-unit LFSR.
-    parameter [8:0]  NEAR_NOISE_THRESH = 9'd16                   ///< Offset below which noise traders emit market orders.
+    parameter NUM_UNITS       = 16,
+    parameter PTR_WIDTH       = 4,                               ///< log2(NUM_UNITS)
+    parameter SLOTS_PER_UNIT  = 1024,
+    parameter FIFO_DEPTH      = 256,
+    parameter signed [31:0] GBM_MU_ITO_DT     = 32'sh00000000,
+    parameter signed [31:0] GBM_SIGMA_SQRT_DT = 32'sh00000451,
+    parameter        [31:0] GBM_SIGMA_INIT    = 32'h00000451,
+    parameter        [31:0] GBM_ALPHA         = 32'h00FD70A4,
+    parameter        [31:0] GBM_P0_RECIP      = 32'h00028F5C,
+    parameter [31:0] LFSR_SEED_BASE    = 32'hCAFEBABE,
+    parameter [31:0] LFSR_POLY         = 32'hB4BCD35C,
+    parameter [8:0]  NEAR_NOISE_THRESH = 9'd16
 )(
-    input  wire        clk,                                      ///< System clock.
-    input  wire        rst_n,                                    ///< Active-low asynchronous reset.
+    input  wire        clk,
+    input  wire        rst_n,
+    input  wire [31:0] last_executed_price,
+    input  wire        trade_valid,
+    input  wire [15:0] active_agent_count,
+    output wire [31:0] order_packet,
+    output wire        order_valid,
+    input  wire        order_ready,
 
-    input  wire [31:0] last_executed_price,                      ///< Most recent execution price from the matching engine (Q8.24 unsigned).
-    input  wire        trade_valid,                              ///< Pulses one cycle on every matching engine execution.
-
-    input  wire [15:0] active_agent_count,                       ///< Number of slots each agent unit round-robins through.
-
-    input  wire        param_wr_en,                              ///< HPS-driven parameter write enable.
-    input  wire [15:0] param_wr_addr,                            ///< Parameter write address; high bits select unit, low bits select slot.
-    input  wire [31:0] param_wr_data,                            ///< Parameter word written into the selected unit/slot.
-
-    output wire [31:0] order_packet,                             ///< Packet driven onto the bus while order_valid is high.
-    output wire        order_valid,                              ///< Asserts when the arbiter is presenting a packet.
-    input  wire        order_ready,                              ///< Consumer accepts the packet when high alongside order_valid.
-    
-    // flash injection
+    // Flash injection
     input  wire [31:0] inject_packet,
     input  wire        inject_trigger,
     input  wire [31:0] inject_count,
-    output wire        inject_active
-);
+    output wire        inject_active,
 
-    localparam SLOTS_LOG2 = 6;  // log2(64), adjust if SLOTS_PER_UNIT changes.
+    // External param memory ports — read-only from FPGA side.
+    // HPS writes directly via Qsys AXI bridge, FPGA only reads.
+    output wire [NUM_UNITS*10-1:0]  param_rd_addr,  ///< Read address per unit (10 bits each)
+    input  wire [NUM_UNITS*32-1:0]  param_rd_data   ///< Read data per unit (32 bits each)
+);
+    localparam SLOTS_LOG2 = 10;  // log2(1024)
 
     wire [15:0] zig_gauss_out;
     wire        zig_valid_out;
-
     wire [31:0] gbm_price_out;
     wire [31:0] gbm_sigma_out;
     wire        gbm_price_valid;
@@ -63,12 +56,11 @@ module order_gen_top #(
     wire        fifo_empty;
     wire [31:0] fifo_dout;
 
-    // flash injection fsm
+    // Flash injection FSM
     reg [31:0]  inject_remaining;
     reg         inject_busy;
     reg [31:0]  inject_packet_reg;
     reg         inject_trigger_prev;
-
     wire inject_trigger_rise = inject_trigger && !inject_trigger_prev;
 
     always @(posedge clk or negedge rst_n) begin
@@ -79,7 +71,6 @@ module order_gen_top #(
             inject_trigger_prev <= 1'b0;
         end else begin
             inject_trigger_prev <= inject_trigger;
-
             if (inject_trigger_rise && !inject_busy) begin
                 inject_busy       <= 1'b1;
                 inject_remaining  <= inject_count;
@@ -136,24 +127,11 @@ module order_gen_top #(
     generate
         for (g = 0; g < NUM_UNITS; g = g + 1) begin : gen_agent_unit
 
-            wire        unit_wr_en;
-            wire [5:0]  unit_wr_slot;
             wire [15:0] unit_param_addr;
 
-            assign unit_wr_en   = param_wr_en && (param_wr_addr[15:SLOTS_LOG2] == g);
-            assign unit_wr_slot = param_wr_addr[SLOTS_LOG2-1:0];
-
-            reg [31:0] param_mem [0:SLOTS_PER_UNIT-1];
-            reg [31:0] unit_param_data_reg;
-
-            always @(posedge clk) begin
-                if (unit_wr_en)
-                    param_mem[unit_wr_slot] <= param_wr_data;
-            end
-
-            always @(posedge clk) begin
-                unit_param_data_reg <= param_mem[unit_param_addr[SLOTS_LOG2-1:0]];
-            end
+            // Route agent read address out to the flattened external port.
+            // Qsys on-chip memory s2 port drives param_rd_data back in.
+            assign param_rd_addr[g*10 +: 10] = unit_param_addr[SLOTS_LOG2-1:0];
 
             agent_execution_unit #(
                 .NUM_AGENT_SLOTS   (SLOTS_PER_UNIT),
@@ -168,19 +146,15 @@ module order_gen_top #(
                 .sigma               (gbm_sigma_out[15:0]),
                 .trade_valid         (trade_valid),
                 .param_addr          (unit_param_addr),
-                .param_data          (unit_param_data_reg),
+                .param_data          (param_rd_data[g*32 +: 32]),
                 .active_agent_count  (active_agent_count),
                 .order_packet        (unit_order_packet[g*32 +: 32]),
                 .order_valid         (unit_order_valid[g]),
                 .order_granted       (unit_order_granted[g])
             );
-
         end
     endgenerate
 
-    // Routes the arbiter's valid/ready output through the internal FIFO so flash injections
-    // accumulate in the FIFO instead of stalling agents through the matching engine's
-    // backpressure. The arbiter only sees order_ready=0 once the FIFO genuinely fills.
     order_arbiter #(
         .NUM_UNITS (NUM_UNITS),
         .PTR_WIDTH (PTR_WIDTH)
@@ -195,21 +169,15 @@ module order_gen_top #(
         .order_ready     (arb_ready)
     );
 
-    // Bridges the arbiter's valid/ready to the FIFO's write port; the arbiter advances on
-    // accepted writes, so order_ready collapses to !fifo_full.
     assign arb_ready = !fifo_almost_full && !fifo_full;
 
-    // injection mux: when inject_busy, bypass FIFO and present
-    // inject_packet_reg directly to matching engine.
-    // FIFO rd_en is suppressed during injection so no agent
-    // orders are lost - they resume naturally when inject_busy clears.
     assign order_valid  = inject_busy ? 1'b1              : !fifo_empty;
     assign order_packet = inject_busy ? inject_packet_reg : fifo_dout;
 
     order_fifo #(
-        .DATA_WIDTH (32),
-        .DEPTH      (FIFO_DEPTH),
-        .ALMOST_FULL_THRESH (16)
+        .DATA_WIDTH          (32),
+        .DEPTH               (FIFO_DEPTH),
+        .ALMOST_FULL_THRESH  (16)
     ) u_fifo (
         .clk         (clk),
         .rst_n       (rst_n),
