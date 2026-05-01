@@ -33,7 +33,13 @@ module order_gen_top #(
 
     output wire [31:0] order_packet,                             ///< Packet driven onto the bus while order_valid is high.
     output wire        order_valid,                              ///< Asserts when the arbiter is presenting a packet.
-    input  wire        order_ready                               ///< Consumer accepts the packet when high alongside order_valid.
+    input  wire        order_ready,                              ///< Consumer accepts the packet when high alongside order_valid.
+    
+    // flash injection
+    input  wire [31:0] inject_packet,
+    input  wire        inject_trigger,
+    input  wire [31:0] inject_count,
+    output wire        inject_active
 );
 
     localparam SLOTS_LOG2 = 6;  // log2(64), adjust if SLOTS_PER_UNIT changes.
@@ -55,6 +61,41 @@ module order_gen_top #(
     wire        fifo_full;
     wire        fifo_almost_full;
     wire        fifo_empty;
+    wire [31:0] fifo_dout;
+
+    // flash injection fsm
+    reg [31:0]  inject_remaining;
+    reg         inject_busy;
+    reg [31:0]  inject_packet_reg;
+    reg         inject_trigger_prev;
+
+    wire inject_trigger_rise = inject_trigger && !inject_trigger_prev;
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            inject_remaining    <= 32'd0;
+            inject_busy         <= 1'b0;
+            inject_packet_reg   <= 32'd0;
+            inject_trigger_prev <= 1'b0;
+        end else begin
+            inject_trigger_prev <= inject_trigger;
+
+            if (inject_trigger_rise && !inject_busy) begin
+                inject_busy       <= 1'b1;
+                inject_remaining  <= inject_count;
+                inject_packet_reg <= inject_packet;
+            end else if (inject_busy && order_ready) begin
+                if (inject_remaining <= 32'd1) begin
+                    inject_busy      <= 1'b0;
+                    inject_remaining <= 32'd0;
+                end else begin
+                    inject_remaining <= inject_remaining - 32'd1;
+                end
+            end
+        end
+    end
+
+    assign inject_active = inject_busy;
 
     ziggurat_gaussian u_ziggurat (
         .clk        (clk),
@@ -158,24 +199,27 @@ module order_gen_top #(
     // accepted writes, so order_ready collapses to !fifo_full.
     assign arb_ready = !fifo_almost_full && !fifo_full;
 
-    // Exposes the FIFO head as the module boundary (showahead = ON, so dout tracks the head
-    // combinationally whenever !fifo_empty).
-    assign order_valid = !fifo_empty;
+    // injection mux: when inject_busy, bypass FIFO and present
+    // inject_packet_reg directly to matching engine.
+    // FIFO rd_en is suppressed during injection so no agent
+    // orders are lost - they resume naturally when inject_busy clears.
+    assign order_valid  = inject_busy ? 1'b1              : !fifo_empty;
+    assign order_packet = inject_busy ? inject_packet_reg : fifo_dout;
 
     order_fifo #(
         .DATA_WIDTH (32),
         .DEPTH      (FIFO_DEPTH),
         .ALMOST_FULL_THRESH (16)
     ) u_fifo (
-        .clk   (clk),
-        .rst_n (rst_n),
-        .wr_en (arb_valid && arb_ready),
-        .din   (arb_packet),
-        .full  (fifo_full),
+        .clk         (clk),
+        .rst_n       (rst_n),
+        .wr_en       (arb_valid && arb_ready),
+        .din         (arb_packet),
+        .full        (fifo_full),
         .almost_full (fifo_almost_full),
-        .rd_en (order_valid && order_ready),
-        .dout  (order_packet),
-        .empty (fifo_empty)
+        .rd_en       (!inject_busy && !fifo_empty && order_ready),
+        .dout        (fifo_dout),
+        .empty       (fifo_empty)
     );
 
 endmodule

@@ -518,18 +518,27 @@ wire [15:0] me_order_retire_fill_quantity;
 
 // Generates orders by composing the ziggurat Gaussian, the GBM price source, the agent units, and
 // the round-robin arbiter; presents the resulting packet on the valid/ready bus.
+wire [31:0] inject_packet;
+wire        inject_trigger;
+wire [31:0] inject_count;
+wire        inject_active;
+
 order_gen_top u_order_gen (
-	.clk                 (CLOCK_50),
-	.rst_n               (core_rst_n),
-	.last_executed_price (me_last_executed_price),
-	.trade_valid         (me_trade_valid),
-	.active_agent_count  (active_agent_count),
-	.param_wr_en         (param_wr_en),
-	.param_wr_addr       (param_wr_addr),
-	.param_wr_data       (param_wr_data),
-	.order_packet        (order_packet),
-	.order_valid         (order_valid),
-	.order_ready         (order_ready)
+    .clk                 (CLOCK_50),
+    .rst_n               (core_rst_n),
+    .last_executed_price (me_last_executed_price),
+    .trade_valid         (me_trade_valid),
+    .active_agent_count  (active_agent_count),
+    .param_wr_en         (param_wr_en),
+    .param_wr_addr       (param_wr_addr),
+    .param_wr_data       (param_wr_data),
+    .order_packet        (order_packet),
+    .order_valid         (order_valid),
+    .order_ready         (order_ready),
+    .inject_packet       (inject_packet),
+    .inject_trigger      (inject_trigger),
+    .inject_count        (inject_count),
+    .inject_active       (inject_active)
 );
 
 // Matches each accepted order through the three-stage pipeline over the two no-cancellation price
