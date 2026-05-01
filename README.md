@@ -14,11 +14,11 @@ This project implements a **hardware-accelerated stochastic market microstructur
 The design synthesizes realistic order flow by combining hardware Geometric Brownian Motion (GBM) price evolution, 
 Gaussian random number generation, pseudo-random LFSR seeding, and multiple agent archetypes (noise, market-maker,
 momentum, value). Resulting orders are fed through a pipelined matching engine that maintains
-a limit order book. The system targets the Terasic DE1-SoC development board, which carries an
-Intel Cyclone V 5CSEMA5F31C6 FPGA, and is synthesized with Intel Quartus Prime Lite 18.1. Each
-Verilog block is paired with a Python golden model and a ModelSim testbench harness so behavior
-can be verified deterministically before deployment to hardware.
+a limit order book. The system targets the Terasic DE1-SoC development board (Intel Cyclone V 5CSEMA5F31C6 FPGA), and is synthesized with Intel Quartus Prime Lite 18.1. Each
+Verilog block is paired with a Python golden model and a ModelSim testbench so behavior
+can be verified deterministically before hardware deployment.
 
+A more detailed write-up of the project can be found here: [View on Github](https://github.com/yeungn523/mmsim_website).
 ___
 
 ## Features
