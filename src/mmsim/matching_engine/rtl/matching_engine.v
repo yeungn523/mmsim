@@ -10,14 +10,6 @@
 /// fill. Stage C commits any unmatched limit remainder via a single INSERT to the same-side book. The B-to-C handoff
 /// register lets Stage B start the next packet while Stage C is still committing the previous one.
 ///
-/// Order packet layout (must match agent_execution_unit.v):
-///   bit  [31]       side        (0 = buy, 1 = sell)
-///   bit  [30]       order_type  (0 = limit, 1 = market)
-///   bits [29:28]    agent_type  (unused by the engine)
-///   bits [27:25]    reserved
-///   bits [24:16]    price       (9-bit tick index, 0..kPriceRange-1)
-///   bits [15:0]     volume      (16-bit unsigned share count)
-///
 
 module matching_engine #(
     parameter kPriceWidth      = 32,    ///< Bit width of the internal price field.
@@ -66,7 +58,9 @@ module matching_engine #(
     // price_level_store).
     input  wire [8:0]                  depth_rd_addr,
     output wire [kQuantityWidth-1:0]   bid_depth_rd_data,
-    output wire [kQuantityWidth-1:0]   ask_depth_rd_data
+    output wire [kQuantityWidth-1:0]   ask_depth_rd_data,
+	 
+	 output reg [1:0] order_retire_agent_type
 );
 
     // Book command opcodes (must match price_level_store).
@@ -135,6 +129,9 @@ module matching_engine #(
     // completes. Clears when the store reasserts command_ready.
     reg                         bid_in_flight;
     reg                         ask_in_flight;
+	 
+	 reg [1:0] b_working_agent_type;
+	 reg [1:0] b_to_c_agent_type;
 
     // Instantiates the bid-side and ask-side aggregate-quantity stores.
     price_level_store #(
@@ -297,6 +294,7 @@ module matching_engine #(
                         b_packet_trade_count   <= {kQuantityWidth{1'b0}};
                         b_packet_fill_quantity <= {kQuantityWidth{1'b0}};
                         b_state                <= kBClassify;
+								b_working_agent_type <= order_packet[29:28];
                     end
                 end
 
@@ -389,6 +387,7 @@ module matching_engine #(
             b_to_c_is_buy        <= 1'b0;
             b_to_c_trade_count   <= {kQuantityWidth{1'b0}};
             b_to_c_fill_quantity <= {kQuantityWidth{1'b0}};
+				b_to_c_agent_type    <= 2'b00;
         end else begin
             // Clears the register on the retire-only path the cycle Stage C enters kCSettle.
             if ((c_state == kCIdle) && b_to_c_valid && !b_to_c_for_insert) begin
@@ -420,6 +419,7 @@ module matching_engine #(
             order_retire_valid         <= 1'b0;
             order_retire_trade_count   <= {kQuantityWidth{1'b0}};
             order_retire_fill_quantity <= {kQuantityWidth{1'b0}};
+				order_retire_agent_type 	<= 2'b00;
         end else begin
             order_retire_valid <= 1'b0;
 
@@ -448,6 +448,7 @@ module matching_engine #(
                     order_retire_valid         <= 1'b1;
                     order_retire_trade_count   <= b_to_c_trade_count;
                     order_retire_fill_quantity <= b_to_c_fill_quantity;
+						  order_retire_agent_type <= b_to_c_agent_type;
                     c_state                    <= kCIdle;
                 end
 
