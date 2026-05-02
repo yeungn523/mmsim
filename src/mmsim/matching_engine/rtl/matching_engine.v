@@ -273,11 +273,13 @@ module matching_engine #(
             trade_price            <= {kPriceWidth{1'b0}};
             trade_quantity         <= {kQuantityWidth{1'b0}};
             trade_side             <= 1'b0;
-            last_executed_price       <= {kPriceWidth{1'b0}};
+//            last_executed_price    <= {kPriceWidth{1'b0}};
+			   last_executed_price       <= 32'h64000000;
             last_executed_price_valid <= 1'b0;
 
             bid_in_flight <= 1'b0;
             ask_in_flight <= 1'b0;
+				
         end else begin
             // Deasserts trade_valid by default; case branches reassert when a fill emits.
             trade_valid <= 1'b0;
