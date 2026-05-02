@@ -394,7 +394,9 @@ void update_candle(void) {
 
         // Per-candle volume
         {
-            uint32_t candle_vol = OB_VOLUME - vol_at_open;
+            uint32_t candle_vol = (OB_VOLUME >= vol_at_open)
+                      ? (OB_VOLUME - vol_at_open)
+                      : (0xFFFFFFFF - vol_at_open + OB_VOLUME + 1);
             vol_hist[candle_head] = candle_vol;
             if (candle_vol >= vol_max) {
                 vol_max = candle_vol;
@@ -600,50 +602,115 @@ void render_candles(void) {
 // ============================================================
 void render_depth(void) {
     int b, p, y, x;
-    uint32_t max_qty = 1;
     int half = DEPTH_W / 2;
     static uint32_t bin_bid[DEPTH_BINS];
     static uint32_t bin_ask[DEPTH_BINS];
 
+    // Smoothed center — tracks OB_EXEC at 1/8 speed to prevent flickering
+    static int smooth_center = 200;
+    if (OB_EXEC > 0) {
+        int target = (int)OB_EXEC;
+        int diff   = target - smooth_center;
+        if      (diff > 8)  smooth_center += diff / 8;
+        else if (diff < -8) smooth_center += diff / 8;
+        else if (diff != 0) smooth_center += (diff > 0) ? 1 : -1;
+    }
+
+    // Dynamic window: ±100 ticks around smoothed center
+    int depth_view_min = smooth_center - 100;
+    int depth_view_max = smooth_center + 100;
+    if (depth_view_min < 0)   depth_view_min = 0;
+    if (depth_view_max > 399) depth_view_max = 399;
+    int depth_view_range = depth_view_max - depth_view_min;
+    if (depth_view_range < 10) depth_view_range = 10;
+
+    // Bin within the visible window instead of the full 0-399 range
+    int visible_ticks = depth_view_range;
+    int bin_size = (visible_ticks + DEPTH_BINS - 1) / DEPTH_BINS;
+    if (bin_size < 1) bin_size = 1;
+
+    uint32_t max_bid_qty = 1;
+    uint32_t max_ask_qty = 1;
+
     for (b = 0; b < DEPTH_BINS; b++) {
         uint32_t bq = 0, aq = 0;
-        for (p = 0; p < DEPTH_BIN_SIZE; p++) {
-            int level = b * DEPTH_BIN_SIZE + p;
+        for (p = 0; p < bin_size; p++) {
+            int level = depth_view_min + b * bin_size + p;
+            if (level < 0 || level >= 400) continue;
             bq += OB_BUY(level);
             aq += OB_SELL(level);
         }
-        bin_bid[b] = bq; bin_ask[b] = aq;
-        if (bq > max_qty) max_qty = bq;
-        if (aq > max_qty) max_qty = aq;
+        bin_bid[b] = bq;
+        bin_ask[b] = aq;
+        if (bq > max_bid_qty) max_bid_qty = bq;
+        if (aq > max_ask_qty) max_ask_qty = aq;
     }
 
     for (y = DEPTH_Y0; y <= DEPTH_Y1 - 1; y++) {
-        int bin_row = ((y - DEPTH_Y0) * DEPTH_BINS) / DEPTH_H;
+        int bin_row   = ((y - DEPTH_Y0) * DEPTH_BINS) / DEPTH_H;
         if (bin_row < 0 || bin_row >= DEPTH_BINS) {
-            VGA_hline(DEPTH_X0, DEPTH_X0 + DEPTH_W - 1, y, black); continue;
+            VGA_hline(DEPTH_X0, DEPTH_X0 + DEPTH_W - 1, y, black);
+            continue;
         }
+        // Flip: top of panel = highest price in window
         int price_bin = (DEPTH_BINS - 1) - bin_row;
         uint32_t bq = bin_bid[price_bin];
         uint32_t aq = bin_ask[price_bin];
 
         if (bq > 0) {
-            int bar_w = (int)((double)bq / max_qty * half);
-            if (bar_w < 1) bar_w = 1; if (bar_w > half) bar_w = half;
-            int g_val = 15 + (int)(((uint64_t)bq * 48) / max_qty);
+            int bar_w = (int)((double)bq / max_bid_qty * half);
+            if (bar_w < 1) bar_w = 1;
+            if (bar_w > half) bar_w = half;
+            int g_val = 15 + (int)(((uint64_t)bq * 48) / max_bid_qty);
             short bid_col = RGB(0, g_val, 0);
             for (x = DEPTH_X0; x < DEPTH_X0 + half; x++)
                 VGA_PIXEL(x, y, (x >= DEPTH_X0 + half - bar_w) ? bid_col : black);
-        } else { VGA_hline(DEPTH_X0, DEPTH_X0 + half - 1, y, black); }
-
+        } else {
+            VGA_hline(DEPTH_X0, DEPTH_X0 + half - 1, y, black);
+        }
+        
+        // Ask side — use max_ask_qty
         if (aq > 0) {
-            int bar_w = (int)((double)aq / max_qty * half);
-            if (bar_w < 1) bar_w = 1; if (bar_w > half) bar_w = half;
-            int r_val = 8 + (aq * 23) / max_qty;
+            int bar_w = (int)((double)aq / max_ask_qty * half);
+            if (bar_w < 1) bar_w = 1;
+            if (bar_w > half) bar_w = half;
+            int r_val = 8 + (aq * 23) / max_ask_qty;
             short ask_col = RGB(r_val, 0, 0);
             for (x = DEPTH_X0 + half; x < DEPTH_X0 + DEPTH_W; x++)
                 VGA_PIXEL(x, y, (x < DEPTH_X0 + half + bar_w) ? ask_col : black);
-        } else { VGA_hline(DEPTH_X0 + half, DEPTH_X0 + DEPTH_W - 1, y, black); }
+        } else {
+            VGA_hline(DEPTH_X0 + half, DEPTH_X0 + DEPTH_W - 1, y, black);
+        }
     }
+
+    // Update axis labels to show dynamic range
+    // Clear old labels first
+    int i;
+    for (i = 74; i < 80; i++) {
+        int row;
+        for (row = DEPTH_Y0 >> 3; row <= DEPTH_Y1 >> 3; row++)
+            VGA_text(i, row, " ");
+    }
+
+    // Draw 4 new price labels at 25% intervals of visible window
+    char buf[8];
+    int label_prices[4];
+    label_prices[0] = depth_view_min + (depth_view_range * 1) / 4;
+    label_prices[1] = depth_view_min + (depth_view_range * 2) / 4;
+    label_prices[2] = depth_view_min + (depth_view_range * 3) / 4;
+    label_prices[3] = depth_view_max;
+
+    for (i = 0; i < 4; i++) {
+        // y position of this price within the dynamic window
+        int gy = DEPTH_Y0 + DEPTH_H - 1
+                 - ((label_prices[i] - depth_view_min) * (DEPTH_H - 1))
+                 / depth_view_range;
+        if (gy < DEPTH_Y0) gy = DEPTH_Y0;
+        if (gy > DEPTH_Y1) gy = DEPTH_Y1;
+        sprintf(buf, "%-3d", label_prices[i]);
+        VGA_text(76, gy >> 3, buf);
+    }
+
     VGA_text(40, 6, "Depth of Market");
 }
 
@@ -832,16 +899,6 @@ int main(int argc, char *argv[]) {
     VGA_hline(0, 639, COMP_Y0 - 1, gray);                            // full-width horizontal divider y=369
     VGA_vline(CANDLE_X0 + CANDLE_W - 1, CHART_Y0, COMP_Y0 - 1, gray); // left/right vertical split
     VGA_vline(DEPTH_X0 + DEPTH_W / 2, DEPTH_Y0, DEPTH_Y1, gray);    // depth centre spine
-
-    // Depth axis labels
-    {
-        char buf[8]; int prices[4] = {100,200,300,399}; int ii;
-        for (ii = 0; ii < 4; ii++) {
-            int gy = depth_price_to_y(prices[ii]);
-            sprintf(buf, "%-3d", prices[ii]);
-            VGA_text(76, gy >> 3, buf);
-        }
-    }
 
     // Composition labels
     {
