@@ -348,7 +348,7 @@ output           HPS_USB_STP;
 //  REG/WIRE declarations
 //=======================================================
 
-wire			[23: 0]	hex5_hex0;
+wire [23:0] hex5_hex0;
 
 HexDigit Digit0(HEX0, hex5_hex0[3:0]);
 HexDigit Digit1(HEX1, hex5_hex0[7:4]);
@@ -357,37 +357,117 @@ HexDigit Digit3(HEX3, hex5_hex0[15:12]);
 HexDigit Digit4(HEX4, hex5_hex0[19:16]);
 HexDigit Digit5(HEX5, hex5_hex0[23:20]);
 
-// Agent param memory wires
+// Agent parameter memory flat buses
 wire [16*10-1:0] agent_param_rd_addr;
 wire [16*32-1:0] agent_param_rd_data;
-// Per-agent read signals unpacked from the flat buses
-wire [9:0]  agent_addr   [0:15];
-wire [31:0] agent_rdata  [0:15];
+
+// Per-agent unpacked read signals
+wire [ 9:0] agent_addr  [0:15];
+wire [31:0] agent_rdata [0:15];
 
 genvar i;
 generate
     for (i = 0; i < 16; i = i + 1) begin : gen_agent_wires
-        assign agent_addr[i] = agent_param_rd_addr[i*10 +: 10];
+        assign agent_addr[i]                    = agent_param_rd_addr[i*10 +: 10];
         assign agent_param_rd_data[i*32 +: 32] = agent_rdata[i];
     end
 endgenerate
 
+// -------------------------------------------------------
+// Market simulator interconnect wires
+// -------------------------------------------------------
+
+// Active-low reset from KEY[0]; holding KEY[0] asserts reset
+wire core_rst_n = KEY[0];
+
+// Active agent count from slide switches
+wire [15:0] active_agent_count = {6'd0, SW};
+
+// Param loader tied off — no PIO wired through Qsys yet
+wire        param_wr_en   = 1'b0;
+wire [15:0] param_wr_addr = 16'd0;
+wire [31:0] param_wr_data = 32'd0;
+
+// Order bus between order_gen_top and matching_engine
+wire [31:0] order_packet;
+wire        gen_order_valid;
+wire        me_order_ready;
+
+// Matching engine scalar outputs
+wire [31:0] me_trade_price;
+wire [15:0] me_trade_quantity;
+wire        me_trade_side;
+wire        me_trade_valid;
+wire [31:0] me_last_executed_price;
+wire        me_last_executed_price_valid;
+wire [31:0] me_best_bid_price;
+wire [15:0] me_best_bid_quantity;
+wire        me_best_bid_valid;
+wire [31:0] me_best_ask_price;
+wire [15:0] me_best_ask_quantity;
+wire        me_best_ask_valid;
+
+// Matching engine retire bus
+wire        me_order_retire_valid;
+wire [15:0] me_order_retire_trade_count;
+wire [15:0] me_order_retire_fill_quantity;
+wire [ 1:0] me_order_retire_agent_type;
+
+// Depth tap between matching_engine and orderbook_writer
+wire [ 8:0] depth_rd_addr;
+wire [15:0] me_bid_depth_rd_data;
+wire [15:0] me_ask_depth_rd_data;
+
+// Orderbook M10K write port (driven by orderbook_writer, read by Qsys s1)
+wire [ 9:0] ob_mem_addr;
+wire        ob_mem_write;
+wire [31:0] ob_mem_writedata;
+
+// Injection debug bus from order_gen_top
+wire [31:0] inject_packet;
+wire        inject_trigger;
+wire [31:0] inject_count;
+wire        inject_active;
+
+// -------------------------------------------------------
+// AnalogClock divider
+// ~100 snapshots/sec at 50 MHz — used only by orderbook_writer.
+// Orders are no longer gated by this clock; the engine
+// handshake (order_ready) controls pacing instead.
+// -------------------------------------------------------
+localparam [29:0] SPEED = 30'd500_000;
+
+reg  [29:0] counter;
+wire        AnalogClock;
+
+always @(posedge CLOCK_50) begin
+    if (!core_rst_n || counter >= SPEED)
+        counter <= 30'd0;
+    else
+        counter <= counter + 30'd1;
+end
+
+assign AnalogClock = (counter == 30'd0);
+
 //=======================================================
-//  Structural coding - Qsys Computer_System
+//  Module instantiations
 //=======================================================
 
+// -------------------------------------------------------
+// Qsys Computer_System
+// -------------------------------------------------------
 Computer_System The_System (
 	////////////////////////////////////
 	// FPGA Side
 	////////////////////////////////////
 
-	// Global signals
 	.system_pll_ref_clk_clk         (CLOCK_50),
-	.system_pll_ref_reset_reset     (1'b0),
+	.system_pll_ref_reset_reset      (1'b0),
 
 	////////////////////////////////////
 	// HPS Side
 	////////////////////////////////////
+
 	// DDR3 SDRAM
 	.memory_mem_a          (HPS_DDR3_ADDR),
 	.memory_mem_ba         (HPS_DDR3_BA),
@@ -405,7 +485,7 @@ Computer_System The_System (
 	.memory_mem_odt        (HPS_DDR3_ODT),
 	.memory_mem_dm         (HPS_DDR3_DM),
 	.memory_oct_rzqin      (HPS_DDR3_RZQ),
-	
+
 	// SDRAM
 	.sdram_clk_clk      (DRAM_CLK),
 	.sdram_addr         (DRAM_ADDR),
@@ -417,16 +497,15 @@ Computer_System The_System (
 	.sdram_dqm          ({DRAM_UDQM, DRAM_LDQM}),
 	.sdram_ras_n        (DRAM_RAS_N),
 	.sdram_we_n         (DRAM_WE_N),
-	
+
 	// Shared On-Chip Memory for Orderbook (exported from Qsys)
 	.orderbook_mem_address    (ob_mem_addr),
 	.orderbook_mem_write      (ob_mem_write),
 	.orderbook_mem_writedata  (ob_mem_writedata),
-	.orderbook_mem_chipselect (1'b1),        
-	.orderbook_mem_clken      (1'b1),        
-	.orderbook_mem_byteenable (4'b1111), 
+	.orderbook_mem_chipselect (1'b1),
+	.orderbook_mem_clken      (1'b1),
+	.orderbook_mem_byteenable (4'b1111),
 	.orderbook_mem_readdata   (),
-
 
 	// Agent 0
 	.agent_0_address    (agent_addr[0]),
@@ -556,7 +635,7 @@ Computer_System The_System (
 	.agent_15_writedata  (32'd0),
 	.agent_15_byteenable (4'b1111),
 	.agent_15_readdata   (agent_rdata[15]),
-	
+
 	// Ethernet
 	.hps_io_hps_io_gpio_inst_GPIO35  (HPS_ENET_INT_N),
 	.hps_io_hps_io_emac1_inst_TX_CLK (HPS_ENET_GTX_CLK),
@@ -648,72 +727,9 @@ Computer_System The_System (
 	.vga_B                   (VGA_B)
 );
 
-// Derives the market simulator's active-low reset directly from KEY[0]; holding KEY[0] asserts reset.
-wire core_rst_n = KEY[0];
-
-// Configures the round-robin slot count from the slide switches; the parameter loader inputs stay tied off until a
-// PIO is wired through Qsys.
-wire [15:0] active_agent_count = {6'd0, SW};
-wire        param_wr_en        = 1'b0;
-wire [15:0] param_wr_addr      = 16'd0;
-wire [31:0] param_wr_data      = 32'd0;
-
-// Carries the order packet and the valid/ready handshake between order generation and the matching engine.
-// gen_order_valid is order_gen_top's raw output and me_order_ready is matching_engine's raw output.
-wire [31:0] order_packet;
-wire        gen_order_valid;
-wire        me_order_ready;
-wire        order_valid_tick;
-wire        order_ready_tick;
-
-// Captures every matching engine output. Only last_executed_price feeds back into order generation; the rest stay as
-// named wires so future visualization or logging blocks can pick them up.
-wire [31:0] me_trade_price;
-wire [15:0] me_trade_quantity;
-wire        me_trade_side;
-wire        me_trade_valid;
-wire [31:0] me_last_executed_price;
-wire        me_last_executed_price_valid;
-wire [31:0] me_best_bid_price;
-wire [15:0] me_best_bid_quantity;
-wire        me_best_bid_valid;
-wire [31:0] me_best_ask_price;
-wire [15:0] me_best_ask_quantity;
-wire        me_best_ask_valid;
-wire        me_order_retire_valid;
-wire [15:0] me_order_retire_trade_count;
-wire [15:0] me_order_retire_fill_quantity;
-wire [1:0]  me_order_retire_agent_type;
-wire [31:0] gbm_sigma;
-
-
-wire [15:0] me_bid_depth_rd_data;
-wire [15:0] me_ask_depth_rd_data;
-
-localparam [29:0] speed = 30'd500_000;  // ~100 trades/sec at 50 MHz; will be HPS-tunable via a control PIO later.
-
-reg  [29:0] counter;
-wire        AnalogClock;
-
-always @(posedge CLOCK_50) begin
-	if (!core_rst_n || counter >= speed)
-		counter <= 30'd0;
-	else
-		counter <= counter + 30'd1;
-end
-
-assign AnalogClock      = (counter == 30'd0);
-assign order_valid_tick = gen_order_valid & AnalogClock;
-assign order_ready_tick = me_order_ready  & AnalogClock;
-
-
-// Generates orders by composing the ziggurat Gaussian, the GBM price source, the agent units, and
-// the round-robin arbiter; presents the resulting packet on the valid/ready bus.
-wire [31:0] inject_packet;
-wire        inject_trigger;
-wire [31:0] inject_count;
-wire        inject_active;
-
+// -------------------------------------------------------
+// Order generator
+// -------------------------------------------------------
 order_gen_top u_order_gen (
     .clk                 (CLOCK_50),
     .rst_n               (core_rst_n),
@@ -722,53 +738,123 @@ order_gen_top u_order_gen (
     .active_agent_count  (active_agent_count),
     .param_rd_addr       (agent_param_rd_addr),
     .param_rd_data       (agent_param_rd_data),
-    
     .order_packet        (order_packet),
-    .order_valid         (gen_order_valid), 
-    .order_ready         (me_order_ready),   
-    
+    .order_valid         (gen_order_valid),
+    .order_ready         (me_order_ready),
     .inject_packet       (inject_packet),
     .inject_trigger      (inject_trigger),
     .inject_count        (inject_count),
     .inject_active       (inject_active)
 );
 
-// Matches each accepted order through the three-stage pipeline over the two no-cancellation price level stores and
-// republishes trade and top-of-book observations. Sees order_valid_tick instead of the raw generator valid so it only
-// admits orders on AnalogClock cycles; both endpoints therefore agree the handshake is complete only on those cycles.
-matching_engine u_matching_engine (
-	.clk                        (CLOCK_50),
-	.rst_n                      (core_rst_n),
-	.order_packet               (order_packet),
-	.order_valid                (order_valid_tick),
-	.order_ready                (me_order_ready),
-	.trade_price                (me_trade_price),
-	.trade_quantity             (me_trade_quantity),
-	.trade_side                 (me_trade_side),
-	.trade_valid                (me_trade_valid),
-	.last_executed_price        (me_last_executed_price),
-	.last_executed_price_valid  (me_last_executed_price_valid),
-	.best_bid_price             (me_best_bid_price),
-	.best_bid_quantity          (me_best_bid_quantity),
-	.best_bid_valid             (me_best_bid_valid),
-	.best_ask_price             (me_best_ask_price),
-	.best_ask_quantity          (me_best_ask_quantity),
-	.best_ask_valid             (me_best_ask_valid),
-	.order_retire_valid         (me_order_retire_valid),
-	.order_retire_agent_type    (me_order_retire_agent_type),
-	.order_retire_trade_count   (me_order_retire_trade_count),
-	.order_retire_fill_quantity (me_order_retire_fill_quantity),
-	.depth_rd_addr              (depth_rd_addr),
-	.bid_depth_rd_data          (me_bid_depth_rd_data),
-	.ask_depth_rd_data          (me_ask_depth_rd_data)
+//reg [2:0]  smoke_phase;
+//reg [31:0] smoke_packet_r;
+//reg        smoke_valid_r;
+//
+//localparam [31:0] PKT_BUY  = {1'b0, 1'b0, 2'b00, 3'b000, 9'd200, 16'd50};
+//localparam [31:0] PKT_SELL = {1'b1, 1'b0, 2'b00, 3'b000, 9'd200, 16'd50};
+//
+//always @(posedge CLOCK_50) begin
+//    if (!core_rst_n) begin
+//        smoke_phase    <= 3'd0;
+//        smoke_packet_r <= PKT_BUY;
+//        smoke_valid_r  <= 1'b0;
+//    end else begin
+//        case (smoke_phase)
+//
+//            // Wait for AnalogClock before first order
+//            // guarantees engine fully settled after reset
+//            3'd0: begin
+//                smoke_valid_r <= 1'b0;
+//                if (AnalogClock) smoke_phase <= 3'd1;
+//            end
+//
+//            // Present BUY, wait for accept
+//            3'd1: begin
+//                smoke_packet_r <= PKT_BUY;
+//                smoke_valid_r  <= 1'b1;
+//                if (smoke_valid_r && me_order_ready) begin
+//                    smoke_valid_r <= 1'b0;
+//                    smoke_phase   <= 3'd2;
+//                end
+//            end
+//
+//            // Wait for BUY retire (fully inserted into bid book)
+//            3'd2: begin
+//                smoke_valid_r <= 1'b0;
+//                if (me_order_retire_valid) smoke_phase <= 3'd3;
+//            end
+//
+//            // Present SELL, wait for accept
+//            3'd3: begin
+//                smoke_packet_r <= PKT_SELL;
+//                smoke_valid_r  <= 1'b1;
+//                if (smoke_valid_r && me_order_ready) begin
+//                    smoke_valid_r <= 1'b0;
+//                    smoke_phase   <= 3'd4;
+//                end
+//            end
+//
+//            // Wait for SELL retire (trade should have fired)
+//            3'd4: begin
+//                smoke_valid_r <= 1'b0;
+//                if (me_order_retire_valid) smoke_phase <= 3'd1;
+//            end
+//
+//            default: smoke_phase <= 3'd0;
+//        endcase
+//    end
+//end
+//
+//assign order_packet    = smoke_packet_r;
+//assign gen_order_valid = smoke_valid_r;
+//assign inject_active   = 1'b0;
+//assign agent_param_rd_addr = {(16*10){1'b0}};
+
+
+// -------------------------------------------------------
+// Matching engine
+// FIX: kPriceRange overridden to 400 to match orderbook_writer
+//      and C-side array layout [0..399] bid, [400..799] ask.
+//      Default was 480 which left ticks 400-479 invisible to HPS.
+// FIX: order_valid now connected directly to gen_order_valid
+//      (no AnalogClock gate). The handshake paces itself.
+// -------------------------------------------------------
+matching_engine #(
+    .kPriceRange    (400),
+    .kTickShiftBits (23)
+) u_matching_engine (
+    .clk                        (CLOCK_50),
+    .rst_n                      (core_rst_n),
+    .order_packet               (order_packet),
+    .order_valid                (gen_order_valid),
+    .order_ready                (me_order_ready),
+    .trade_price                (me_trade_price),
+    .trade_quantity             (me_trade_quantity),
+    .trade_side                 (me_trade_side),
+    .trade_valid                (me_trade_valid),
+    .last_executed_price        (me_last_executed_price),
+    .last_executed_price_valid  (me_last_executed_price_valid),
+    .best_bid_price             (me_best_bid_price),
+    .best_bid_quantity          (me_best_bid_quantity),
+    .best_bid_valid             (me_best_bid_valid),
+    .best_ask_price             (me_best_ask_price),
+    .best_ask_quantity          (me_best_ask_quantity),
+    .best_ask_valid             (me_best_ask_valid),
+    .order_retire_valid         (me_order_retire_valid),
+    .order_retire_agent_type    (me_order_retire_agent_type),
+    .order_retire_trade_count   (me_order_retire_trade_count),
+    .order_retire_fill_quantity (me_order_retire_fill_quantity),
+    .depth_rd_addr              (depth_rd_addr),
+    .bid_depth_rd_data          (me_bid_depth_rd_data),
+    .ask_depth_rd_data          (me_ask_depth_rd_data)
 );
 
-
-wire [9:0]  ob_mem_addr;
-wire        ob_mem_write;
-wire [31:0] ob_mem_writedata;
-
-
+// -------------------------------------------------------
+// Orderbook writer
+// Scans depth tap each AnalogClock cycle and writes the
+// full snapshot plus metadata into the shared M10K.
+// -------------------------------------------------------
 orderbook_writer u_ob_writer (
     .clk                        (CLOCK_50),
     .rst_n                      (core_rst_n),
@@ -782,12 +868,9 @@ orderbook_writer u_ob_writer (
     .best_bid_valid             (me_best_bid_valid),
     .best_ask_price             (me_best_ask_price),
     .best_ask_valid             (me_best_ask_valid),
-    
-    // The corrected Retire Bus for volume tracking
     .order_retire_valid         (me_order_retire_valid),
     .order_retire_agent_type    (me_order_retire_agent_type),
     .order_retire_fill_quantity (me_order_retire_fill_quantity),
-    
     .mem_address                (ob_mem_addr),
     .mem_write                  (ob_mem_write),
     .mem_writedata              (ob_mem_writedata),
@@ -797,72 +880,111 @@ orderbook_writer u_ob_writer (
 );
 
 
-// Drives the six HEX digits with the upper 24 bits of the most recent execution price (Q8.24). HEX5:HEX4 show the
-// integer byte, HEX3:HEX2 show the upper fractional byte, HEX1:HEX0 show the next fractional byte.
-assign hex5_hex0 = me_last_executed_price[31:8];
+reg [23:0] retire_count;
+reg        trade_ever;
 
-// Ties LEDR low so the LED bar pins have a defined driver; Quartus warns otherwise.
-assign LEDR = 10'd0;
+always @(posedge CLOCK_50) begin
+    if (!core_rst_n) begin
+        retire_count <= 24'd0;
+        trade_ever   <= 1'b0;
+    end else begin
+        if (me_order_retire_valid) retire_count <= retire_count + 24'd1;
+        if (me_trade_valid)        trade_ever   <= 1'b1;
+    end
+end
+
+// -------------------------------------------------------
+// HEX display — retire_count proves orders are cycling.
+// Once HEX is counting, swap to me_last_executed_price[31:8]
+// to verify tick 200 is executing (will show 0xC80000).
+// -------------------------------------------------------
+assign hex5_hex0 = retire_count;
+
+// LEDR debug:
+// [9]   trade_ever  — sticky, goes high after first trade ever
+// [8]   me_trade_valid — live pulse on every fill
+// [7:6] smoke_phase — watch it cycle 0->1->2->3->0
+// [5:0] retire_count[5:0] — low bits count retires
+assign LEDR = {trade_ever, me_trade_valid, 2'b00, retire_count[5:0]};
 
 endmodule
 
-///
-/// @file orderbook_writer.v
-/// @brief Scans the matching engine depth tap and metadata outputs and writes
-///        them into the shared orderbook M10K for HPS/VGA consumption.
-///
+
+///////////////////////////////////////////////////////////////////////////////
+// orderbook_writer
+//
+// Scans the matching engine depth tap and metadata outputs each AnalogClock
+// cycle and writes them into the shared orderbook M10K for HPS/VGA use.
+//
+// Memory layout (word addresses):
+//   [0   .. 399] bid quantities, one word per price tick
+//   [400 .. 799] ask quantities, one word per price tick
+//   [800]        last_executed_price (Q8.24)
+//   [801]        best_bid_price      (Q8.24)
+//   [802]        best_ask_price      (Q8.24)
+//   [803]        cumulative_volume
+//   [804]        frame_counter
+//   [805]        noise_volume
+//   [806]        mm_volume
+//   [807]        momentum_volume
+//   [808]        value_volume
+///////////////////////////////////////////////////////////////////////////////
 module orderbook_writer #(
     parameter kPriceRange    = 400,
     parameter kTickShiftBits = 23
 )(
     input  wire        clk,
     input  wire        rst_n,
-    input  wire        analog_clock,       ///< AnalogClock pulse — one per admitted order cycle.
-    
+    input  wire        analog_clock,
+
     // Matching engine depth tap
     output reg  [8:0]  depth_rd_addr,
     input  wire [15:0] bid_depth_rd_data,
     input  wire [15:0] ask_depth_rd_data,
-    
+
     // Matching engine scalar outputs
-    input  wire [31:0] last_executed_price,       ///< Q8.24
+    input  wire [31:0] last_executed_price,
     input  wire        last_executed_price_valid,
-    input  wire [31:0] best_bid_price,            ///< raw tick
+    input  wire [31:0] best_bid_price,
     input  wire        best_bid_valid,
-    input  wire [31:0] best_ask_price,            ///< raw tick
+    input  wire [31:0] best_ask_price,
     input  wire        best_ask_valid,
-    
-    // Matching engine retire bus (Pipeline-safe volume tracking)
+
+    // Retire bus
     input  wire        order_retire_valid,
-    input  wire [1:0]  order_retire_agent_type,
+    input  wire [ 1:0] order_retire_agent_type,
     input  wire [15:0] order_retire_fill_quantity,
-    
+
     // Orderbook M10K s1 port
-    output reg  [9:0]  mem_address,
+    output reg  [ 9:0] mem_address,
     output reg         mem_write,
     output reg  [31:0] mem_writedata,
     output wire        mem_chipselect,
     output wire        mem_clken,
-    output wire [3:0]  mem_byteenable
+    output wire [ 3:0] mem_byteenable
 );
+
     assign mem_chipselect = 1'b1;
     assign mem_clken      = 1'b1;
     assign mem_byteenable = 4'b1111;
 
     // FSM states
-    localparam [2:0] kStateScanSetup  = 3'd0; 
-    localparam [2:0] kStateScanRead   = 3'd1; 
-    localparam [2:0] kStateScanAsk    = 3'd2; 
-    localparam [2:0] kStateMetaWrite  = 3'd3; 
-    localparam [2:0] kStateDone       = 3'd4; 
+    localparam [2:0] kStateDone       = 3'd0;
+    localparam [2:0] kStateScanSetup  = 3'd1;
+    localparam [2:0] kStateScanRead   = 3'd2;
+    localparam [2:0] kStateScanAsk    = 3'd3;
+    localparam [2:0] kStateMetaWrite  = 3'd4;
 
     reg [2:0]  state;
-    reg [8:0]  scan_addr;  
-    reg [3:0]  meta_idx;   
+    reg [8:0]  scan_addr;
+    reg [3:0]  meta_idx;
 
+    // FIX: latch both bid and ask in kStateScanRead so ask_depth_rd_data
+    // is captured while depth_rd_addr is still stable for that tick.
     reg [15:0] latched_bid;
+    reg [15:0] latched_ask;
 
-    // Cumulative Volume Counters (Replaced Claude's trade counters)
+    // Cumulative volume counters per agent type
     reg [31:0] cumulative_volume;
     reg [31:0] frame_counter;
     reg [31:0] noise_volume;
@@ -870,7 +992,7 @@ module orderbook_writer #(
     reg [31:0] momentum_volume;
     reg [31:0] value_volume;
 
-    // Latch last executed price and best prices when valid
+    // Price latches — updated whenever the matching engine asserts valid
     reg [31:0] last_exec_latch;
     reg [31:0] best_bid_latch;
     reg [31:0] best_ask_latch;
@@ -890,7 +1012,7 @@ module orderbook_writer #(
         end
     end
 
-    // Volume snooping — accumulate volume per agent type on the safe retire bus
+    // Volume accumulation on the retire bus
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             cumulative_volume <= 32'd0;
@@ -909,7 +1031,7 @@ module orderbook_writer #(
         end
     end
 
-    // Main scan FSM — synchronized to AnalogClock
+    // Main scan FSM
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             state         <= kStateDone;
@@ -921,10 +1043,13 @@ module orderbook_writer #(
             mem_writedata <= 32'd0;
             frame_counter <= 32'd0;
             latched_bid   <= 16'd0;
+            latched_ask   <= 16'd0;
         end else begin
-            mem_write <= 1'b0; // default deassert
+            mem_write <= 1'b0; // default deassert each cycle
 
             case (state)
+
+                // Wait for AnalogClock; one full scan per admitted-order cycle
                 kStateDone: begin
                     if (analog_clock) begin
                         frame_counter <= frame_counter + 32'd1;
@@ -934,21 +1059,28 @@ module orderbook_writer #(
                     end
                 end
 
+                // Present address to the synchronous M10K read port;
+                // data will be valid on the following cycle
                 kStateScanSetup: begin
                     state <= kStateScanRead;
                 end
 
+                // FIX: latch BOTH bid and ask here — both are valid outputs
+                // from the same depth_rd_addr presented in kStateScanSetup.
+                // Writing bid immediately; ask is written next cycle from latch.
                 kStateScanRead: begin
                     latched_bid   <= bid_depth_rd_data;
-                    mem_address   <= {1'b0, scan_addr}; 
+                    latched_ask   <= ask_depth_rd_data;   // FIX: was read in kStateScanAsk (stale)
+                    mem_address   <= {1'b0, scan_addr};
                     mem_writedata <= {16'd0, bid_depth_rd_data};
                     mem_write     <= 1'b1;
                     state         <= kStateScanAsk;
                 end
 
+                // Write ask side from latch; advance scan or move to metadata
                 kStateScanAsk: begin
                     mem_address   <= 10'd400 + {1'b0, scan_addr};
-                    mem_writedata <= {16'd0, ask_depth_rd_data};
+                    mem_writedata <= {16'd0, latched_ask};   // FIX: use latched value
                     mem_write     <= 1'b1;
 
                     if (scan_addr == kPriceRange - 1) begin
@@ -961,6 +1093,7 @@ module orderbook_writer #(
                     end
                 end
 
+                // Write 9 metadata words (indices 0-8) sequentially
                 kStateMetaWrite: begin
                     mem_write <= 1'b1;
                     case (meta_idx)
@@ -975,15 +1108,15 @@ module orderbook_writer #(
                         default: begin mem_address <= 10'd808; mem_writedata <= value_volume;   end
                     endcase
 
-                    if (meta_idx == 4'd8) begin
+                    if (meta_idx == 4'd8)
                         state <= kStateDone;
-                    end else begin
+                    else
                         meta_idx <= meta_idx + 4'd1;
-                    end
                 end
 
                 default: state <= kStateDone;
             endcase
         end
     end
+
 endmodule
