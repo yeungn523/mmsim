@@ -10,6 +10,14 @@
 /// fill. Stage C commits any unmatched limit remainder via a single INSERT to the same-side book. The B-to-C handoff
 /// register lets Stage B start the next packet while Stage C is still committing the previous one.
 ///
+/// Order packet layout (must match agent_execution_unit.v):
+///   bit  [31]       side        (0 = buy, 1 = sell)
+///   bit  [30]       order_type  (0 = limit, 1 = market)
+///   bits [29:28]    agent_type  (unused by the engine)
+///   bits [27:25]    reserved
+///   bits [24:16]    price       (9-bit tick index, 0..kPriceRange-1)
+///   bits [15:0]     volume      (16-bit unsigned share count)
+///
 
 module matching_engine #(
     parameter kPriceWidth      = 32,    ///< Bit width of the internal price field.
@@ -407,6 +415,7 @@ module matching_engine #(
                 b_to_c_is_buy        <= b_working_is_buy;
                 b_to_c_trade_count   <= b_packet_trade_count;
                 b_to_c_fill_quantity <= b_packet_fill_quantity;
+					 b_to_c_agent_type    <= b_working_agent_type;
             end
         end
     end
