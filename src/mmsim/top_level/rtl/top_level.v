@@ -747,79 +747,7 @@ order_gen_top u_order_gen (
     .inject_active       (inject_active)
 );
 
-//reg [2:0]  smoke_phase;
-//reg [31:0] smoke_packet_r;
-//reg        smoke_valid_r;
-//
-//localparam [31:0] PKT_BUY  = {1'b0, 1'b0, 2'b00, 3'b000, 9'd200, 16'd50};
-//localparam [31:0] PKT_SELL = {1'b1, 1'b0, 2'b00, 3'b000, 9'd200, 16'd50};
-//
-//always @(posedge CLOCK_50) begin
-//    if (!core_rst_n) begin
-//        smoke_phase    <= 3'd0;
-//        smoke_packet_r <= PKT_BUY;
-//        smoke_valid_r  <= 1'b0;
-//    end else begin
-//        case (smoke_phase)
-//
-//            // Wait for AnalogClock before first order
-//            // guarantees engine fully settled after reset
-//            3'd0: begin
-//                smoke_valid_r <= 1'b0;
-//                if (AnalogClock) smoke_phase <= 3'd1;
-//            end
-//
-//            // Present BUY, wait for accept
-//            3'd1: begin
-//                smoke_packet_r <= PKT_BUY;
-//                smoke_valid_r  <= 1'b1;
-//                if (smoke_valid_r && me_order_ready) begin
-//                    smoke_valid_r <= 1'b0;
-//                    smoke_phase   <= 3'd2;
-//                end
-//            end
-//
-//            // Wait for BUY retire (fully inserted into bid book)
-//            3'd2: begin
-//                smoke_valid_r <= 1'b0;
-//                if (me_order_retire_valid) smoke_phase <= 3'd3;
-//            end
-//
-//            // Present SELL, wait for accept
-//            3'd3: begin
-//                smoke_packet_r <= PKT_SELL;
-//                smoke_valid_r  <= 1'b1;
-//                if (smoke_valid_r && me_order_ready) begin
-//                    smoke_valid_r <= 1'b0;
-//                    smoke_phase   <= 3'd4;
-//                end
-//            end
-//
-//            // Wait for SELL retire (trade should have fired)
-//            3'd4: begin
-//                smoke_valid_r <= 1'b0;
-//                if (me_order_retire_valid) smoke_phase <= 3'd1;
-//            end
-//
-//            default: smoke_phase <= 3'd0;
-//        endcase
-//    end
-//end
-//
-//assign order_packet    = smoke_packet_r;
-//assign gen_order_valid = smoke_valid_r;
-//assign inject_active   = 1'b0;
-//assign agent_param_rd_addr = {(16*10){1'b0}};
 
-
-// -------------------------------------------------------
-// Matching engine
-// FIX: kPriceRange overridden to 400 to match orderbook_writer
-//      and C-side array layout [0..399] bid, [400..799] ask.
-//      Default was 480 which left ticks 400-479 invisible to HPS.
-// FIX: order_valid now connected directly to gen_order_valid
-//      (no AnalogClock gate). The handshake paces itself.
-// -------------------------------------------------------
 matching_engine #(
     .kPriceRange    (400),
     .kTickShiftBits (23)
@@ -850,11 +778,7 @@ matching_engine #(
     .ask_depth_rd_data          (me_ask_depth_rd_data)
 );
 
-// -------------------------------------------------------
-// Orderbook writer
-// Scans depth tap each AnalogClock cycle and writes the
-// full snapshot plus metadata into the shared M10K.
-// -------------------------------------------------------
+
 orderbook_writer u_ob_writer (
     .clk                        (CLOCK_50),
     .rst_n                      (core_rst_n),
@@ -895,16 +819,8 @@ end
 
 // -------------------------------------------------------
 // HEX display — retire_count proves orders are cycling.
-// Once HEX is counting, swap to me_last_executed_price[31:8]
-// to verify tick 200 is executing (will show 0xC80000).
 // -------------------------------------------------------
 assign hex5_hex0 = retire_count;
-
-// LEDR debug:
-// [9]   trade_ever  — sticky, goes high after first trade ever
-// [8]   me_trade_valid — live pulse on every fill
-// [7:6] smoke_phase — watch it cycle 0->1->2->3->0
-// [5:0] retire_count[5:0] — low bits count retires
 assign LEDR = {trade_ever, me_trade_valid, 2'b00, retire_count[5:0]};
 
 endmodule
@@ -1005,9 +921,9 @@ module orderbook_writer #(
         end else begin
             if (last_executed_price_valid)
                 last_exec_latch <= last_executed_price;
-            if (best_bid_valid)
+				if (best_bid_valid && best_bid_price != 0)
                 best_bid_latch  <= best_bid_price << kTickShiftBits;
-            if (best_ask_valid)
+            if (best_ask_valid && best_ask_price != 0)
                 best_ask_latch  <= best_ask_price << kTickShiftBits;
         end
     end
