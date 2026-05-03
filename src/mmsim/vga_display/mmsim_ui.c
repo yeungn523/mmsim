@@ -26,6 +26,8 @@
 #define SLOTS_PER_UNIT        1024
 #define AGENT_MEMORY_BASE     0x00010000
 #define AGENT_MEMORY_STRIDE   0x00001000
+#define KEY0_PIO_BASE         0x00020000
+#define GBM_ENABLE_PIO_BASE   0x00020010
 
 // Agent types
 #define TYPE_NOISE    0
@@ -33,12 +35,12 @@
 #define TYPE_MOMENTUM 2
 #define TYPE_VALUE    3
 
-#define PACK_AGENT(type, p1, p2, p3)                                                                       \
-    (((uint32_t) (type & 0x3) << 30) | ((uint32_t) (p1 & 0x3FF) << 20) | ((uint32_t) (p2 & 0x3FF) << 10) | \
-     ((uint32_t) (p3 & 0x3FF)))
+#define PACK_AGENT(type, p1, p2, p3)                                                                          \
+    (((uint32_t)(type & 0x3) << 30) | ((uint32_t)(p1 & 0x3FF) << 20) | ((uint32_t)(p2 & 0x3FF) << 10) |    \
+     ((uint32_t)(p3 & 0x3FF)))
 
 // VGA colors
-#define RGB(r, g, b)   ((short) (((r) << 11) | ((g) << 5) | (b)))
+#define RGB(r, g, b)   ((short)(((r) << 11) | ((g) << 5) | (b)))
 #define black          RGB(0, 0, 0)
 #define bright_green   RGB(0, 50, 0)
 #define dim_green      RGB(0, 25, 0)
@@ -106,7 +108,7 @@
 #define Q824_TO_TICK(x) ((x) >> 23)
 
 // FPGA orderbook memory
-static volatile uint32_t* fpga_orderbook = NULL;
+static volatile uint32_t *fpga_orderbook = NULL;
 static uint32_t orderbook_memory[1024];
 
 #define OB_BUY(i)          orderbook_memory[i]
@@ -129,58 +131,62 @@ static uint32_t previous_value_volume    = 0;
 // Candle + volume + composition state
 typedef struct
 {
-        uint32_t open;
-        uint32_t close;
-        uint32_t high;
-        uint32_t low;
-        int green;
+    uint32_t open;
+    uint32_t close;
+    uint32_t high;
+    uint32_t low;
+    int      green;
 } Candle;
 
-static Candle candles[MAXIMUM_CANDLES];
-static int candle_count       = 0;
-static int candle_head        = 0;
+static Candle   candles[MAXIMUM_CANDLES];
+static int      candle_count  = 0;
+static int      candle_head   = 0;
 static uint32_t current_open  = 0;
 static uint32_t current_high  = 0;
 static uint32_t current_low   = UINT32_MAX;
 static uint32_t current_close = 0;
-static int window_tick        = 0;
+static int      window_tick   = 0;
 static uint32_t open_price    = 200;
 static uint32_t last_frame    = 0xFFFFFFFF;
-static int axis_minimum       = 150;
-static int axis_maximum       = 250;
-static int last_label_rows[20];
-static int last_label_count = 0;
+static int      axis_minimum  = 150;
+static int      axis_maximum  = 250;
+static int      last_label_rows[20];
+static int      last_label_count = 0;
 
 static uint32_t volume_history[MAXIMUM_CANDLES];
-static int volume_head         = 0;
-static int volume_count        = 0;
+static int      volume_head    = 0;
+static int      volume_count   = 0;
 static uint32_t volume_maximum = 1;
 static uint32_t volume_at_open = 0;
 
 static uint8_t composition_history[COMPOSITION_MAXIMUM_COLUMNS][NUMBER_TRADER_TYPES];
-static int composition_head  = 0;
-static int composition_count = 0;
+static int     composition_head  = 0;
+static int     composition_count = 0;
 
 // Debug state
 static uint32_t debug_last_print_seconds = 0;
 static uint32_t debug_previous_frame     = 0;
 static uint32_t debug_previous_exec      = 0;
 static uint32_t debug_previous_volume    = 0;
-static int debug_first_trade             = 0;
+static int      debug_first_trade        = 0;
+
+// Volatility tracking: rolling 10-second price range
+static uint32_t price_history[10];
+static int      price_hist_idx   = 0;
+static int      price_hist_count = 0;
 
 // VGA pointers
-volatile unsigned int* vga_pixel_pointer = NULL;
-void* vga_pixel_virtual_base;
-volatile unsigned int* vga_character_pointer = NULL;
-void* vga_character_virtual_base;
+volatile unsigned int *vga_pixel_pointer     = NULL;
+void                  *vga_pixel_virtual_base;
+volatile unsigned int *vga_character_pointer = NULL;
+void                  *vga_character_virtual_base;
 
-#define VGA_PIXEL(x, y, color)                                                        \
-    do                                                                                \
-    {                                                                                 \
-        int* _p      = (int*) ((char*) vga_pixel_pointer + (((y) * 640 + (x)) << 1)); \
-        *(short*) _p = (color);                                                       \
-    }                                                                                 \
-    while (0)
+#define VGA_PIXEL(x, y, color)                                                         \
+    do                                                                                 \
+    {                                                                                  \
+        int *_p      = (int *)((char *)vga_pixel_pointer + (((y) * 640 + (x)) << 1)); \
+        *(short *)_p = (color);                                                        \
+    } while (0)
 
 // Returns a random integer in the inclusive range [minimum, maximum]
 uint32_t rand_range(uint32_t minimum, uint32_t maximum)
@@ -219,17 +225,17 @@ void VGA_box(int x1, int y1, int x2, int y2, short color)
 }
 
 // VGA text primitives
-void VGA_text(int x, int y, char* text)
+void VGA_text(int x, int y, char *text)
 {
-    volatile char* character_buffer = (char*) vga_character_pointer;
-    int offset                      = (y << 7) + x;
+    volatile char *character_buffer = (char *)vga_character_pointer;
+    int            offset           = (y << 7) + x;
     while (*text) character_buffer[offset++] = *text++;
 }
 
 void VGA_text_clear(void)
 {
-    int x, y;
-    volatile char* character_buffer = (char*) vga_character_pointer;
+    int            x, y;
+    volatile char *character_buffer = (char *)vga_character_pointer;
     for (y = 0; y < 60; y++)
         for (x = 0; x < 80; x++) character_buffer[(y << 7) + x] = ' ';
 }
@@ -254,7 +260,6 @@ static inline int depth_price_to_y(int price)
     return y;
 }
 
-// Copies the FPGA orderbook snapshot into local memory
 void read_fpga_snapshot(void)
 {
     int i;
@@ -268,34 +273,57 @@ void read_fpga_snapshot(void)
     orderbook_memory[806] = fpga_orderbook[806];
     orderbook_memory[807] = fpga_orderbook[807];
     orderbook_memory[808] = fpga_orderbook[808];
+
+    uint32_t best_bid = orderbook_memory[801];
+    uint32_t best_ask = orderbook_memory[802];
+    if (best_bid > 0 && best_ask > 0 && best_ask > best_bid)
+    {
+        for (i = 0; i < 400; i++)
+        {
+            // Bid strictly above best_ask is a stale scan artifact
+            if (orderbook_memory[i] > 0 && (uint32_t)i > best_ask)
+                orderbook_memory[i] = 0;
+            // Ask strictly below best_bid is a stale scan artifact
+            if (orderbook_memory[400 + i] > 0 && (uint32_t)i < best_bid)
+                orderbook_memory[400 + i] = 0;
+        }
+    }
 }
 
-// Prints rate-limited debug status (once per second)
+// Prints rate-limited debug status once per second including liquidity and volatility metrics.
+// OB_BEST_BID / OB_BEST_ASK are price tick indices; total_bid_qty / total_ask_qty are share counts.
+// Spread (ticks) and total resting shares are the primary liquidity proxies.
+// Volatility is approximated as the price range across the last 10 seconds.
 void debug_print_status(void)
 {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
-    uint32_t now_seconds = (uint32_t) ts.tv_sec;
+    uint32_t now_seconds = (uint32_t)ts.tv_sec;
     if (now_seconds == debug_last_print_seconds) return;
     debug_last_print_seconds = now_seconds;
 
     uint32_t frame  = OB_FRAME;
     uint32_t exec   = OB_EXEC;
-    uint32_t bid    = OB_BEST_BID;
-    uint32_t ask    = OB_BEST_ASK;
+    uint32_t bid    = OB_BEST_BID;   // price tick index of best resting bid
+    uint32_t ask    = OB_BEST_ASK;   // price tick index of best resting ask
     uint32_t volume = OB_VOLUME;
-    int bid_levels  = 0;
-    int ask_levels  = 0;
-    int j;
+    int      bid_levels = 0;
+    int      ask_levels = 0;
+    int      j;
+
+    // Count non-zero price levels and total resting shares on each side
+    uint32_t total_bid_qty = 0;
+    uint32_t total_ask_qty = 0;
     for (j = 0; j < 400; j++)
     {
-        if (OB_BUY(j) > 0) bid_levels++;
-        if (OB_SELL(j) > 0) ask_levels++;
+        if (OB_BUY(j) > 0)  { bid_levels++; total_bid_qty += OB_BUY(j);  }
+        if (OB_SELL(j) > 0) { ask_levels++; total_ask_qty += OB_SELL(j); }
     }
-    int frame_delta      = (int) (frame - debug_previous_frame);
+
+    int frame_delta      = (int)(frame - debug_previous_frame);
     debug_previous_frame = frame;
 
-    const char* exec_flag = "";
+    const char *exec_flag = "";
     if (exec != 0 && !debug_first_trade)
     {
         exec_flag         = "  <-- FIRST TRADE!";
@@ -305,42 +333,75 @@ void debug_print_status(void)
     {
         exec_flag = "  <-- price changed";
     }
-    debug_previous_exec     = exec;
-    const char* volume_flag = (volume != debug_previous_volume) ? "  <-- volume up" : "";
+    debug_previous_exec = exec;
+
+    const char *volume_flag = (volume != debug_previous_volume) ? "  <-- volume up" : "";
     debug_previous_volume   = volume;
 
-    printf("[t=%-5u] FRAME=%-8u (+%-4d/s)  EXEC=%-4u%s\n", now_seconds, frame, frame_delta, exec, exec_flag);
-    printf(
-        "          BID=%-4u  ASK=%-4u  SPREAD=%d  VOL=%-8u%s\n",
-        bid,
-        ask,
-        (ask > bid) ? (int) (ask - bid) : -1,
-        volume,
-        volume_flag
-    );
-    printf("          DEPTH: bid_levels=%-3d  ask_levels=%-3d\n", bid_levels, ask_levels);
-    printf("          RAW[800]=0x%08X  (>>23=%u)\n", fpga_orderbook[800], Q824_TO_TICK(fpga_orderbook[800]));
-    if (frame == 0) printf("  !! FRAME=0 - orderbook_writer not running. Check KEY[0].\n");
-    else if (frame_delta == 0) printf("  !! Frame stalled - FPGA may be in reset.\n");
+    // Update rolling 10-second price history for volatility estimate
+    if (exec > 0)
+    {
+        price_history[price_hist_idx] = exec;
+        price_hist_idx                = (price_hist_idx + 1) % 10;
+        if (price_hist_count < 10) price_hist_count++;
+    }
+    uint32_t p_min = price_history[0];
+    uint32_t p_max = price_history[0];
+    for (j = 1; j < price_hist_count; j++)
+    {
+        if (price_history[j] < p_min) p_min = price_history[j];
+        if (price_history[j] > p_max) p_max = price_history[j];
+    }
+    uint32_t volatility_range = (price_hist_count > 1) ? (p_max - p_min) : 0;
+
+    // Spread in ticks between best bid and best ask price indices
+    int spread = (ask > bid) ? (int)(ask - bid) : -1;
+
+    printf("[t=%-5u] FRAME=%-8u (+%-4d/s)  EXEC=%-4u%s\n",
+           now_seconds, frame, frame_delta, exec, exec_flag);
+    printf("          BID=%-4u(tick)  ASK=%-4u(tick)  SPREAD=%d ticks  VOL=%-8u%s\n",
+           bid, ask, spread, volume, volume_flag);
+    printf("          DEPTH: bid_levels=%-3d bid_shares=%-8u  ask_levels=%-3d ask_shares=%-8u\n",
+           bid_levels, total_bid_qty, ask_levels, total_ask_qty);
+    printf("          LIQUIDITY: spread=%-3d ticks  total_resting=%-8u shares\n",
+           spread, total_bid_qty + total_ask_qty);
+    printf("          VOLATILITY: 10s price range = %u ticks\n", volatility_range);
+    printf("          RAW[800]=0x%08X  (>>23=%u)\n",
+           fpga_orderbook[800], Q824_TO_TICK(fpga_orderbook[800]));
+
+    if (frame == 0)
+        printf("  !! FRAME=0 - orderbook_writer not running. Check KEY[0].\n");
+    else if (frame_delta == 0)
+        printf("  !! Frame stalled - FPGA may be in reset.\n");
     else if (exec == 0 && bid_levels == 0 && ask_levels == 0)
         printf("  !! No depth, no exec - BUY never reached price_level_store.\n");
     else if (exec == 0 && (bid_levels > 0 || ask_levels > 0))
         printf("  !! Depth exists but no exec - orders not crossing.\n");
-    else if (exec > 0) printf("  OK: Trades firing. VGA rendering.\n");
+    else if (exec > 0)
+    {
+        // Liquidity quality hints
+        if (spread <= 3 && (total_bid_qty + total_ask_qty) > 50000)
+            printf("  OK: Trades firing. Book is LIQUID (tight spread, deep).\n");
+        else if (spread > 10)
+            printf("  OK: Trades firing. WIDE SPREAD (%d ticks) - book is thin.\n", spread);
+        else
+            printf("  OK: Trades firing. VGA rendering.\n");
+    }
     printf("\n");
     fflush(stdout);
 }
 
-// Renders the top status bar
+// Renders the top status bar with ticker, last price, bid/ask ticks, spread, and volume
 void render_topbar(void)
 {
-    char buffer[80];
-    uint32_t exec      = OB_EXEC;
-    uint32_t bid       = OB_BEST_BID;
-    uint32_t ask       = OB_BEST_ASK;
-    uint32_t volume    = OB_VOLUME;
-    int spread         = (int) ask - (int) bid;
-    int percent_tenths = (int) ((int) (exec - open_price) * 1000 / (int) (open_price ? open_price : 1));
+    char     buffer[80];
+    uint32_t exec          = OB_EXEC;
+    uint32_t bid           = OB_BEST_BID;  // price tick index
+    uint32_t ask           = OB_BEST_ASK;  // price tick index
+    uint32_t volume        = OB_VOLUME;
+    int      spread        = (int)ask - (int)bid;
+    int      percent_tenths =
+        (int)((int)(exec - open_price) * 1000 / (int)(open_price ? open_price : 1));
     VGA_text(1, 1, "NASDAQ:VHA");
     sprintf(buffer, "LAST:%-3u  %+d.%01d%%   ", exec, percent_tenths / 10, abs(percent_tenths % 10));
     VGA_text(14, 1, buffer);
@@ -348,11 +409,11 @@ void render_topbar(void)
     VGA_text(1, 2, buffer);
 }
 
-// Updates the candle chart Y-axis range
+// Updates the candle chart Y-axis range with smooth tracking
 void update_axis(void)
 {
-    int i, index, visible_minimum, visible_maximum, range, new_minimum, new_maximum, minimum_difference,
-        maximum_difference;
+    int i, index, visible_minimum, visible_maximum, range, new_minimum, new_maximum,
+        minimum_difference, maximum_difference;
     int n           = candle_count;
     visible_minimum = 999;
     visible_maximum = 0;
@@ -365,35 +426,37 @@ void update_axis(void)
     for (i = 0; i < n; i++)
     {
         index = (candle_head - n + i + MAXIMUM_CANDLES) % MAXIMUM_CANDLES;
-        if ((int) candles[index].low < visible_minimum) visible_minimum = (int) candles[index].low;
-        if ((int) candles[index].high > visible_maximum) visible_maximum = (int) candles[index].high;
+        if ((int)candles[index].low < visible_minimum)  visible_minimum = (int)candles[index].low;
+        if ((int)candles[index].high > visible_maximum) visible_maximum = (int)candles[index].high;
     }
     if (window_tick > 0)
     {
-        if ((int) current_low < visible_minimum) visible_minimum = (int) current_low;
-        if ((int) current_high > visible_maximum) visible_maximum = (int) current_high;
+        if ((int)current_low < visible_minimum)  visible_minimum = (int)current_low;
+        if ((int)current_high > visible_maximum) visible_maximum = (int)current_high;
     }
     range = visible_maximum - visible_minimum;
     if (range < 10) range = 10;
     {
         double total_range = range / (1.0 - CANDLE_TOP_MARGIN - CANDLE_BOTTOM_MARGIN);
-        new_minimum        = (int) (visible_minimum - total_range * CANDLE_BOTTOM_MARGIN);
-        new_maximum        = (int) (new_minimum + total_range);
+        new_minimum        = (int)(visible_minimum - total_range * CANDLE_BOTTOM_MARGIN);
+        new_maximum        = (int)(new_minimum + total_range);
     }
     minimum_difference = new_minimum - axis_minimum;
     maximum_difference = new_maximum - axis_maximum;
     if (minimum_difference != 0 && minimum_difference > -8 && minimum_difference < 8)
         axis_minimum += (minimum_difference > 0) ? 1 : -1;
-    else axis_minimum += minimum_difference / 8;
+    else
+        axis_minimum += minimum_difference / 8;
     if (maximum_difference != 0 && maximum_difference > -8 && maximum_difference < 8)
         axis_maximum += (maximum_difference > 0) ? 1 : -1;
-    else axis_maximum += maximum_difference / 8;
-    if (axis_minimum < -50) axis_minimum = -50;
-    if (axis_maximum > 450) axis_maximum = 450;
+    else
+        axis_maximum += maximum_difference / 8;
+    if (axis_minimum < -50)  axis_minimum = -50;
+    if (axis_maximum > 450)  axis_maximum = 450;
     if (axis_maximum - axis_minimum < 10) axis_maximum = axis_minimum + 10;
 }
 
-// Updates the active candle from FPGA exec price and rolls per-candle volume
+// Updates the active candle from FPGA exec price and rolls per-candle volume and composition
 void update_candle(void)
 {
     uint32_t price = OB_EXEC;
@@ -407,7 +470,7 @@ void update_candle(void)
         volume_at_open = OB_VOLUME;
     }
     if (price > current_high) current_high = price;
-    if (price < current_low) current_low = price;
+    if (price < current_low)  current_low  = price;
     current_close = price;
 
     if (++window_tick >= TICKS_PER_CANDLE)
@@ -420,10 +483,12 @@ void update_candle(void)
         candle.green         = (current_close >= current_open);
         candles[candle_head] = candle;
 
-        // Per-candle volume
+        // Per-candle volume with wrap-around protection
         {
-            uint32_t candle_volume      = (OB_VOLUME >= volume_at_open) ? (OB_VOLUME - volume_at_open)
-                                                                        : (0xFFFFFFFF - volume_at_open + OB_VOLUME + 1);
+            uint32_t candle_volume =
+                (OB_VOLUME >= volume_at_open)
+                    ? (OB_VOLUME - volume_at_open)
+                    : (0xFFFFFFFF - volume_at_open + OB_VOLUME + 1);
             volume_history[candle_head] = candle_volume;
             if (candle_volume >= volume_maximum)
             {
@@ -438,29 +503,30 @@ void update_candle(void)
             }
         }
 
-        // Trader composition
+        // Trader composition — diffs cumulative per-type volumes across the candle window
         {
-            uint32_t delta_noise     = OB_NOISE_VOLUME - previous_noise_volume;
-            uint32_t delta_mm        = OB_MM_VOLUME - previous_mm_volume;
-            uint32_t delta_momentum  = OB_MOMENTUM_VOLUME - previous_momentum_volume;
-            uint32_t delta_value     = OB_VALUE_VOLUME - previous_value_volume;
+            uint32_t delta_noise    = OB_NOISE_VOLUME    - previous_noise_volume;
+            uint32_t delta_mm       = OB_MM_VOLUME       - previous_mm_volume;
+            uint32_t delta_momentum = OB_MOMENTUM_VOLUME - previous_momentum_volume;
+            uint32_t delta_value    = OB_VALUE_VOLUME    - previous_value_volume;
             previous_noise_volume    = OB_NOISE_VOLUME;
             previous_mm_volume       = OB_MM_VOLUME;
             previous_momentum_volume = OB_MOMENTUM_VOLUME;
             previous_value_volume    = OB_VALUE_VOLUME;
-            uint32_t total           = delta_noise + delta_mm + delta_momentum + delta_value;
+            uint32_t total = delta_noise + delta_mm + delta_momentum + delta_value;
             if (total == 0)
             {
                 memset(composition_history[composition_head], 0, NUMBER_TRADER_TYPES);
             }
             else
             {
-                composition_history[composition_head][0] = (uint8_t) (delta_noise * 255 / total);
-                composition_history[composition_head][1] = (uint8_t) (delta_mm * 255 / total);
-                composition_history[composition_head][2] = (uint8_t) (delta_momentum * 255 / total);
-                composition_history[composition_head][3] = 255 - composition_history[composition_head][0] -
-                                                           composition_history[composition_head][1] -
-                                                           composition_history[composition_head][2];
+                composition_history[composition_head][0] = (uint8_t)(delta_noise    * 255 / total);
+                composition_history[composition_head][1] = (uint8_t)(delta_mm       * 255 / total);
+                composition_history[composition_head][2] = (uint8_t)(delta_momentum * 255 / total);
+                composition_history[composition_head][3] =
+                    255 - composition_history[composition_head][0]
+                        - composition_history[composition_head][1]
+                        - composition_history[composition_head][2];
             }
         }
 
@@ -468,9 +534,9 @@ void update_candle(void)
         composition_head = (composition_head + 1) % COMPOSITION_MAXIMUM_COLUMNS;
         volume_head      = candle_head;
 
-        if (candle_count < MAXIMUM_CANDLES) candle_count++;
+        if (candle_count < MAXIMUM_CANDLES)                candle_count++;
         if (composition_count < COMPOSITION_MAXIMUM_COLUMNS) composition_count++;
-        if (volume_count < MAXIMUM_CANDLES) volume_count++;
+        if (volume_count < MAXIMUM_CANDLES)                volume_count++;
 
         window_tick  = 0;
         current_high = 0;
@@ -478,16 +544,16 @@ void update_candle(void)
     }
 }
 
-// Renders candles with dynamic axis and area shading below the close line
+// Renders candles with dynamic axis and area shading below the close line.
 // Chart bottom = COMPOSITION_Y0-1 = 369
 void render_candles(void)
 {
     int i, index, x, y, g;
     char buffer[8];
-    int grid_step, grid_start, grid_p, n, start_x;
-    int new_label_rows[20];
-    int new_label_count = 0;
-    int chart_bottom    = COMPOSITION_Y0 - 1;  // 369
+    int  grid_step, grid_start, grid_p, n, start_x;
+    int  new_label_rows[20];
+    int  new_label_count = 0;
+    int  chart_bottom    = COMPOSITION_Y0 - 1;  // 369
 
     for (i = 0; i < last_label_count; i++) VGA_text(1, last_label_rows[i], "   ");
 
@@ -495,11 +561,11 @@ void render_candles(void)
     int grid_line_count = 0;
     {
         int range = axis_maximum - axis_minimum;
-        if (range < 20) grid_step = 5;
-        else if (range < 50) grid_step = 10;
+        if      (range < 20)  grid_step = 5;
+        else if (range < 50)  grid_step = 10;
         else if (range < 100) grid_step = 20;
         else if (range < 200) grid_step = 50;
-        else grid_step = 100;
+        else                  grid_step = 100;
         grid_start = ((axis_minimum / grid_step) + 1) * grid_step;
         for (grid_p = grid_start; grid_p < axis_maximum; grid_p += grid_step)
         {
@@ -521,39 +587,39 @@ void render_candles(void)
     n       = candle_count;
     start_x = (n < MAXIMUM_CANDLES) ? CANDLE_X0 : CANDLE_X0 + CANDLE_WIDTH - n * SLOT;
 
-    int candle_high[MAXIMUM_CANDLES];
-    int candle_low[MAXIMUM_CANDLES];
-    int candle_top[MAXIMUM_CANDLES];
-    int candle_bottom[MAXIMUM_CANDLES];
-    int candle_close_y[MAXIMUM_CANDLES];
+    int   candle_high[MAXIMUM_CANDLES];
+    int   candle_low[MAXIMUM_CANDLES];
+    int   candle_top[MAXIMUM_CANDLES];
+    int   candle_bottom[MAXIMUM_CANDLES];
+    int   candle_close_y[MAXIMUM_CANDLES];
     short candle_body_color[MAXIMUM_CANDLES];
     short candle_wick_color[MAXIMUM_CANDLES];
 
     for (i = 0; i < n; i++)
     {
         index             = (candle_head - n + i + MAXIMUM_CANDLES) % MAXIMUM_CANDLES;
-        Candle* candle    = &candles[index];
-        candle_high[i]    = candle_price_to_y((int) candle->high);
-        candle_low[i]     = candle_price_to_y((int) candle->low);
-        candle_close_y[i] = candle_price_to_y((int) candle->close);
-        int y_open        = candle_price_to_y((int) candle->open);
+        Candle *candle    = &candles[index];
+        candle_high[i]    = candle_price_to_y((int)candle->high);
+        candle_low[i]     = candle_price_to_y((int)candle->low);
+        candle_close_y[i] = candle_price_to_y((int)candle->close);
+        int y_open        = candle_price_to_y((int)candle->open);
         int y_close       = candle_close_y[i];
         candle_top[i]     = (y_open < y_close) ? y_open : y_close;
         candle_bottom[i]  = (y_open > y_close) ? y_open : y_close;
         if (candle_top[i] == candle_bottom[i]) candle_bottom[i] = candle_top[i] + 1;
-        if (candle_high[i] > chart_bottom) candle_high[i] = chart_bottom;
-        if (candle_low[i] > chart_bottom) candle_low[i] = chart_bottom;
-        if (candle_top[i] > chart_bottom) candle_top[i] = chart_bottom;
-        if (candle_bottom[i] > chart_bottom) candle_bottom[i] = chart_bottom;
+        if (candle_high[i]    > chart_bottom) candle_high[i]    = chart_bottom;
+        if (candle_low[i]     > chart_bottom) candle_low[i]     = chart_bottom;
+        if (candle_top[i]     > chart_bottom) candle_top[i]     = chart_bottom;
+        if (candle_bottom[i]  > chart_bottom) candle_bottom[i]  = chart_bottom;
         if (candle_close_y[i] > chart_bottom) candle_close_y[i] = chart_bottom;
-        candle_body_color[i] = candle->green ? dim_green : dim_red;
+        candle_body_color[i] = candle->green ? dim_green    : dim_red;
         candle_wick_color[i] = candle->green ? bright_green : bright_red;
     }
 
-    int current_close_y = candle_price_to_y((int) current_close);
+    int current_close_y = candle_price_to_y((int)current_close);
     if (current_close_y > chart_bottom) current_close_y = chart_bottom;
 
-    int exec_y = candle_price_to_y((int) OB_EXEC);
+    int exec_y = candle_price_to_y((int)OB_EXEC);
     if (exec_y > chart_bottom) exec_y = chart_bottom;
 
     for (y = CHART_Y0; y <= chart_bottom; y++)
@@ -561,11 +627,7 @@ void render_candles(void)
         int is_grid = 0;
         for (g = 0; g < grid_line_count; g++)
         {
-            if (y == grid_y_lines[g])
-            {
-                is_grid = 1;
-                break;
-            }
+            if (y == grid_y_lines[g]) { is_grid = 1; break; }
         }
 
         for (x = CANDLE_X0; x < CANDLE_X0 + CANDLE_WIDTH - 1; x++)
@@ -577,13 +639,14 @@ void render_candles(void)
                 int slot_index = (x - start_x) / SLOT;
                 if (slot_index >= 0 && slot_index < n)
                 {
-                    int x_current = start_x + slot_index * SLOT + BODY_WIDTH / 2;
-                    int y_current = candle_close_y[slot_index];
-                    int y_next    = (slot_index + 1 < n) ? candle_close_y[slot_index + 1] : current_close_y;
-                    int x_next    = x_current + SLOT;
-                    int delta_x   = x_next - x_current;
-                    int interpolated_y =
-                        (delta_x > 0) ? y_current + ((y_next - y_current) * (x - x_current)) / delta_x : y_current;
+                    int x_current      = start_x + slot_index * SLOT + BODY_WIDTH / 2;
+                    int y_current      = candle_close_y[slot_index];
+                    int y_next         = (slot_index + 1 < n) ? candle_close_y[slot_index + 1] : current_close_y;
+                    int x_next         = x_current + SLOT;
+                    int delta_x        = x_next - x_current;
+                    int interpolated_y = (delta_x > 0)
+                        ? y_current + ((y_next - y_current) * (x - x_current)) / delta_x
+                        : y_current;
                     if (interpolated_y > chart_bottom) interpolated_y = chart_bottom;
 
                     if (y == interpolated_y)
@@ -595,9 +658,9 @@ void render_candles(void)
                         int depth         = y - interpolated_y;
                         int maximum_depth = chart_bottom - interpolated_y;
                         if (maximum_depth < 1) maximum_depth = 1;
-                        if (depth < maximum_depth / 3) col = RGB(0, 4, 8);
-                        else if (depth < (maximum_depth * 2) / 3) col = RGB(0, 2, 5);
-                        else col = RGB(0, 1, 3);
+                        if      (depth < maximum_depth / 3)        col = RGB(0, 4, 8);
+                        else if (depth < (maximum_depth * 2) / 3)  col = RGB(0, 2, 5);
+                        else                                        col = RGB(0, 1, 3);
                     }
                 }
             }
@@ -617,7 +680,8 @@ void render_candles(void)
                     {
                         if (y >= candle_top[slot_index] && y <= candle_bottom[slot_index])
                             col = candle_body_color[slot_index];
-                        else if (slot_x == BODY_WIDTH / 2) col = candle_wick_color[slot_index];
+                        else if (slot_x == BODY_WIDTH / 2)
+                            col = candle_wick_color[slot_index];
                     }
                 }
                 if (col == black && is_grid) col = dark_gray;
@@ -630,7 +694,7 @@ void render_candles(void)
     VGA_vline(CANDLE_X0 + CANDLE_WIDTH - 1, CHART_Y0, chart_bottom, gray);
 }
 
-// Renders the volume histogram (bottom-left panel)
+// Renders the volume histogram (bottom-left panel).
 // Draws a scrolling bar chart aligned with candles, newest on right.
 void render_volume_histogram(void)
 {
@@ -659,11 +723,7 @@ void render_volume_histogram(void)
             int slot   = (x - VOLUME_X0) / SLOT;
             int slot_x = (x - VOLUME_X0) % SLOT;
 
-            if (slot_x == SLOT - 1)
-            {
-                VGA_PIXEL(x, y, black);
-                continue;
-            }
+            if (slot_x == SLOT - 1) { VGA_PIXEL(x, y, black); continue; }
 
             if (slot >= n)
             {
@@ -671,13 +731,13 @@ void render_volume_histogram(void)
                 continue;
             }
 
-            int history_index     = (volume_head - n + slot + MAXIMUM_CANDLES) % MAXIMUM_CANDLES;
-            uint32_t volume_value = volume_history[history_index];
-            int bar_fraction      = (int) (((uint64_t) volume_value * 255) / maximum_volume);
+            int      history_index = (volume_head - n + slot + MAXIMUM_CANDLES) % MAXIMUM_CANDLES;
+            uint32_t volume_value  = volume_history[history_index];
+            int      bar_fraction  = (int)(((uint64_t)volume_value * 255) / maximum_volume);
 
             if (y_fraction <= bar_fraction)
             {
-                int intensity = 10 + (int) (((uint64_t) volume_value * 53) / maximum_volume);
+                int intensity = 10 + (int)(((uint64_t)volume_value * 53) / maximum_volume);
                 VGA_PIXEL(x, y, RGB(0, intensity, intensity));
             }
             else if (is_ref && ((x >> 2) & 1))
@@ -693,12 +753,16 @@ void render_volume_histogram(void)
     VGA_hline(VOLUME_X0, VOLUME_X0 + VOLUME_WIDTH - 1, VOLUME_Y0, gray);
 }
 
-// Renders the stacked trader composition (bottom-right)
+// Renders the stacked trader composition chart (bottom-right).
+// Each column is one candle period; colors from bottom to top:
+// gray-green = noise, dark cyan = market maker, orange = momentum, purple = value.
 void render_composition(void)
 {
     int x, y;
-    int n                                                 = composition_count;
-    static const short trader_colors[NUMBER_TRADER_TYPES] = {color_noise, color_mm, color_momentum, color_value};
+    int n = composition_count;
+    static const short trader_colors[NUMBER_TRADER_TYPES] = {
+        color_noise, color_mm, color_momentum, color_value
+    };
     for (y = COMPOSITION_Y0; y <= COMPOSITION_Y1; y++)
     {
         int y_fraction = ((COMPOSITION_Y1 - y) * 255) / (COMPOSITION_HEIGHT - 1);
@@ -706,36 +770,27 @@ void render_composition(void)
         {
             int slot   = (x - COMPOSITION_X0) / COMPOSITION_COLUMN_WIDTH;
             int slot_x = (x - COMPOSITION_X0) % COMPOSITION_COLUMN_WIDTH;
-            if (slot_x == COMPOSITION_COLUMN_WIDTH - 1)
-            {
-                VGA_PIXEL(x, y, black);
-                continue;
-            }
-            if (slot >= n)
-            {
-                VGA_PIXEL(x, y, black);
-                continue;
-            }
+            if (slot_x == COMPOSITION_COLUMN_WIDTH - 1) { VGA_PIXEL(x, y, black); continue; }
+            if (slot >= n)                               { VGA_PIXEL(x, y, black); continue; }
             int history_index =
                 (composition_head - n + slot + COMPOSITION_MAXIMUM_COLUMNS) % COMPOSITION_MAXIMUM_COLUMNS;
-            int cumulative    = 0;
+            int   cumulative  = 0;
             short pixel_color = black;
-            int t;
+            int   t;
             for (t = 0; t < NUMBER_TRADER_TYPES; t++)
             {
                 cumulative += composition_history[history_index][t];
-                if (y_fraction <= cumulative)
-                {
-                    pixel_color = trader_colors[t];
-                    break;
-                }
+                if (y_fraction <= cumulative) { pixel_color = trader_colors[t]; break; }
             }
             VGA_PIXEL(x, y, pixel_color);
         }
     }
 }
 
-// Renders depth of market
+// Renders the depth of market histogram (top-right panel).
+// Bid (green) bars grow rightward from the centre spine; ask (red) bars grow leftward.
+// The visible price window tracks OB_EXEC with 1/8-speed smoothing to prevent flickering.
+// Each side is scaled independently so thin bid depth is still visible alongside deep asks.
 void render_depth(void)
 {
     int b, p, y, x;
@@ -747,17 +802,17 @@ void render_depth(void)
     static int smooth_center = 200;
     if (OB_EXEC > 0)
     {
-        int target = (int) OB_EXEC;
+        int target = (int)OB_EXEC;
         int diff   = target - smooth_center;
-        if (diff > 8) smooth_center += diff / 8;
+        if      (diff > 8)  smooth_center += diff / 8;
         else if (diff < -8) smooth_center += diff / 8;
         else if (diff != 0) smooth_center += (diff > 0) ? 1 : -1;
     }
 
     // Defines a dynamic window of +/-100 ticks around the smoothed centre.
-    int depth_view_minimum = smooth_center - 100;
-    int depth_view_maximum = smooth_center + 100;
-    if (depth_view_minimum < 0) depth_view_minimum = 0;
+    int depth_view_minimum = smooth_center - 150;
+    int depth_view_maximum = smooth_center + 150;
+    if (depth_view_minimum < 0)   depth_view_minimum = 0;
     if (depth_view_maximum > 399) depth_view_maximum = 399;
     int depth_view_range = depth_view_maximum - depth_view_minimum;
     if (depth_view_range < 10) depth_view_range = 10;
@@ -796,17 +851,18 @@ void render_depth(void)
             continue;
         }
         // Flips so top of panel maps to the highest price in window
-        int price_bin         = (DEPTH_BINS - 1) - bin_row;
+        int      price_bin    = (DEPTH_BINS - 1) - bin_row;
         uint32_t bid_quantity = bin_bid[price_bin];
         uint32_t ask_quantity = bin_ask[price_bin];
 
+        // Bid side — scaled independently so thin bids remain visible
         if (bid_quantity > 0)
         {
-            int bar_width = (int) ((double) bid_quantity / maximum_bid_quantity * half);
+            int bar_width   = (int)((double)bid_quantity / maximum_bid_quantity * half);
             if (bar_width < 1) bar_width = 1;
             if (bar_width > half) bar_width = half;
-            int green_value = 15 + (int) (((uint64_t) bid_quantity * 48) / maximum_bid_quantity);
-            short bid_color = RGB(0, green_value, 0);
+            int   green_value = 15 + (int)(((uint64_t)bid_quantity * 48) / maximum_bid_quantity);
+            short bid_color   = RGB(0, green_value, 0);
             for (x = DEPTH_X0; x < DEPTH_X0 + half; x++)
                 VGA_PIXEL(x, y, (x >= DEPTH_X0 + half - bar_width) ? bid_color : black);
         }
@@ -815,13 +871,13 @@ void render_depth(void)
             VGA_hline(DEPTH_X0, DEPTH_X0 + half - 1, y, black);
         }
 
-        // Ask side - uses maximum_ask_quantity
+        // Ask side — scaled independently so thin asks remain visible
         if (ask_quantity > 0)
         {
-            int bar_width = (int) ((double) ask_quantity / maximum_ask_quantity * half);
+            int bar_width = (int)((double)ask_quantity / maximum_ask_quantity * half);
             if (bar_width < 1) bar_width = 1;
             if (bar_width > half) bar_width = half;
-            int red_value   = 8 + (ask_quantity * 23) / maximum_ask_quantity;
+            int   red_value = 8 + (ask_quantity * 23) / maximum_ask_quantity;
             short ask_color = RGB(red_value, 0, 0);
             for (x = DEPTH_X0 + half; x < DEPTH_X0 + DEPTH_WIDTH; x++)
                 VGA_PIXEL(x, y, (x < DEPTH_X0 + half + bar_width) ? ask_color : black);
@@ -842,7 +898,7 @@ void render_depth(void)
 
     // Draws 4 price labels at 25% intervals of the visible window
     char buffer[8];
-    int label_prices[4];
+    int  label_prices[4];
     label_prices[0] = depth_view_minimum + (depth_view_range * 1) / 4;
     label_prices[1] = depth_view_minimum + (depth_view_range * 2) / 4;
     label_prices[2] = depth_view_minimum + (depth_view_range * 3) / 4;
@@ -862,86 +918,105 @@ void render_depth(void)
     VGA_text(40, 6, "Depth of Market");
 }
 
-// Renders the debug overlay (VGA character buffer, top-right corner)
+// Renders the frame counter, exec price, bid/ask ticks, spread, volume, and system status.
 void render_debug_overlay(void)
 {
     char buffer[48];
+    // Row 0: frame counter and exec price — unique info
     sprintf(buffer, "FRM:%-8u EXEC:%-4u    ", OB_FRAME, OB_EXEC);
     VGA_text(40, 0, buffer);
-    int spread = (OB_BEST_ASK > OB_BEST_BID) ? (int) (OB_BEST_ASK - OB_BEST_BID) : -1;
-    sprintf(buffer, "BID:%-4u ASK:%-4u SPR:%-3d  ", OB_BEST_BID, OB_BEST_ASK, spread);
-    VGA_text(40, 1, buffer);
-    sprintf(buffer, "VOL:%-10u            ", OB_VOLUME);
-    VGA_text(40, 2, buffer);
+    // Rows 1 and 2 removed — BID/ASK/SPR/VOL already shown in render_topbar
     sprintf(buffer, "RAW800:0x%08X       ", fpga_orderbook[800]);
-    VGA_text(40, 3, buffer);
-    if (OB_EXEC == 0 && OB_FRAME == 0) VGA_text(40, 4, "STATUS: NO FRAME - CHK RESET");
-    else if (OB_EXEC == 0) VGA_text(40, 4, "STATUS: WAITING FOR TRADE...");
-    else VGA_text(40, 4, "STATUS: TRADING OK          ");
+    VGA_text(40, 1, buffer);  // shift up to row 1
+    if (OB_EXEC == 0 && OB_FRAME == 0)
+        VGA_text(40, 2, "STATUS: NO FRAME - CHK RESET");
+    else if (OB_EXEC == 0)
+        VGA_text(40, 2, "STATUS: WAITING FOR TRADE...");
+    else
+        VGA_text(40, 2, "STATUS: TRADING OK          ");
 }
 
-int main(int argc, char* argv[])
+int main(int argc, char *argv[])
 {
     if (argc > 1)
     {
-        unsigned int seed = (unsigned int) atoi(argv[1]);
+        unsigned int seed = (unsigned int)atoi(argv[1]);
         srand(seed);
         printf("Using seed: %u\n", seed);
     }
     else
     {
-        unsigned int seed = (unsigned int) time(NULL);
+        unsigned int seed = (unsigned int)time(NULL);
         srand(seed);
         printf("Using random seed: %u\n", seed);
     }
 
     int fd = open("/dev/mem", O_RDWR | O_SYNC);
-    if (fd < 0)
+    if (fd < 0) { perror("open /dev/mem"); return 1; }
+
+    void *lw_base = mmap(NULL, LW_BRIDGE_SPAN, PROT_READ | PROT_WRITE, MAP_SHARED, fd, LW_BRIDGE_BASE);
+    if (lw_base == MAP_FAILED) { perror("mmap lw"); close(fd); return 1; }
+
+    vga_pixel_virtual_base =
+        mmap(NULL, SDRAM_SPAN, PROT_READ | PROT_WRITE, MAP_SHARED, fd, SDRAM_BASE);
+    if (vga_pixel_virtual_base == MAP_FAILED) { perror("mmap sdram"); return 1; }
+    vga_pixel_pointer = (unsigned int *)vga_pixel_virtual_base;
+
+    vga_character_virtual_base =
+        mmap(NULL, FPGA_CHAR_SPAN, PROT_READ | PROT_WRITE, MAP_SHARED, fd, FPGA_CHAR_BASE);
+    if (vga_character_virtual_base == MAP_FAILED) { perror("mmap char"); return 1; }
+    vga_character_pointer = (unsigned int *)vga_character_virtual_base;
+
+    fpga_orderbook = (volatile uint32_t *)((uint8_t *)lw_base + ORDERBOOK_MEMORY_BASE);
+
+    // Map PIO ports
+    volatile uint32_t *key0_pio =
+        (volatile uint32_t *)((uint8_t *)lw_base + KEY0_PIO_BASE);
+    volatile uint32_t *gbm_enable_pio =
+        (volatile uint32_t *)((uint8_t *)lw_base + GBM_ENABLE_PIO_BASE);
+
+    // Freeze GBM immediately — keep frozen until agents are written
+    *gbm_enable_pio = 0;
+
+    // VGA init — draw static chrome before waiting for KEY[0] so screen looks ready
+    VGA_box(0, 0, 639, 479, black);
+    VGA_text_clear();
+    VGA_hline(0, 639, BAR_HEIGHT - 1, gray);
+    VGA_hline(0, 639, COMPOSITION_Y0 - 1, gray);
+    VGA_vline(CANDLE_X0 + CANDLE_WIDTH - 1, CHART_Y0, COMPOSITION_Y0 - 1, gray);
+    VGA_vline(DEPTH_X0 + DEPTH_WIDTH / 2, DEPTH_Y0, DEPTH_Y1, gray);
     {
-        perror("open /dev/mem");
-        return 1;
+        static const char *names[4] = {"VAL", "MOM", "MM ", "NSE"};
+        int label_character_column  = ((COMPOSITION_X0 + COMPOSITION_WIDTH - COMPOSITION_LABEL_WIDTH) >> 3) + 1;
+        int label_rows[4]           = {47, 50, 53, 56};
+        int t;
+        for (t = 0; t < 4; t++) VGA_text(label_character_column, label_rows[t], (char *)names[t]);
     }
+    VGA_text(1, 1, "Press and release KEY[0] to start...");
 
-    void* lw_base = mmap(NULL, LW_BRIDGE_SPAN, PROT_READ | PROT_WRITE, MAP_SHARED, fd, LW_BRIDGE_BASE);
-    if (lw_base == MAP_FAILED)
-    {
-        perror("mmap lw");
-        close(fd);
-        return 1;
-    }
+    // Waits for KEY[0] press-release — resets FPGA and GBM to tick 200
+    printf("Waiting for KEY[0] press and release...\n");
+    printf("  (GBM is frozen at tick 200 until agents are written)\n");
+    while (*key0_pio & 0x1) usleep(10000);
+    printf("KEY[0] pressed, waiting for release...\n");
+    while (!(*key0_pio & 0x1)) usleep(10000);
+    printf("KEY[0] released. FPGA reset complete.\n\n");
 
-    vga_pixel_virtual_base = mmap(NULL, SDRAM_SPAN, PROT_READ | PROT_WRITE, MAP_SHARED, fd, SDRAM_BASE);
-    if (vga_pixel_virtual_base == MAP_FAILED)
-    {
-        perror("mmap sdram");
-        return 1;
-    }
-    vga_pixel_pointer = (unsigned int*) vga_pixel_virtual_base;
-
-    vga_character_virtual_base = mmap(NULL, FPGA_CHAR_SPAN, PROT_READ | PROT_WRITE, MAP_SHARED, fd, FPGA_CHAR_BASE);
-    if (vga_character_virtual_base == MAP_FAILED)
-    {
-        perror("mmap char");
-        return 1;
-    }
-    vga_character_pointer = (unsigned int*) vga_character_virtual_base;
-
-    fpga_orderbook = (volatile uint32_t*) ((uint8_t*) lw_base + ORDERBOOK_MEMORY_BASE);
-
-    // Agent init
-    printf("\n=== Initializing 16,384 Hardware Agents ===\n");
-    int counts[4] = {0, 0, 0, 0};
+    // Agent init — GBM still frozen so no drift occurs during initialization
+    printf("=== Initializing 16,384 Hardware Agents ===\n");
+    int      counts[4] = {0, 0, 0, 0};
     uint32_t local_agents[NUMBER_UNITS][SLOTS_PER_UNIT];
 
     for (int unit = 0; unit < NUMBER_UNITS; unit++)
     {
         for (int slot = 0; slot < SLOTS_PER_UNIT; slot++)
         {
-            int roll = rand() % 100;
+            int      roll = rand() % 100;
             uint32_t type, p1, p2, p3;
 
             if (roll < 30)
             {
+                // NOISE — 30%, reduced fire rate so book isn't swept constantly
                 type = TYPE_NOISE;
                 p1   = rand_range(150, 300);
                 p2   = rand_range(30, 80);
@@ -949,6 +1024,7 @@ int main(int argc, char* argv[])
             }
             else if (roll < 70)
             {
+                // MARKET MAKER — 40%, primary liquidity provider
                 type = TYPE_MM;
                 p1   = rand_range(700, 900);
                 p2   = rand_range(1, 3);
@@ -956,21 +1032,23 @@ int main(int argc, char* argv[])
             }
             else if (roll < 85)
             {
+                // MOMENTUM — 15%, triggers on 8-20 tick moves across 4 trades
                 type = TYPE_MOMENTUM;
-                p1   = rand_range(15, 40);
+                p1   = rand_range(8, 20);
                 p2   = rand_range(200, 400);
                 p3   = rand_range(30, 80);
             }
             else
             {
+                // VALUE — 15%, dormant until price diverges 20-50 ticks from GBM fair value
                 type          = TYPE_VALUE;
                 p1            = rand_range(20, 50);
                 p2            = rand_range(400, 600);
                 int size_roll = rand() % 100;
-                if (size_roll < 60) p3 = rand_range(200, 250);
+                if      (size_roll < 60) p3 = rand_range(200, 250);
                 else if (size_roll < 85) p3 = rand_range(250, 400);
                 else if (size_roll < 95) p3 = rand_range(400, 500);
-                else p3 = rand_range(500, 600);
+                else                     p3 = rand_range(500, 600);
             }
 
             counts[type]++;
@@ -980,56 +1058,32 @@ int main(int argc, char* argv[])
 
     for (int unit = 0; unit < NUMBER_UNITS; unit++)
     {
-        volatile uint32_t* agent_memory =
-            (volatile uint32_t*) ((uint8_t*) lw_base + AGENT_MEMORY_BASE + unit * AGENT_MEMORY_STRIDE);
-        for (int slot = 0; slot < SLOTS_PER_UNIT; slot++) agent_memory[slot] = local_agents[unit][slot];
+        volatile uint32_t *agent_memory = (volatile uint32_t *)
+            ((uint8_t *)lw_base + AGENT_MEMORY_BASE + unit * AGENT_MEMORY_STRIDE);
+        for (int slot = 0; slot < SLOTS_PER_UNIT; slot++)
+            agent_memory[slot] = local_agents[unit][slot];
     }
+    printf("  Noise:%d MM:%d Momentum:%d Value:%d\n",
+           counts[0], counts[1], counts[2], counts[3]);
 
-    printf("  Noise:%d MM:%d Momentum:%d Value:%d\n", counts[0], counts[1], counts[2], counts[3]);
+    // Enables the GBM now that agents are written — GBM starts stepping from tick 200
+    printf("\nEnabling GBM (agents ready, GBM starts from tick 200)...\n");
+    *gbm_enable_pio = 1;
+
+    printf("Waiting 500ms for first orders to settle...\n");
+    usleep(500000);
+    read_fpga_snapshot();
+    printf("Initial exec price after settle: %u\n", OB_EXEC);
 
     // Initial snapshot
     printf("\n=== Initial FPGA snapshot ===\n");
     read_fpga_snapshot();
-    printf("  RAW[800]=0x%08X -> tick %u\n", fpga_orderbook[800], Q824_TO_TICK(fpga_orderbook[800]));
+    printf("  RAW[800]=0x%08X -> tick %u\n",
+           fpga_orderbook[800], Q824_TO_TICK(fpga_orderbook[800]));
     printf("  OB_FRAME=%u  OB_VOLUME=%u\n\n", OB_FRAME, OB_VOLUME);
 
-    // VGA init
-    VGA_box(0, 0, 639, 479, black);
-    VGA_text_clear();
-
-    // Static dividers
-    VGA_hline(0, 639, BAR_HEIGHT - 1, gray);                                      // top bar
-    VGA_hline(0, 639, COMPOSITION_Y0 - 1, gray);                                  // full-width horizontal divider y=369
-    VGA_vline(CANDLE_X0 + CANDLE_WIDTH - 1, CHART_Y0, COMPOSITION_Y0 - 1, gray);  // left/right vertical split
-    VGA_vline(DEPTH_X0 + DEPTH_WIDTH / 2, DEPTH_Y0, DEPTH_Y1, gray);              // depth centre spine
-
-    // Composition labels
-    {
-        static const char* names[4] = {"VAL", "MOM", "MM ", "NSE"};
-        int label_character_column  = ((COMPOSITION_X0 + COMPOSITION_WIDTH - COMPOSITION_LABEL_WIDTH) >> 3) + 1;
-        int label_rows[4]           = {47, 50, 53, 56};
-        int t;
-        for (t = 0; t < 4; t++) VGA_text(label_character_column, label_rows[t], (char*) names[t]);
-    }
-
-    // Waits for the first FPGA frame
-    printf("Waiting for first FPGA frame");
-    fflush(stdout);
-    {
-        int wait_count = 0;
-        while (OB_FRAME == 0 && wait_count < 100)
-        {
-            read_fpga_snapshot();
-            usleep(100000);
-            wait_count++;
-            if (wait_count % 10 == 0)
-            {
-                printf(".");
-                fflush(stdout);
-            }
-        }
-        printf(OB_FRAME == 0 ? "\n!! WARNING: FRAME still 0. Check KEY[0].\n" : " OK (frame=%u)\n", OB_FRAME);
-    }
+    // Clears the KEY[0] prompt now that we are running
+    VGA_text(1, 1, "                                     ");
 
     open_price = (OB_EXEC > 0) ? OB_EXEC : 200;
     last_frame = OB_FRAME;
@@ -1041,11 +1095,7 @@ int main(int argc, char* argv[])
         read_fpga_snapshot();
         debug_print_status();
 
-        if (OB_FRAME == last_frame)
-        {
-            usleep(1000);
-            continue;
-        }
+        if (OB_FRAME == last_frame) { usleep(1000); continue; }
         last_frame = OB_FRAME;
 
         update_candle();
