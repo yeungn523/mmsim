@@ -365,13 +365,25 @@ generate
     end
 endgenerate
 
-// Market simulator interconnect wires
-
 // Drives the active-low core reset from KEY[0].
-wire core_rst_n = KEY[0];
+reg  core_rst_n;
+reg  key0_prev;
 
-// Reads the active agent count from the slide switches.
-wire [15:0] active_agent_count = {6'd0, SW};
+
+initial begin
+    core_rst_n = 1'b0;
+    key0_prev  = 1'b1;
+end
+
+always @(posedge CLOCK_50) begin
+    key0_prev <= KEY[0];
+    if (!KEY[0])
+        core_rst_n <= 1'b0;
+    else if (!key0_prev && KEY[0])
+        core_rst_n <= 1'b1;
+end
+
+wire [15:0] active_agent_count = 16'd1024;
 
 // Ties off the param loader; no PIO is wired through Qsys yet.
 wire        param_wr_en   = 1'b0;
@@ -418,6 +430,8 @@ wire [31:0] inject_packet;
 wire        inject_trigger;
 wire [31:0] inject_count;
 wire        inject_active;
+
+wire        gbm_enable;
 
 // AnalogClock divider: ~100 snapshots/sec at 50 MHz, drives orderbook_writer only.
 localparam [29:0] SPEED = 30'd500_000;
@@ -616,6 +630,10 @@ Computer_System The_System (
 	.agent_15_writedata  (32'd0),
 	.agent_15_byteenable (4'b1111),
 	.agent_15_readdata   (agent_rdata[15]),
+	
+	// KEY[0] for initialization
+	.key0_pio_external_connection_export (KEY[0]),
+	.gbm_enable_external_connection_export (gbm_enable),
 
 	// Ethernet
 	.hps_io_hps_io_gpio_inst_GPIO35  (HPS_ENET_INT_N),
@@ -709,9 +727,12 @@ Computer_System The_System (
 );
 
 // Order generator
-order_gen_top u_order_gen (
+order_gen_top #(
+    .GBM_P0_RECIP (32'h00014726)   // Matches the initial price of 200
+) u_order_gen (
     .clk                 (CLOCK_50),
     .rst_n               (core_rst_n),
+	 .gbm_enable 			 (gbm_enable),
     .last_executed_price (me_last_executed_price),
     .trade_valid         (me_trade_valid),
     .active_agent_count  (active_agent_count),
