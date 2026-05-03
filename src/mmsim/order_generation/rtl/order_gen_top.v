@@ -1,4 +1,5 @@
 // Composes the GBM source, agent units, and arbiter into the top-level order generation subsystem.
+
 module order_gen_top #(
     parameter NUM_UNITS       = 16,
     parameter PTR_WIDTH       = 4,                               // log2(NUM_UNITS)
@@ -11,10 +12,14 @@ module order_gen_top #(
     parameter        [31:0] GBM_P0_RECIP      = 32'h00028F5C,
     parameter [31:0] LFSR_SEED_BASE    = 32'hCAFEBABE,
     parameter [31:0] LFSR_POLY         = 32'hB4BCD35C,
-    parameter [8:0]  NEAR_NOISE_THRESH = 9'd16
+    parameter [8:0]  NEAR_NOISE_THRESH = 9'd16,
+    // Initial GBM price held to agents when gbm_enable is low; must match
+    // matching_engine kInitialPrice and GBM_P0_RECIP to avoid divergence on startup.
+    parameter [31:0] GBM_P0_HELD       = 32'h64000000   // tick 200 in Q8.24
 )(
     input  wire        clk,
     input  wire        rst_n,
+    input  wire        gbm_enable,       // gates GBM price output to agents; held at GBM_P0_HELD when low
     input  wire [31:0] last_executed_price,
     input  wire        trade_valid,
     input  wire [15:0] active_agent_count,
@@ -39,6 +44,11 @@ module order_gen_top #(
     wire [31:0] gbm_price_out;
     wire [31:0] gbm_sigma_out;
     wire        gbm_price_valid;
+
+    // Gates GBM price to agents — holds at tick 200 until gbm_enable asserted.
+    // Ziggurat always runs so it has valid outputs ready the moment enable goes high;
+    // GBM steps internally but agents see exactly GBM_P0_HELD until enabled.
+    wire [31:0] gbm_price_gated = gbm_enable ? gbm_price_out : GBM_P0_HELD;
 
     wire [NUM_UNITS-1:0]    unit_order_valid;
     wire [NUM_UNITS*32-1:0] unit_order_packet;
@@ -84,6 +94,9 @@ module order_gen_top #(
 
     assign inject_active = inject_busy;
 
+    // Ziggurat always enabled so it stays warm and produces valid Gaussian samples
+    // immediately when gbm_enable goes high; gating en instead would cause a pipeline
+    // bubble on the first enable cycle and agents would see gbm_price=0 transiently.
     ziggurat_gaussian u_ziggurat (
         .clk        (clk),
         .rst_n      (rst_n),
@@ -136,7 +149,9 @@ module order_gen_top #(
             ) u_agent (
                 .clk                 (clk),
                 .rst_n               (rst_n),
-                .gbm_price           (gbm_price_out),
+                // Uses gated price so agents see exactly tick 200 until gbm_enable
+                // asserted, preventing value investor divergence on startup.
+                .gbm_price           (gbm_price_gated),
                 .last_executed_price (last_executed_price),
                 .sigma               (gbm_sigma_out[15:0]),
                 .trade_valid         (trade_valid),
