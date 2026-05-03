@@ -1,21 +1,19 @@
-///
-/// @file ziggurat_gaussian.v
-/// @brief Ziggurat-method Gaussian generator producing Q4.12 signed samples backed by an M10K ROM.
-///
+// Generates Q4.12 signed Gaussian samples using the ziggurat method backed by an M10K ROM.
 
 `timescale 1ns/1ps
 
 module ziggurat_gaussian (
-    input  wire        clk,                ///< System clock.
-    input  wire        rst_n,              ///< Active-low asynchronous reset.
-    input  wire        en,                 ///< Starts a new draw when high in S_IDLE.
-    input  wire [31:0] seed0,              ///< External seed for LFSR stream 0.
-    input  wire [31:0] seed1,              ///< External seed for LFSR stream 1.
-    input  wire [31:0] seed2,              ///< External seed for LFSR stream 2.
-    input  wire [31:0] seed3,              ///< External seed for LFSR stream 3.
-    input  wire        seed_valid,         ///< Loads seed0..seed3 into the LFSR state on a single-cycle pulse.
-    output reg  [15:0] gauss_out,          ///< Latest Gaussian sample (Q4.12 signed).
-    output reg         valid_out           ///< Pulses one cycle when gauss_out is valid.
+    input  wire        clk,
+    input  wire        rst_n,
+    input  wire        en,
+    input  wire [31:0] seed0,
+    input  wire [31:0] seed1,
+    input  wire [31:0] seed2,
+    input  wire [31:0] seed3,
+    input  wire        seed_valid,
+    // Q4.12 signed.
+    output reg  [15:0] gauss_out,
+    output reg         valid_out
 );
 
     reg [31:0] next_s0;
@@ -86,7 +84,7 @@ module ziggurat_gaussian (
         .wren_b         (1'b0)
     );
 `else
-    // Behavioral shim for simulation.
+    // Models the ROM with a behavioral shim in simulation.
 `include "lut/ziggurat_tables.vh"
     reg [15:0] rom_data_reg;
     assign rom_data_out = rom_data_reg;
@@ -118,7 +116,7 @@ module ziggurat_gaussian (
     reg [31:0] u1;
     reg [15:0] x_candidate;
 
-    // Log LUT for tail sampling (32-entry, 5-bit index)
+    // Returns the natural-log values used for tail sampling (32-entry, 5-bit index).
     function [15:0] log_lut;
         input [4:0] index;
         case (index)
@@ -158,9 +156,8 @@ module ziggurat_gaussian (
         endcase
     endfunction
 
-    // PDF LUT for wedge test (32-entry, 5-bit index)
-    // Indexes x_candidate[13:9] (steps of 0.125 from 0 to 3.875)
-    // Returns exp(-0.5 * x^2) in Q4.12
+    // Returns exp(-0.5 * x^2) in Q4.12 for the wedge test, indexed by x_candidate[13:9]
+    // (32-entry, steps of 0.125 from 0 to 3.875).
     function [15:0] pdf_lut;
         input [4:0] index;
         case (index)

@@ -1,8 +1,6 @@
-///////////////////////////////////////////////////////////////////////////////
-// vga_test.c
+// Drives the VGA front panel from synthetic order-book data for offline demo and layout testing.
 // compile: gcc vga_test.c -o vga_test -O2 -lm -std=c99
 // run:     ./vga_test
-///////////////////////////////////////////////////////////////////////////////
 #include <fcntl.h>
 #include <math.h>
 #include <stdint.h>
@@ -29,19 +27,17 @@
 #define yellow       RGB(31, 63, 0)
 #define gray         RGB(6,  12, 6)
 #define dark_gray    RGB(2,  4,  2)
-// Trader type colors
+// Trader-type colors.
 #define col_noise    RGB(8,  16, 8)   // dark gray-green: noise traders
 #define col_mm       RGB(0,  20, 28)  // dark cyan: market makers
 #define col_momentum RGB(28, 20, 0)   // dark orange: momentum traders
 #define col_value    RGB(4,  0,  20)  // dark purple: value investors
 
-// ============================================================
 // Layout
-// Top bar:          y 0-39,   full width
-// Left panel:       x 0-319,  y 40-479  candlesticks
-// Right top panel:  x 320-639 y 40-259  depth histogram  (220px tall)
-// Right bot panel:  x 320-639 y 260-479 trader composition (220px tall)
-// ============================================================
+//   Top bar:         y 0-39,   full width
+//   Left panel:      x 0-319,  y 40-479   candlesticks
+//   Right top panel: x 320-639 y 40-259   depth histogram (220px tall)
+//   Right bot panel: x 320-639 y 260-479  trader composition (220px tall)
 #define BAR_H         40
 #define CHART_Y0      BAR_H
 #define CHART_H       330
@@ -69,20 +65,20 @@
 #define COMP_H        110
 #define COMP_Y1       (COMP_Y0 + COMP_H - 1)     // 479
 
-// Candle geometry
+// Candle geometry.
 #define BODY_W            5
 #define GAP               1
 #define SLOT              (BODY_W + GAP)
 #define MAX_CANDLES       (CANDLE_W / SLOT)
 #define TICKS_PER_CANDLE  10
 
-// Depth binning — now mapped to DEPTH_H (220px) not full CHART_H
+// Depth binning — mapped to DEPTH_H (220px), not full CHART_H.
 #define DEPTH_BIN_SIZE    4
 #define DEPTH_BINS        (400 / DEPTH_BIN_SIZE)   // 100
 #define DEPTH_PRICE_MAX   399
 
-// Trader composition chart
-#define COMP_LABEL_W      40                              // 4 chars wide on right
+// Trader composition chart.
+#define COMP_LABEL_W      40                              // 4 chars wide on right.
 #define COMP_COL_W        8
 #define COMP_MAX_COLS     ((COMP_W - COMP_LABEL_W) / COMP_COL_W)   // 36 columns
 #define NUM_TRADER_TYPES  4
@@ -111,18 +107,17 @@ static uint32_t last_frame  = 0xFFFFFFFF;
 static int      axis_min    = 150;
 static int      axis_max    = 250;
 
-// Per candle volume array
+// Per-candle volume history.
 static uint32_t vol_hist[MAX_CANDLES];
 static int      vol_head  = 0;
 static int      vol_count = 0;
 static uint32_t vol_max = 1;
 
-// Y axis label tracking
+// Y-axis label tracking.
 static int last_label_rows[20];
 static int last_label_count = 0;
 
-// Trader composition history — each entry is 4 fractions summing to 256
-// stored as uint8 proportions (0-255) per trader type per time slot
+// Trader composition history: each entry is 4 uint8 proportions (0-255) per trader type per slot.
 static uint8_t comp_hist[COMP_MAX_COLS][NUM_TRADER_TYPES];
 static int     comp_head  = 0;
 static int     comp_count = 0;
@@ -179,7 +174,7 @@ void VGA_text_clear(void) {
             cb[(y << 7) + x] = ' ';
 }
 
-// Candle panel: dynamic axis
+// Maps a price to a Y coordinate on the candle panel using the dynamic axis range.
 static inline int candle_price_to_y(int price) {
     int range = axis_max - axis_min;
     int y;
@@ -191,7 +186,7 @@ static inline int candle_price_to_y(int price) {
     return y;
 }
 
-// Depth panel: fixed 0-399 mapped into DEPTH_H pixels
+// Maps a price to a Y coordinate on the depth panel; the axis is fixed at 0-399.
 static inline int depth_price_to_y(int price) {
     int y = DEPTH_Y0 + DEPTH_H - 1
             - (price * (DEPTH_H - 1)) / DEPTH_PRICE_MAX;
@@ -236,9 +231,7 @@ void update_axis(void) {
     if (axis_max - axis_min < 10) axis_max = axis_min + 10;
 }
 
-// ============================================================
-// Dummy data — also generates fake trader composition per candle
-// ============================================================
+// Generates synthetic ticks and fake trader composition per candle for offline demo runs.
 static double mid   = 200.0;
 static double trend = 0.0;
 
@@ -251,6 +244,7 @@ void dummy_tick(void) {
     if (mid > 370) { mid = 370; trend = -1.0; }
     mp = (int)round(mid);
     memset(ob_mem, 0, sizeof(uint32_t) * 800);
+    
     for (d = 1; d <= 40; d++) {
         qty = (int)((40 - d * 0.65) * (0.5 + (double)rand()/RAND_MAX) * 2.8);
         if (qty < 1) qty = 1;
@@ -258,7 +252,7 @@ void dummy_tick(void) {
         if (bp >= 0 && bp < NUM_LEVELS) ob_mem[bp]       = (uint32_t)qty;
         if (ap >= 0 && ap < NUM_LEVELS) ob_mem[400 + ap] = (uint32_t)qty;
     }
-    // Occasional iceberg / wall
+    // Occasional iceberg or wall.
     if (rand()%35==0) { int w=mp-(3+rand()%10); if(w>=0&&w<NUM_LEVELS) ob_mem[w]+=60+rand()%100; }
     if (rand()%35==0) { int w=mp+(3+rand()%10); if(w>=0&&w<NUM_LEVELS) ob_mem[400+w]+=60+rand()%100; }
 
@@ -269,11 +263,10 @@ void dummy_tick(void) {
     OB_BEST_BID = (uint32_t)(mp - 1);
     OB_BEST_ASK = (uint32_t)(mp + 1);
 
-    // Derive tick volume from spread tightness + random burst
-    // Tight spread → more activity; occasional volume spike
+    // Derives tick volume from spread tightness with an occasional spike.
     {
         uint32_t base_vol = 20 + (uint32_t)(40.0 * (double)rand()/RAND_MAX);
-        if (rand()%20 == 0) base_vol += 80 + rand()%120;  // spike ~5% of ticks
+        if (rand()%20 == 0) base_vol += 80 + rand()%120;  // ~5% of ticks spike.
         OB_VOLUME += base_vol;
     }
 
@@ -301,10 +294,10 @@ void update_candle(void) {
         c.green = (cur_close >= cur_open);
         candles[candle_head] = c;
 
-        // Volume — use candle_head, advance vol_head/vol_count
+        // Volume: indexes by candle_head and advances vol_head/vol_count alongside.
         {
             uint32_t candle_vol = OB_VOLUME - vol_at_open;
-            vol_hist[candle_head] = candle_vol;   // indexed by candle_head, not comp_head
+            vol_hist[candle_head] = candle_vol;
 
             if (candle_vol >= vol_max) {
                 vol_max = candle_vol;
@@ -316,7 +309,7 @@ void update_candle(void) {
             }
         }
 
-        // Trader composition
+        // Trader composition.
         {
             int r0 = 40 + rand()%40;
             int r1 = 30 + rand()%40;
@@ -333,11 +326,11 @@ void update_candle(void) {
 
         candle_head = (candle_head + 1) % MAX_CANDLES;
         comp_head   = (comp_head   + 1) % COMP_MAX_COLS;
-        vol_head    = candle_head;   // vol_head always mirrors candle_head
+        vol_head    = candle_head;   // Mirrors candle_head.
 
         if (candle_count < MAX_CANDLES)   candle_count++;
         if (comp_count   < COMP_MAX_COLS) comp_count++;
-        if (vol_count    < MAX_CANDLES)   vol_count++;   // was never incremented
+        if (vol_count    < MAX_CANDLES)   vol_count++;
 
         window_tick = 0;
         cur_high = 0; cur_low = UINT32_MAX;
@@ -369,7 +362,7 @@ void render_candles(void) {
 
     int chart_bottom = COMP_Y0 - 1;
 
-    // Erase old grid labels
+    // Erases old grid labels.
     for (i = 0; i < last_label_count; i++)
         VGA_text(1, last_label_rows[i], "   ");
 
@@ -403,7 +396,7 @@ void render_candles(void) {
 
     int c_high[MAX_CANDLES], c_low[MAX_CANDLES];
     int c_top[MAX_CANDLES],  c_bot[MAX_CANDLES];
-    int c_close_y[MAX_CANDLES];   // close price y for area shading
+    int c_close_y[MAX_CANDLES];   // Close-price Y, used for area shading.
     short c_body_col[MAX_CANDLES], c_wick_col[MAX_CANDLES];
 
     for (i = 0; i < n; i++) {
@@ -426,8 +419,7 @@ void render_candles(void) {
         c_wick_col[i] = c->green ? bright_green : bright_red;
     }
 
-    // Also include the current in-progress candle as the rightmost close
-    // so shading extends all the way to the live price
+    // Includes the in-progress candle as the rightmost close so shading reaches the live price.
     int cur_close_y = candle_price_to_y((int)cur_close);
     if (cur_close_y > chart_bottom) cur_close_y = chart_bottom;
 
@@ -442,19 +434,15 @@ void render_candles(void) {
         for (x = CANDLE_X0; x < CANDLE_X0 + CANDLE_W - 1; x++) {
             short col = black;
 
-            // ── Area shading ──────────────────────────────────────────
-            // Find which slot this x falls in and interpolate close_y
-            // between the centre of that candle and the next one
+            // Interpolates close_y between adjacent candle centres at this x for area shading.
             {
                 int slot_i = (x - start_x) / SLOT;
                 int slot_x = (x - start_x) % SLOT;
 
-                // centre x of current and next candle
                 if (slot_i >= 0 && slot_i < n) {
                     int x_cur  = start_x + slot_i * SLOT + BODY_W / 2;
                     int y_cur  = c_close_y[slot_i];
 
-                    // next close: either next candle or live cur_close
                     int y_next;
                     if (slot_i + 1 < n)
                         y_next = c_close_y[slot_i + 1];
@@ -464,7 +452,6 @@ void render_candles(void) {
                     int x_next = x_cur + SLOT;
                     int dx     = x_next - x_cur;
 
-                    // linear interpolation of close price y at this x
                     int interp_y;
                     if (dx > 0)
                         interp_y = y_cur + ((y_next - y_cur) * (x - x_cur)) / dx;
@@ -473,28 +460,26 @@ void render_candles(void) {
 
                     if (interp_y > chart_bottom) interp_y = chart_bottom;
 
-                    // Paint shading below the interpolated close line
+                    // Paints shading below the interpolated close line in 3 fading bands.
                     if (y > interp_y) {
                         int depth     = y - interp_y;
                         int max_depth = chart_bottom - interp_y;
                         if (max_depth < 1) max_depth = 1;
-                        // 3 discrete bands fading to black toward bottom
                         if      (depth < max_depth / 3)
-                            col = RGB(0, 4, 8);    // bright teal-blue near line
+                            col = RGB(0, 4, 8);
                         else if (depth < (max_depth * 2) / 3)
-                            col = RGB(0, 2, 5);    // mid
+                            col = RGB(0, 2, 5);
                         else
-                            col = RGB(0, 1, 3);    // dim near bottom
+                            col = RGB(0, 1, 3);
                     }
 
-                    // Draw the close line itself as a 1px bright trace
+                    // Draws the close line itself as a 1px bright cyan trace.
                     if (y == interp_y)
-                        col = RGB(0, 20, 31);      // bright cyan line
+                        col = RGB(0, 20, 31);
                 }
             }
-            // ── End area shading ──────────────────────────────────────
 
-            // Exec price dashed line (overrides shading)
+            // Exec-price dashed line overrides shading.
             if (y == exec_y && ((x >> 2) & 1)) {
                 col = yellow;
             } else {
@@ -503,9 +488,9 @@ void render_candles(void) {
                 if (n > 0 && slot_i >= 0 && slot_i < n && slot_x < BODY_W) {
                     if (y >= c_high[slot_i] && y <= c_low[slot_i]) {
                         if (y >= c_top[slot_i] && y <= c_bot[slot_i])
-                            col = c_body_col[slot_i];   // body overrides shading
+                            col = c_body_col[slot_i];   // Body overrides shading.
                         else if (slot_x == BODY_W / 2)
-                            col = c_wick_col[slot_i];   // wick overrides shading
+                            col = c_wick_col[slot_i];   // Wick overrides shading.
                     }
                 }
                 if (col == black && is_grid) col = dark_gray;
@@ -519,8 +504,7 @@ void render_candles(void) {
     VGA_vline(CANDLE_X0 + CANDLE_W - 1, CHART_Y0, chart_bottom, gray);
 }
 
-// Depth histogram — top-right panel, fixed 0-399 axis, DEPTH_H tall
-// Row-major render with intentional 1px black gap between bins
+// Renders the depth histogram (top-right) row-major with a 1px black gap between bins.
 void render_depth(void) {
     int b, p, y, x;
     uint32_t max_qty = 1;
@@ -541,47 +525,43 @@ void render_depth(void) {
         if (aq > max_qty) max_qty = aq;
     }
 
-    // Stop at DEPTH_Y1 - 1 so divider line at DEPTH_Y1 is never overwritten
+    // Stops at DEPTH_Y1 - 1 so the divider line at DEPTH_Y1 is never overwritten.
     for (y = DEPTH_Y0; y <= DEPTH_Y1 - 1; y++) {
-        // bin_row: 0 = highest price (top of panel), DEPTH_BINS-1 = lowest (bottom)
+        // bin_row 0 = top of panel (highest price), DEPTH_BINS-1 = bottom (lowest price).
         int bin_row = ((y - DEPTH_Y0) * DEPTH_BINS) / DEPTH_H;
         if (bin_row < 0 || bin_row >= DEPTH_BINS) {
             VGA_hline(DEPTH_X0, DEPTH_X0 + DEPTH_W - 1, y, black);
             continue;
         }
 
-        // Bins are indexed from top: bin 0 = highest price level
-        // Flip so bin 0 = price 396-399, bin 99 = price 0-3
+        // Flips bin order so bin 0 = price 396-399 and bin 99 = price 0-3.
         int price_bin = (DEPTH_BINS - 1) - bin_row;
         uint32_t bq = bin_bid[price_bin];
         uint32_t aq = bin_ask[price_bin];
 
-        // Bid side
+        // Bid side.
         if (bq > 0) {
             int bar_w = (int)((double)bq / max_qty * half);
             if (bar_w < 1) bar_w = 1;
             if (bar_w > half) bar_w = half;
-            
-            // DYNAMIC COLOR: Volume-weighted Green (0-63 scale)
-            // Base intensity is 15, scales up to 63 based on relative volume
+
+            // Volume-weighted green: base 15, scales up to 63 on relative volume.
             int g_val = 15 + (int)(((uint64_t)bq * 48) / max_qty);
             short bid_col = RGB(0, g_val, 0);
 
-            // erase left then draw bar
             for (x = DEPTH_X0; x < DEPTH_X0 + half; x++)
                 VGA_PIXEL(x, y, (x >= DEPTH_X0 + half - bar_w) ? bid_col : black);
         } else {
             VGA_hline(DEPTH_X0, DEPTH_X0 + half - 1, y, black);
         }
 
-        // Ask side
+        // Ask side.
         if (aq > 0) {
             int bar_w = (int)((double)aq / max_qty * half);
             if (bar_w < 1) bar_w = 1;
             if (bar_w > half) bar_w = half;
 
-            // DYNAMIC COLOR: Volume-weighted Red (0-31 scale)
-            // Base intensity is 8, scales up to 31 based on relative volume
+            // Volume-weighted red: base 8, scales up to 31 on relative volume.
             int r_val = 8 + (aq * 23) / max_qty;
             short ask_col = RGB(r_val, 0, 0);
 
@@ -596,9 +576,7 @@ void render_depth(void) {
 
 }
 
-// Volume histogram — bottom-left panel (VOL_X0..VOL_W x VOL_Y0..VOL_Y1)
-// Scrolling bar chart, one bar per candle, newest on the right.
-// Bar height is proportional to that candle's cumulative OB_VOLUME.
+// Renders the bottom-left scrolling volume histogram, one bar per candle, newest on the right.
 void render_volume_histogram(void) {
     int i, x, y;
     int n = vol_count;
@@ -609,16 +587,15 @@ void render_volume_histogram(void) {
         if (vol_hist[idx] > max_vol) max_vol = vol_hist[idx];
     }
 
-    // Precompute the 3 reference y positions
+    // Precomputes the 3 reference Y positions.
     int ref_y[3];
-    ref_y[0] = VOL_Y0 + (VOL_H * 1) / 4;   // 75% level (near top)
-    ref_y[1] = VOL_Y0 + (VOL_H * 2) / 4;   // 50% level (middle)
-    ref_y[2] = VOL_Y0 + (VOL_H * 3) / 4;   // 25% level (near bottom)
+    ref_y[0] = VOL_Y0 + (VOL_H * 1) / 4;   // 75% line, near top.
+    ref_y[1] = VOL_Y0 + (VOL_H * 2) / 4;   // 50% line, middle.
+    ref_y[2] = VOL_Y0 + (VOL_H * 3) / 4;   // 25% line, near bottom.
 
     for (y = VOL_Y0; y <= VOL_Y1; y++) {
         int y_frac = ((VOL_Y1 - y) * 255) / (VOL_H - 1);
 
-        // Check if this row is a reference line
         int is_ref = (y == ref_y[0] || y == ref_y[1] || y == ref_y[2]);
 
         for (x = VOL_X0; x < VOL_X0 + VOL_W; x++) {
@@ -628,7 +605,7 @@ void render_volume_histogram(void) {
             if (slot_x == SLOT - 1) { VGA_PIXEL(x, y, black); continue; }
 
             if (slot >= n) {
-                // No bar here — still draw ref line through empty space
+                // No bar here; still draws the ref line through empty space.
                 VGA_PIXEL(x, y, is_ref && ((x >> 2) & 1) ? dark_gray : black);
                 continue;
             }
@@ -641,7 +618,7 @@ void render_volume_histogram(void) {
                 int intensity = 10 + (int)(((uint64_t)v * 53) / max_vol);
                 VGA_PIXEL(x, y, RGB(0, intensity, intensity));
             } else if (is_ref && ((x >> 2) & 1)) {
-                // Dashed ref line visible above the bar
+                // Draws the dashed ref line above the bar.
                 VGA_PIXEL(x, y, dark_gray);
             } else {
                 VGA_PIXEL(x, y, black);
@@ -652,9 +629,8 @@ void render_volume_histogram(void) {
     VGA_hline(VOL_X0, VOL_X0 + VOL_W - 1, VOL_Y0, gray);
 }
 
-// Trader composition chart — bottom-right panel
-// Scrolling stacked 100% bar, one column per candle, newest on right
-// 4 trader types: noise(gray-green), MM(cyan), momentum(orange), value(purple)
+// Renders the bottom-right stacked-100% trader composition chart, one column per candle.
+// Trader types: noise (gray-green), MM (cyan), momentum (orange), value (purple).
 void render_comp(void) {
     int col, x, y;
     int n = comp_count;
@@ -662,17 +638,16 @@ void render_comp(void) {
         col_noise, col_mm, col_momentum, col_value
     };
 
-    // Row-major: for each row in comp panel, for each x pixel
+    // Row-major: for each row in the comp panel, for each x pixel.
     for (y = COMP_Y0; y <= COMP_Y1; y++) {
-        // Normalize y to 0-255 within panel (0=bottom=255, top=0)
+        // y_frac normalises y to 0-255 within the panel (0 = top, 255 = bottom).
         int y_frac = ((COMP_Y1 - y) * 255) / (COMP_H - 1);
 
         for (x = COMP_X0; x < COMP_X0 + COMP_W; x++) {
-            // Which column slot is this x in?
             int slot = (x - COMP_X0) / COMP_COL_W;
             int slot_x = (x - COMP_X0) % COMP_COL_W;
 
-            // 1px vertical separator between columns — draw black
+            // 1px vertical separator between columns.
             if (slot_x == COMP_COL_W - 1) {
                 VGA_PIXEL(x, y, black);
                 continue;
@@ -683,11 +658,10 @@ void render_comp(void) {
                 continue;
             }
 
-            // Map slot to history index — oldest on left, newest on right
+            // Maps slot to history index, oldest left, newest right.
             int hist_idx = (comp_head - n + slot + COMP_MAX_COLS) % COMP_MAX_COLS;
 
-            // Stack the four trader proportions bottom to top
-            // Each proportion is 0-255, they sum to 255
+            // Stacks the four trader proportions bottom to top; they sum to 255.
             int cumulative = 0;
             short col_color = black;
             int t;
@@ -702,7 +676,7 @@ void render_comp(void) {
         }
     }
 
-    // Static label row at top of comp panel — drawn once in main
+    // Draws the static label row at the top of the comp panel once in main.
 }
 
 int main(void) {
@@ -722,13 +696,13 @@ int main(void) {
     VGA_box(0, 0, 639, 479, black);
     VGA_text_clear();
 
-    // Static elements drawn once — never redrawn in loop
-    VGA_hline(0, 639, BAR_H - 1, gray);              // top bar border
+    // Draws the static elements once; the main loop never redraws them.
+    VGA_hline(0, 639, BAR_H - 1, gray);
     VGA_hline(DEPTH_X0, DEPTH_X0 + DEPTH_W - 1, COMP_Y0 - 1, gray);
     VGA_vline(DEPTH_X0 + DEPTH_W / 2,
-              DEPTH_Y0, DEPTH_Y1, gray);              // depth center spine
+              DEPTH_Y0, DEPTH_Y1, gray);
 
-    // Depth axis labels on far right — fixed prices, drawn once
+    // Draws depth axis labels on the far right at fixed prices, once.
     {
         char buf[8];
         int prices[4] = {100, 200, 300, 399};
@@ -741,12 +715,11 @@ int main(void) {
     }
     
     {
-        // Vertically stacked labels in the right-hand strip of the comp panel
-        // Order matches bar stacking: trader type 3 (value) at top, 0 (noise) at bottom
-        // 4 labels across COMP_H pixels = one label every COMP_H/4 rows
+        // Stacks labels vertically in the right-hand strip of the comp panel; order matches the bar
+        // stacking (value on top, noise at bottom).
         static const char *trader_names_top_to_bot[4] = {"VAL", "MOM", "MM ", "NSE"};
         int t;
-        int label_char_col = ((COMP_X0 + COMP_W - COMP_LABEL_W) >> 3) + 1;  // char col of strip
+        int label_char_col = ((COMP_X0 + COMP_W - COMP_LABEL_W) >> 3) + 1;  // Char col of the label strip.
         {
             int label_rows[4] = {47, 50, 53, 56};
             for (t = 0; t < 4; t++)

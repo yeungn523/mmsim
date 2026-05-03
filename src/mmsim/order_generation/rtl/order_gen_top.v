@@ -1,10 +1,7 @@
-///
-/// @file order_gen_top.v
-/// @brief Top-level order generation subsystem composing the GBM source, agent units, and the round-robin arbiter.
-///
+// Composes the GBM source, agent units, and arbiter into the top-level order generation subsystem.
 module order_gen_top #(
     parameter NUM_UNITS       = 16,
-    parameter PTR_WIDTH       = 4,                               ///< log2(NUM_UNITS)
+    parameter PTR_WIDTH       = 4,                               // log2(NUM_UNITS)
     parameter SLOTS_PER_UNIT  = 1024,
     parameter FIFO_DEPTH      = 256,
     parameter signed [31:0] GBM_MU_ITO_DT     = 32'sh00000000,
@@ -31,10 +28,9 @@ module order_gen_top #(
     input  wire [31:0] inject_count,
     output wire        inject_active,
 
-    // External param memory ports — read-only from FPGA side.
-    // HPS writes directly via Qsys AXI bridge, FPGA only reads.
-    output wire [NUM_UNITS*10-1:0]  param_rd_addr,  ///< Read address per unit (10 bits each)
-    input  wire [NUM_UNITS*32-1:0]  param_rd_data   ///< Read data per unit (32 bits each)
+    // Exposes external param memory read-only to the FPGA; HPS writes via the Qsys AXI bridge.
+    output wire [NUM_UNITS*10-1:0]  param_rd_addr,
+    input  wire [NUM_UNITS*32-1:0]  param_rd_data
 );
     localparam SLOTS_LOG2 = 10;  // log2(1024)
 
@@ -129,8 +125,7 @@ module order_gen_top #(
 
             wire [15:0] unit_param_addr;
 
-            // Route agent read address out to the flattened external port.
-            // Qsys on-chip memory s2 port drives param_rd_data back in.
+            // Routes agent read address to the flattened external port; Qsys s2 drives data back.
             assign param_rd_addr[g*10 +: 10] = unit_param_addr[SLOTS_LOG2-1:0];
 
             agent_execution_unit #(

@@ -1,18 +1,15 @@
-///
-/// @file galois_lfsr.v
-/// @brief 32-bit Galois LFSR that produces one new pseudo-random sample per clock cycle.
-///
+// Generates one pseudo-random sample per enabled clock cycle using a 32-bit Galois LFSR.
 
 module galois_lfsr #(
-    parameter [31:0] POLY = 32'h80200003,   ///< Galois feedback polynomial.
-    parameter [31:0] SEED = 32'hDEADBEEF    ///< Initial state loaded on reset.
+    parameter [31:0] POLY = 32'h80200003,
+    parameter [31:0] SEED = 32'hDEADBEEF
 )(
-    input  wire        clk,                 ///< System clock.
-    input  wire        rst_n,               ///< Active-low asynchronous reset.
-    input  wire        en,                  ///< Advances the LFSR state when high.
-    input  wire [31:0] seed_load,           ///< External seed value applied when seed_valid is high.
-    input  wire        seed_valid,          ///< Loads seed_load into the state on the next edge.
-    output reg  [31:0] out                  ///< Current LFSR state, updated on each enabled cycle.
+    input  wire        clk,
+    input  wire        rst_n,
+    input  wire        en,
+    input  wire [31:0] seed_load,
+    input  wire        seed_valid,
+    output reg  [31:0] out
 );
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n)
@@ -20,7 +17,7 @@ module galois_lfsr #(
         else if (seed_valid)
             out <= seed_load;
         else if (en) begin
-            // Galois feedback: shift right, XOR polynomial if LSB=1
+            // Shifts right and XORs the polynomial when the LSB is 1.
             out <= {1'b0, out[31:1]} ^ (out[0] ? POLY : 32'b0);
         end
     end

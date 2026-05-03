@@ -1,20 +1,17 @@
-///
-/// @file order_arbiter.v
-/// @brief Round-robin arbiter that funnels NUM_UNITS agent unit packets onto a single valid/ready bus.
-///
+// Funnels NUM_UNITS agent packets onto a single valid/ready bus through round-robin arbitration.
 
 module order_arbiter #(
-    parameter NUM_UNITS  = 16,                           ///< Number of upstream agent units feeding the arbiter.
-    parameter PTR_WIDTH  = 4                             ///< Bit width of the round-robin pointer (log2 of NUM_UNITS).
+    parameter NUM_UNITS  = 16,
+    parameter PTR_WIDTH  = 4
 )(
-    input  wire                      clk,                ///< System clock.
-    input  wire                      rst_n,              ///< Active-low asynchronous reset.
-    input  wire [NUM_UNITS-1:0]      order_valid_in,     ///< Per-unit order_valid request lines.
-    input  wire [NUM_UNITS*32-1:0]   order_packet_in,    ///< Concatenated 32-bit packets, one per unit.
-    output reg  [NUM_UNITS-1:0]      order_granted,      ///< One-hot grant pulse returned to the granted unit on accepted handshake.
-    output wire [31:0]               order_packet,       ///< Selected packet driven onto the downstream bus.
-    output wire                      order_valid,        ///< Asserts when a granted unit is presenting a packet.
-    input  wire                      order_ready         ///< Consumer accepts the packet when high alongside order_valid.
+    input  wire                      clk,
+    input  wire                      rst_n,
+    input  wire [NUM_UNITS-1:0]      order_valid_in,
+    input  wire [NUM_UNITS*32-1:0]   order_packet_in,
+    output reg  [NUM_UNITS-1:0]      order_granted,
+    output wire [31:0]               order_packet,
+    output wire                      order_valid,
+    input  wire                      order_ready
 );
 
     reg [PTR_WIDTH-1:0] grant_pointer;
@@ -24,13 +21,11 @@ module order_arbiter #(
     integer             i;
     integer             j;
 
-    // Drives the bus combinationally; the agent module holds order_valid_in[next_grant] high
-    // until the grant pulse returns, so the data path needs no internal register.
+    // Drives the bus combinationally; agents hold order_valid_in[next_grant] until the grant returns.
     assign order_valid  = found;
     assign order_packet = order_packet_in[next_grant*32 +: 32];
 
-    // Scans the units in round-robin order and selects the lowest-index unit asserting
-    // order_valid_in.
+    // Scans round-robin and picks the lowest-index requester past grant_pointer.
     always @(*) begin
         found      = 1'b0;
         next_grant = grant_pointer;
@@ -46,7 +41,7 @@ module order_arbiter #(
         end
     end
 
-    // Pulses order_granted[next_grant] only on the cycle the downstream consumer accepts.
+    // Pulses order_granted[next_grant] only when the consumer accepts.
     always @(*) begin
         order_granted = {NUM_UNITS{1'b0}};
         if (found && order_ready) begin
@@ -58,8 +53,7 @@ module order_arbiter #(
         end
     end
 
-    // Advances grant_pointer past the just-accepted unit so the next scan starts from the slot
-    // after it.
+    // Advances grant_pointer past the just-accepted unit for the next scan.
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             grant_pointer <= 'd0;

@@ -170,13 +170,9 @@ module DE1_SoC_Computer (
 	HPS_USB_STP
 );
 
-//=======================================================
-//  PORT declarations
-//=======================================================
+// PORT declarations
 
-////////////////////////////////////
 // FPGA Pins
-////////////////////////////////////
 
 // Clock pins
 input            CLOCK_50;
@@ -211,7 +207,7 @@ output           DRAM_RAS_N;
 output           DRAM_UDQM;
 output           DRAM_WE_N;
 
-// I2C Bus for Configuration of the Audio and Video-In Chips
+// I2C bus for the audio and video-in chips.
 output           FPGA_I2C_SCLK;
 inout            FPGA_I2C_SDAT;
 
@@ -264,10 +260,8 @@ output  [ 7: 0]  VGA_R;
 output           VGA_SYNC_N;
 output           VGA_VS;
 
-////////////////////////////////////
 // HPS Pins
-////////////////////////////////////
-	
+
 // DDR3 SDRAM
 output  [14: 0]  HPS_DDR3_ADDR;
 output  [ 2: 0]  HPS_DDR3_BA;
@@ -344,9 +338,7 @@ input            HPS_USB_DIR;
 input            HPS_USB_NXT;
 output           HPS_USB_STP;
 
-//=======================================================
-//  REG/WIRE declarations
-//=======================================================
+// REG/WIRE declarations
 
 wire [23:0] hex5_hex0;
 
@@ -373,27 +365,25 @@ generate
     end
 endgenerate
 
-// -------------------------------------------------------
 // Market simulator interconnect wires
-// -------------------------------------------------------
 
-// Active-low reset from KEY[0]; holding KEY[0] asserts reset
+// Drives the active-low core reset from KEY[0].
 wire core_rst_n = KEY[0];
 
-// Active agent count from slide switches
+// Reads the active agent count from the slide switches.
 wire [15:0] active_agent_count = {6'd0, SW};
 
-// Param loader tied off — no PIO wired through Qsys yet
+// Ties off the param loader; no PIO is wired through Qsys yet.
 wire        param_wr_en   = 1'b0;
 wire [15:0] param_wr_addr = 16'd0;
 wire [31:0] param_wr_data = 32'd0;
 
-// Order bus between order_gen_top and matching_engine
+// Order bus between order_gen_top and matching_engine.
 wire [31:0] order_packet;
 wire        gen_order_valid;
 wire        me_order_ready;
 
-// Matching engine scalar outputs
+// Matching engine scalar outputs.
 wire [31:0] me_trade_price;
 wire [15:0] me_trade_quantity;
 wire        me_trade_side;
@@ -407,34 +397,29 @@ wire [31:0] me_best_ask_price;
 wire [15:0] me_best_ask_quantity;
 wire        me_best_ask_valid;
 
-// Matching engine retire bus
+// Matching engine retire bus.
 wire        me_order_retire_valid;
 wire [15:0] me_order_retire_trade_count;
 wire [15:0] me_order_retire_fill_quantity;
 wire [ 1:0] me_order_retire_agent_type;
 
-// Depth tap between matching_engine and orderbook_writer
+// Depth tap between matching_engine and orderbook_writer.
 wire [ 8:0] depth_rd_addr;
 wire [15:0] me_bid_depth_rd_data;
 wire [15:0] me_ask_depth_rd_data;
 
-// Orderbook M10K write port (driven by orderbook_writer, read by Qsys s1)
+// Orderbook M10K write port (driven by orderbook_writer, read by Qsys s1).
 wire [ 9:0] ob_mem_addr;
 wire        ob_mem_write;
 wire [31:0] ob_mem_writedata;
 
-// Injection debug bus from order_gen_top
+// Injection debug bus from order_gen_top.
 wire [31:0] inject_packet;
 wire        inject_trigger;
 wire [31:0] inject_count;
 wire        inject_active;
 
-// -------------------------------------------------------
-// AnalogClock divider
-// ~100 snapshots/sec at 50 MHz — used only by orderbook_writer.
-// Orders are no longer gated by this clock; the engine
-// handshake (order_ready) controls pacing instead.
-// -------------------------------------------------------
+// AnalogClock divider: ~100 snapshots/sec at 50 MHz, drives orderbook_writer only.
 localparam [29:0] SPEED = 30'd500_000;
 
 reg  [29:0] counter;
@@ -449,13 +434,9 @@ end
 
 assign AnalogClock = (counter == 30'd0);
 
-//=======================================================
-//  Module instantiations
-//=======================================================
+// Module instantiations
 
-// -------------------------------------------------------
 // Qsys Computer_System
-// -------------------------------------------------------
 Computer_System The_System (
 	////////////////////////////////////
 	// FPGA Side
@@ -727,9 +708,7 @@ Computer_System The_System (
 	.vga_B                   (VGA_B)
 );
 
-// -------------------------------------------------------
 // Order generator
-// -------------------------------------------------------
 order_gen_top u_order_gen (
     .clk                 (CLOCK_50),
     .rst_n               (core_rst_n),
@@ -817,20 +796,15 @@ always @(posedge CLOCK_50) begin
     end
 end
 
-// -------------------------------------------------------
 // HEX display — retire_count proves orders are cycling.
-// -------------------------------------------------------
 assign hex5_hex0 = retire_count;
 assign LEDR = {trade_ever, me_trade_valid, 2'b00, retire_count[5:0]};
 
 endmodule
 
 
-///////////////////////////////////////////////////////////////////////////////
-// orderbook_writer
-//
-// Scans the matching engine depth tap and metadata outputs each AnalogClock
-// cycle and writes them into the shared orderbook M10K for HPS/VGA use.
+// Scans the matching engine depth tap and metadata each AnalogClock cycle and writes them
+// into the shared orderbook M10K for HPS/VGA consumption.
 //
 // Memory layout (word addresses):
 //   [0   .. 399] bid quantities, one word per price tick
@@ -844,7 +818,6 @@ endmodule
 //   [806]        mm_volume
 //   [807]        momentum_volume
 //   [808]        value_volume
-///////////////////////////////////////////////////////////////////////////////
 module orderbook_writer #(
     parameter kPriceRange    = 400,
     parameter kTickShiftBits = 23
@@ -884,7 +857,7 @@ module orderbook_writer #(
     assign mem_clken      = 1'b1;
     assign mem_byteenable = 4'b1111;
 
-    // FSM states
+    // FSM States
     localparam [2:0] kStateDone       = 3'd0;
     localparam [2:0] kStateScanSetup  = 3'd1;
     localparam [2:0] kStateScanRead   = 3'd2;
@@ -895,12 +868,11 @@ module orderbook_writer #(
     reg [8:0]  scan_addr;
     reg [3:0]  meta_idx;
 
-    // FIX: latch both bid and ask in kStateScanRead so ask_depth_rd_data
-    // is captured while depth_rd_addr is still stable for that tick.
+    // Latches both bid and ask in kStateScanRead while depth_rd_addr is still stable for that tick.
     reg [15:0] latched_bid;
     reg [15:0] latched_ask;
 
-    // Cumulative volume counters per agent type
+    // Cumulative volume counters per agent type.
     reg [31:0] cumulative_volume;
     reg [31:0] frame_counter;
     reg [31:0] noise_volume;
@@ -908,7 +880,7 @@ module orderbook_writer #(
     reg [31:0] momentum_volume;
     reg [31:0] value_volume;
 
-    // Price latches — updated whenever the matching engine asserts valid
+    // Updates the price latches whenever the matching engine asserts valid.
     reg [31:0] last_exec_latch;
     reg [31:0] best_bid_latch;
     reg [31:0] best_ask_latch;
@@ -961,11 +933,11 @@ module orderbook_writer #(
             latched_bid   <= 16'd0;
             latched_ask   <= 16'd0;
         end else begin
-            mem_write <= 1'b0; // default deassert each cycle
+            mem_write <= 1'b0;
 
             case (state)
 
-                // Wait for AnalogClock; one full scan per admitted-order cycle
+                // Waits for AnalogClock; one full scan per admitted-order cycle.
                 kStateDone: begin
                     if (analog_clock) begin
                         frame_counter <= frame_counter + 32'd1;
@@ -975,28 +947,25 @@ module orderbook_writer #(
                     end
                 end
 
-                // Present address to the synchronous M10K read port;
-                // data will be valid on the following cycle
+                // Presents the address to the M10K read port; data is valid next cycle.
                 kStateScanSetup: begin
                     state <= kStateScanRead;
                 end
 
-                // FIX: latch BOTH bid and ask here — both are valid outputs
-                // from the same depth_rd_addr presented in kStateScanSetup.
-                // Writing bid immediately; ask is written next cycle from latch.
+                // Latches both bid and ask from the same depth_rd_addr; writes bid this cycle.
                 kStateScanRead: begin
                     latched_bid   <= bid_depth_rd_data;
-                    latched_ask   <= ask_depth_rd_data;   // FIX: was read in kStateScanAsk (stale)
+                    latched_ask   <= ask_depth_rd_data;
                     mem_address   <= {1'b0, scan_addr};
                     mem_writedata <= {16'd0, bid_depth_rd_data};
                     mem_write     <= 1'b1;
                     state         <= kStateScanAsk;
                 end
 
-                // Write ask side from latch; advance scan or move to metadata
+                // Writes the ask side from the latch and advances the scan or moves to metadata.
                 kStateScanAsk: begin
                     mem_address   <= 10'd400 + {1'b0, scan_addr};
-                    mem_writedata <= {16'd0, latched_ask};   // FIX: use latched value
+                    mem_writedata <= {16'd0, latched_ask};
                     mem_write     <= 1'b1;
 
                     if (scan_addr == kPriceRange - 1) begin
@@ -1009,7 +978,7 @@ module orderbook_writer #(
                     end
                 end
 
-                // Write 9 metadata words (indices 0-8) sequentially
+                // Writes 9 metadata words (indices 0-8) sequentially.
                 kStateMetaWrite: begin
                     mem_write <= 1'b1;
                     case (meta_idx)

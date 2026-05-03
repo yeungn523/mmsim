@@ -1,65 +1,58 @@
 `timescale 1ns/1ns
 
-///
-/// @file price_level_store.v
-/// @brief Stores aggregate share quantities per price tick for one side of the limit order book.
-///
+// Stores aggregate share quantities per price tick for one side of the limit order book.
 
 module price_level_store #(
-    parameter kPriceWidth    = 32,    ///< Bit width of the price field (unsigned ticks).
-    parameter kQuantityWidth = 16,    ///< Bit width of the quantity field.
-    parameter kIsBid         = 1,     ///< Determines whether the instance manages the bid (1) or ask (0) side.
-    parameter kPriceRange    = 480    ///< Number of addressable price ticks (matches agent packet range).
+    parameter kPriceWidth    = 32,
+    parameter kQuantityWidth = 16,
+    // 1 = bid side, 0 = ask side.
+    parameter kIsBid         = 1,
+    parameter kPriceRange    = 480
 )(
     input  wire                        clk,
     input  wire                        rst_n,
 
-    // Command interface (valid/ready handshake). Two-bit command field supports NOP, INSERT, and CONSUME.
-    input  wire [1:0]                  command,          ///< Selects the operation: 0=NOP, 1=INSERT, 2=CONSUME.
-    input  wire [kPriceWidth-1:0]      command_price,    ///< Limit price for INSERT (ignored for CONSUME).
-    input  wire [kQuantityWidth-1:0]   command_quantity, ///< Share count to insert or to consume.
-    input  wire                        command_valid,    ///< Asserts when a command is offered.
-    output reg                         command_ready,    ///< Asserts when the store can accept a command.
+    // Command interface (valid/ready); command: 0=NOP, 1=INSERT, 2=CONSUME.
+    input  wire [1:0]                  command,
+    input  wire [kPriceWidth-1:0]      command_price,
+    input  wire [kQuantityWidth-1:0]   command_quantity,
+    input  wire                        command_valid,
+    output reg                         command_ready,
 
-    // Response interface reports only the affected share count; no per-order identifier.
-    output reg  [kQuantityWidth-1:0]   response_quantity, ///< Shares inserted, or total shares consumed.
-    output reg                         response_valid,    ///< Pulses high for one cycle per response.
+    // Response reports only the affected share count; no per-order identifier.
+    output reg  [kQuantityWidth-1:0]   response_quantity,
+    output reg                         response_valid,
 
     // Top-of-book interface (combinational, always available).
-    output wire [kPriceWidth-1:0]      best_price,        ///< Best resting price for the configured side.
-    output wire [kQuantityWidth-1:0]   best_quantity,     ///< Aggregate share count at the best price.
-    output wire                        best_valid,        ///< Asserts when at least one price holds shares.
+    output wire [kPriceWidth-1:0]      best_price,
+    output wire [kQuantityWidth-1:0]   best_quantity,
+    output wire                        best_valid,
 
-    // Depth-read tap shared with the HPS-side VGA visualization. Time-multiplexes port B of the level_quantity
-    // M10K. This is viable since order packets hence a new best price can only be generated once every 4 cycles.
-    input  wire [8:0]                  depth_rd_addr,     ///< Tick index HPS is querying.
-    output wire [kQuantityWidth-1:0]   depth_rd_data      ///< Quantity at the most recently latched depth_rd_addr.
+    // Time-multiplexes the VGA depth tap onto port B; safe since best_price advances only every 4 cycles.
+    input  wire [8:0]                  depth_rd_addr,
+    output wire [kQuantityWidth-1:0]   depth_rd_data
 );
 
     // Command opcodes.
-    localparam [1:0] kCommandNop     = 2'd0;  ///< Skips the cycle without modifying the book.
-    localparam [1:0] kCommandInsert  = 2'd1;  ///< Adds a quantity to the level at command_price.
-    localparam [1:0] kCommandConsume = 2'd2;  ///< Consumes shares from the current best price.
+    localparam [1:0] kCommandNop     = 2'd0;
+    localparam [1:0] kCommandInsert  = 2'd1;
+    localparam [1:0] kCommandConsume = 2'd2;
 
-    // Top-level FSM states. Four states are needed because the M10K read has 1 cycle of latency: the address must be
-    // presented one cycle before port_a_rdata reflects it. The Settle state additionally lets the priority encoder
-    // pipeline catch up before the next command latches.
-    localparam [1:0] kStateIdle      = 2'd0;  ///< Waits for a new command and registers the read address.
-    localparam [1:0] kStateReadFetch = 2'd1;  ///< Lets port_a_rdata catch up to the just-set address.
-    localparam [1:0] kStateReadAct   = 2'd2;  ///< Captures port_a_rdata, computes the new value, drives the write.
-    localparam [1:0] kStateSettle    = 2'd3;  ///< Lets the write and encoder propagate, then pulses response_valid.
+    // Covers the 1-cycle M10K read latency plus a Settle cycle for the priority encoder.
+    localparam [1:0] kStateIdle      = 2'd0;
+    localparam [1:0] kStateReadFetch = 2'd1;
+    localparam [1:0] kStateReadAct   = 2'd2;
+    localparam [1:0] kStateSettle    = 2'd3;
 
-    localparam kPriceIndexWidth = $clog2(kPriceRange);  ///< Bit width required to index a price tick.
+    localparam kPriceIndexWidth = $clog2(kPriceRange);
 
-    // Stores aggregate share quantities indexed by price tick in a single packed M10K array.
+    // Stores aggregate share quantities per price tick in a packed M10K array.
     (* ramstyle = "M10K" *) reg [kQuantityWidth-1:0] level_quantity [0:kPriceRange-1];
 
-    // Mirrors level_quantity occupancy in flops so the priority encoder can read every slot in one cycle, which is not
-    // possible from M10K. The flag array updates in lockstep with level_quantity writes.
+    // Mirrors level_quantity occupancy in flops so the priority encoder reads every slot in one cycle.
     reg level_valid [0:kPriceRange-1];
 
-    // Initializes memory contents so simulation sees defined values and synthesis emits the zero-filled
-    // memory-initialization image that Cyclone V supports.
+    // Initializes memory so simulation has defined values and Cyclone V emits a zero-filled MIF.
     integer init_iterator;
     initial begin
         for (init_iterator = 0; init_iterator < kPriceRange; init_iterator = init_iterator + 1) begin
@@ -68,8 +61,7 @@ module price_level_store #(
         end
     end
 
-    // Port A carries the read-modify-write traffic for the active command. Port B continuously reads the best price's
-    // level_quantity so best_quantity is available without tying up the command path.
+    // Port A handles command read-modify-writes; port B reads the best price's quantity in parallel.
     reg  [kPriceIndexWidth-1:0] port_a_addr;
     reg                         port_a_we;
     reg  [kQuantityWidth-1:0]   port_a_wdata;
@@ -78,16 +70,14 @@ module price_level_store #(
 
     wire [kPriceIndexWidth-1:0] best_price_index;
 
-    // Pipelines best_price_index by one cycle so the wide priority-encoder fan-in is registered before driving the
-    // M10K read address; this relaxes timing on the best-price read path.
+    // Pipelines best_price_index by one cycle to relax timing on the M10K read path.
     reg [kPriceIndexWidth-1:0] best_price_index_r;
     always @(posedge clk) begin
         if (!rst_n) best_price_index_r <= {kPriceIndexWidth{1'b0}};
         else        best_price_index_r <= best_price_index;
     end
 
-    // Drives the synchronous read-modify-write port and resets the output register so port_a_rdata starts at zero
-    // rather than X before any read has issued.
+    // Drives the synchronous RMW port; port_a_rdata resets to zero rather than X before any read.
     always @(posedge clk) begin : level_quantity_port_a
         if (!rst_n) begin
             port_a_rdata <= {kQuantityWidth{1'b0}};
@@ -97,9 +87,7 @@ module price_level_store #(
         end
     end
 
-    // Time-multiplexes port B between best_quantity and the VGA depth tap so a single M10K serves both paths.
-    // port_b_phase selects the address each cycle; port_b_phase_r is the delay-aligned copy that demuxes the read
-    // result back to the path that issued it.
+    // Time-multiplexes port B between best_quantity and the VGA depth tap; port_b_phase_r demuxes the read.
     reg                         port_b_phase;
     reg                         port_b_phase_r;
     reg  [kPriceIndexWidth-1:0] port_b_addr_muxed;
@@ -135,9 +123,7 @@ module price_level_store #(
 
     assign depth_rd_data = depth_rd_data_reg;
 
-    // Implements a two-stage pipelined priority encoder that resolves best_price_index from the occupancy bitmap.
-    // Stage 1 reduces each group of kGroupSize prices to a per-group winner index and nonempty flag; stage 2 picks the
-    // winning group across all groups.
+    // Resolves best_price_index in two stages: stage 1 picks a per-group winner, stage 2 picks the group.
     localparam kGroupSize        = (kPriceRange >= 64) ? 64 : kPriceRange;
     localparam kGroupCount       = (kPriceRange + kGroupSize - 1) / kGroupSize;
     localparam kGroupIndexWidth  = (kGroupSize  > 1) ? $clog2(kGroupSize)  : 1;
@@ -148,9 +134,7 @@ module price_level_store #(
     integer                    group_iterator;
     integer                    slot_iterator;
 
-    // Bounds guard on the level_valid access is required when kPriceRange is not an integer multiple of kGroupSize
-    // (e.g., 480 / 64 = 7.5 groups). The last group's upper slots address indices >= kPriceRange that the array does
-    // not declare.
+    // Guards against indices beyond kPriceRange when kGroupSize does not divide it evenly.
     always @(*) begin : stage1_compute
         for (group_iterator = 0; group_iterator < kGroupCount; group_iterator = group_iterator + 1) begin
             group_best_index_comb[group_iterator] = {kGroupIndexWidth{1'b0}};
@@ -225,8 +209,7 @@ module price_level_store #(
 
     assign best_price    = {{(kPriceWidth - kPriceIndexWidth){1'b0}}, best_price_index};
     assign best_quantity = port_b_rdata;
-    // Aligns best_valid with the port_b pipeline so a CONSUME that empties the prior best while another level still
-    // rests cannot publish valid=1 with qty=0 during the ~3 cycles port_b_rdata takes to catch up to the new best.
+    // Hides the ~3-cycle port_b lag after a CONSUME empties the prior best by gating on best_quantity != 0.
     assign best_valid    = (level_count != 0) && (best_quantity != {kQuantityWidth{1'b0}});
 
     // Latches command fields and bookkeeping state when a command is accepted.
@@ -294,14 +277,11 @@ module price_level_store #(
                 end
 
                 kStateReadFetch: begin
-                    // Absorbs the M10K read pipeline latency. By the end of this cycle, port_a_rdata reflects
-                    // level_quantity[port_a_addr] for the just-set address rather than the previous command's
-                    // address.
+                    // Absorbs the M10K read latency so port_a_rdata reflects the just-set address.
                     top_state <= kStateReadAct;
                 end
 
                 kStateReadAct: begin
-                    // Snapshots the addressed level's old quantity that port_a_rdata now holds.
                     old_quantity = port_a_rdata;
 
                     if (working_command == kCommandInsert) begin
@@ -322,7 +302,6 @@ module price_level_store #(
                             end
                         end
                     end else begin
-                        // Handles the CONSUME branch.
                         if (!working_level_was_valid) begin
                             new_quantity              = {kQuantityWidth{1'b0}};
                             amount_consumed           = {kQuantityWidth{1'b0}};
@@ -350,9 +329,7 @@ module price_level_store #(
                 end
 
                 kStateSettle: begin
-                    // The write commits this cycle and the priority encoder catches up to the updated level_valid
-                    // mirror, so best_price_index and port_b_rdata reflect the post-command state by the time
-                    // response_valid is observed externally.
+                    // Lets the write commit and the encoder catch up before pulsing response_valid.
                     response_valid    <= 1'b1;
                     response_quantity <= working_response_quantity;
                     command_ready     <= 1'b1;

@@ -1,47 +1,45 @@
-///
-/// @file gbm_logspace.v
-/// @brief Geometric Brownian Motion price pipeline using log-space accumulation and an exp LUT.
-///
+// Accumulates GBM prices in log-space and exponentiates the result through an exp LUT.
 
 module gbm_logspace #(
-    parameter PRICE_WIDTH  = 32,                         ///< Bit width of the output price.
-    parameter SIGMA_WIDTH  = 32,                         ///< Bit width of the output sigma.
-    parameter Z_WIDTH      = 16,                         ///< Bit width of the input Gaussian sample.
-    parameter L_FRAC       = 24,                         ///< Fractional bits of the log-price register.
-    parameter SIGMA_FRAC   = 24,                         ///< Fractional bits of the sigma register.
-    parameter Z_FRAC       = 12,                         ///< Fractional bits of the Gaussian sample.
+    parameter PRICE_WIDTH  = 32,
+    parameter SIGMA_WIDTH  = 32,
+    parameter Z_WIDTH      = 16,
+    parameter L_FRAC       = 24,
+    parameter SIGMA_FRAC   = 24,
+    parameter Z_FRAC       = 12,
 
-    parameter signed [31:0] L_MIN_FIXED  = 32'sh00000000,    ///< Lower bound of the log-price LUT range.
-    parameter signed [31:0] L_MAX_FIXED  = 32'sh058B6E14,    ///< Upper bound of the log-price LUT range.
-    parameter        [31:0] L_STEP_FIXED = 32'h00002C5C,     ///< LUT step size in log-price units.
-    parameter        [31:0] L_STEP_RECIP = 32'hB8AC68F6,     ///< Reciprocal of the LUT step for address scaling.
+    parameter signed [31:0] L_MIN_FIXED  = 32'sh00000000,
+    parameter signed [31:0] L_MAX_FIXED  = 32'sh058B6E14,
+    parameter        [31:0] L_STEP_FIXED = 32'h00002C5C,
+    parameter        [31:0] L_STEP_RECIP = 32'hB8AC68F6,
 
-    parameter [31:0] PRICE_MIN = 32'h00000001,           ///< Minimum representable price clamp.
-    parameter [31:0] PRICE_MAX = 32'hFFFFFFFF,           ///< Maximum representable price clamp.
+    parameter [31:0] PRICE_MIN = 32'h00000001,
+    parameter [31:0] PRICE_MAX = 32'hFFFFFFFF,
 
-    parameter signed [31:0] MU_ITO_DT_DEF     = 32'sh00000000,   ///< Default Ito-corrected drift per step.
-    parameter signed [31:0] SIGMA_SQRT_DT_DEF = 32'sh00000451,   ///< Default sigma * sqrt(dt) coefficient.
-    parameter        [31:0] SIGMA_INIT_DEF    = 32'h00000451,    ///< Default initial sigma estimate.
-    parameter        [31:0] ALPHA_FP_DEF      = 32'h00FD70A4,    ///< Default EWMA smoothing factor.
-    parameter        [31:0] P0_RECIP_DEF      = 32'h00028F5C,    ///< Default reciprocal of the reference price.
-    parameter signed [31:0] L0_DEF            = 32'sh049AEC6F    ///< Default initial log-price.
+    parameter signed [31:0] MU_ITO_DT_DEF     = 32'sh00000000,
+    parameter signed [31:0] SIGMA_SQRT_DT_DEF = 32'sh00000451,
+    parameter        [31:0] SIGMA_INIT_DEF    = 32'h00000451,
+    parameter        [31:0] ALPHA_FP_DEF      = 32'h00FD70A4,
+    parameter        [31:0] P0_RECIP_DEF      = 32'h00028F5C,
+    parameter signed [31:0] L0_DEF            = 32'sh049AEC6F
 )(
-    input  wire        clk,                              ///< System clock.
-    input  wire        rst_n,                            ///< Active-low asynchronous reset.
+    input  wire        clk,
+    input  wire        rst_n,
 
-    input  wire        z_valid,                          ///< Pulses one cycle to inject a new Gaussian sample.
-    input  wire signed [Z_WIDTH-1:0] z_in,               ///< Signed Gaussian sample driving the diffusion term.
+    input  wire        z_valid,
+    input  wire signed [Z_WIDTH-1:0] z_in,
 
-    input  wire        param_load,                       ///< Loads runtime parameter overrides on a single-cycle pulse.
-    input  wire signed [31:0] mu_ito_dt_in,              ///< Runtime override for MU_ITO_DT_DEF.
-    input  wire signed [31:0] sigma_sqrt_dt_in,          ///< Runtime override for SIGMA_SQRT_DT_DEF.
-    input  wire        [31:0] sigma_init_in,             ///< Runtime override for SIGMA_INIT_DEF.
-    input  wire        [31:0] alpha_in,                  ///< Runtime override for ALPHA_FP_DEF.
-    input  wire        [31:0] p0_recip_in,               ///< Runtime override for P0_RECIP_DEF.
+    input  wire        param_load,
+    input  wire signed [31:0] mu_ito_dt_in,
+    input  wire signed [31:0] sigma_sqrt_dt_in,
+    input  wire        [31:0] sigma_init_in,
+    input  wire        [31:0] alpha_in,
+    input  wire        [31:0] p0_recip_in,
 
-    output reg  [PRICE_WIDTH-1:0] price_out,             ///< Latest GBM price (Q8.24 unsigned).
-    output reg  [SIGMA_WIDTH-1:0] sigma_out,             ///< Latest sigma estimate (Q0.24 unsigned).
-    output reg                    price_valid           ///< Pulses one cycle when price_out is valid.
+    // Outputs price_out as Q8.24 unsigned and sigma_out as Q0.24 unsigned.
+    output reg  [PRICE_WIDTH-1:0] price_out,
+    output reg  [SIGMA_WIDTH-1:0] sigma_out,
+    output reg                    price_valid
 );
 
     localparam [3:0]

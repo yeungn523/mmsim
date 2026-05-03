@@ -1,35 +1,37 @@
-///
-/// @file agent_execution_unit.v
-/// @brief Time-multiplexed agent execution unit that round-robins through agent slots and emits
-///        order packets into the arbiter FIFO.
-///
+// Round-robins through agent slots and emits order packets, time-multiplexing one execution unit
+// across all agents.
 
 module agent_execution_unit #(
-    parameter         NUM_AGENT_SLOTS   = 64,             ///< Number of agent slots in the parameter M10K.
-    parameter [31:0]  LFSR_POLY         = 32'hB4BCD35C,   ///< Galois feedback polynomial for the internal LFSR.
-    parameter [31:0]  LFSR_SEED         = 32'hCAFEBABE,   ///< Initial seed for the internal LFSR.
-    parameter [8:0]   NEAR_NOISE_THRESH = 9'd16,          ///< Offset below which noise traders emit market orders.
-    parameter integer TICK_SHIFT_BITS    = 23,             ///< Right-shift applied to a Q8.24 price to obtain the 9-bit tick (23 yields $0.50 per tick).
-    parameter [8:0]   MAX_TICK          = 9'd479          ///< Highest valid tick index (price level store's kPriceRange - 1).
+    parameter         NUM_AGENT_SLOTS   = 64,
+    parameter [31:0]  LFSR_POLY         = 32'hB4BCD35C,
+    parameter [31:0]  LFSR_SEED         = 32'hCAFEBABE,
+    // Sets the offset below which noise traders emit market orders.
+    parameter [8:0]   NEAR_NOISE_THRESH = 9'd16,
+    // Shifts a Q8.24 price right to obtain the 9-bit tick (23 yields $0.50 per tick).
+    parameter integer TICK_SHIFT_BITS    = 23,
+    // Caps tick at the highest valid index (price_level_store kPriceRange - 1).
+    parameter [8:0]   MAX_TICK          = 9'd479
 )(
-    input  wire        clk,                 ///< System clock.
-    input  wire        rst_n,               ///< Active-low asynchronous reset.
+    input  wire        clk,
+    input  wire        rst_n,
 
-    input  wire [31:0] gbm_price,           ///< Geometric Brownian motion reference price (Q8.24 unsigned).
-    input  wire [31:0] last_executed_price,     ///< Most recent execution price from the matching engine (Q8.24 unsigned).
-    input  wire [15:0] sigma,               ///< Volatility scaling parameter (Q0.16 unsigned).
+    // Receives gbm_price and last_executed_price as Q8.24 unsigned and sigma as Q0.16 unsigned.
+    input  wire [31:0] gbm_price,
+    input  wire [31:0] last_executed_price,
+    input  wire [15:0] sigma,
 
-    input  wire        trade_valid,         ///< Pulses one cycle on every matching engine execution.
+    input  wire        trade_valid,
 
-    output reg  [15:0] param_addr,          ///< Drives the read address into the parameter M10K.
-    input  wire [31:0] param_data,          ///< Parameter word returned by the M10K (one cycle after param_addr).
+    // param_data lags param_addr by one cycle (M10K synchronous read).
+    output reg  [15:0] param_addr,
+    input  wire [31:0] param_data,
 
-    input  wire [15:0] active_agent_count,  ///< Number of slots the FSM round-robins through before wrapping.
+    input  wire [15:0] active_agent_count,
 
-    output reg  [31:0] order_packet,        ///< Order packet payload assembled in kStateEmit.
-    output reg         order_valid,         ///< Pulses one cycle when order_packet is valid (not a level).
+    output reg  [31:0] order_packet,
+    output reg         order_valid,
 
-    input  wire        order_granted        ///< Arbiter grant pulse acknowledging the current packet.
+    input  wire        order_granted
 );
 
     localparam [1:0] kStateLoad    = 2'b00;
@@ -190,7 +192,7 @@ module agent_execution_unit #(
         end else begin
 
             case (state)
-                // Put slot address on M10K read port
+                // Puts the slot address on the M10K read port.
                 kStateLoad: begin
                     order_valid <= 1'b0;
                     if (active_agent_count == 16'd0) begin
@@ -201,14 +203,13 @@ module agent_execution_unit #(
                     end
                 end
 
-                // M10K synchronous read latency cycle
+                // Absorbs the M10K synchronous read latency.
                 kStateWait: begin
                     order_valid <= 1'b0;
                     state <= kStateExecute;
                 end
 
-                // param_data now valid, latch params, run agent logic,
-                // set up DSP inputs. DSP product ready in kStateEmit.
+                // Latches params, runs agent logic, and sets up DSP inputs; product is ready in kStateEmit.
                 kStateExecute: begin
                     order_valid <= 1'b0;
                     latched_params  <= param_data;
@@ -258,7 +259,7 @@ module agent_execution_unit #(
                                 // delta < 0 means price is falling -> Sell (1)
                                 calc_side <= (momentum_delta > 0) ? 1'b0 : 1'b1;
 
-                                // Route to DSP for volume scaling
+                                // Routes to the DSP for volume scaling.
                                 dsp_a <= abs_mom;
                                 dsp_b <= param_data[19:10];
                             end else begin
@@ -277,7 +278,7 @@ module agent_execution_unit #(
                                 // divergence < 0 means GBM < Exec (overvalued -> Sell: 1)
                                 calc_side <= (divergence > 0) ? 1'b0 : 1'b1;
 
-                                // Route to DSP for volume scaling
+                                // Routes to the DSP for volume scaling.
                                 dsp_a <= abs_div;
                                 dsp_b <= param_data[19:10];
                             end else begin
@@ -293,14 +294,13 @@ module agent_execution_unit #(
                     state <= kStateEmit;
                 end
 
-                // DSP product valid, assemble packet, advance slot counter
+                // Assembles the packet on a valid DSP product and advances the slot counter.
                 kStateEmit: begin
                     if (emit_flag) begin
 
                         order_valid <= 1'b1;
 
-                        // Assemble packet (re-driven every cycle while stalled, safe since
-                        // all inputs are registered and stable in kStateEmit)
+                        // Re-drives the packet each cycle while stalled; safe since all inputs are registered.
                         case (calc_agent_type)
                             2'b00: begin
                                 order_packet <= {
@@ -337,7 +337,7 @@ module agent_execution_unit #(
                             end
                         endcase
 
-                        // Advance only on grant, last NBA wins, cleanly deasserts valid
+                        // Advances only on grant; last NBA wins and cleanly deasserts valid.
                         if (order_granted) begin
                             order_valid  <= 1'b0;
                             if (active_agent_count == 16'd0) begin
@@ -351,7 +351,7 @@ module agent_execution_unit #(
                         end
 
                     end else begin
-                        // No emission, deassert and advance immediately
+                        // No emission: deasserts valid and advances immediately.
                         order_valid <= 1'b0;
                         if (active_agent_count == 16'd0) begin
                             slot_counter <= 16'd0;

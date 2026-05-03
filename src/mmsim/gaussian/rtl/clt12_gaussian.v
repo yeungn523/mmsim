@@ -1,6 +1,4 @@
-// clt12_gaussian.v
-// CLT-12 Gaussian approximation using 12 parallel 32-bit Galois LFSR modules. Output format is
-// Q4.12 signed fixed-point (16-bit).
+// Approximates a Gaussian by summing 12 parallel 32-bit Galois LFSRs into a Q4.12 signed output.
 
 `timescale 1ns/1ns
 
@@ -10,14 +8,13 @@ module clt12_gaussian (
     input  wire        en,
     input  wire [31:0] seed0, seed1, seed2, seed3,
     input  wire        seed_valid,
-    output reg  [15:0] gauss_out,   // Q4.12 signed natively
+    output reg  [15:0] gauss_out,   // Q4.12 signed
     output reg         valid_out
 );
 
     wire [31:0] lfsr_out [0:11];
 
-    // Instantiates 12 independent LFSRs with optimal sparse Galois polynomials from the Koopman
-    // database. Seeds are scrambled bitwise to guarantee stream independence across instances.
+    // Uses sparse Koopman polynomials with bitwise-scrambled seeds to keep streams independent.
     galois_lfsr #(.POLY(32'h80000057)) lfsr0  (.clk(clk), .rst_n(rst_n), .en(en), .seed_load(seed0),       .seed_valid(seed_valid), .out(lfsr_out[0]));
     galois_lfsr #(.POLY(32'h80000062)) lfsr1  (.clk(clk), .rst_n(rst_n), .en(en), .seed_load(seed1),       .seed_valid(seed_valid), .out(lfsr_out[1]));
     galois_lfsr #(.POLY(32'h8000007A)) lfsr2  (.clk(clk), .rst_n(rst_n), .en(en), .seed_load(seed2),       .seed_valid(seed_valid), .out(lfsr_out[2]));
@@ -33,8 +30,7 @@ module clt12_gaussian (
     galois_lfsr #(.POLY(32'h8000016C)) lfsr10 (.clk(clk), .rst_n(rst_n), .en(en), .seed_load(seed0^seed3), .seed_valid(seed_valid), .out(lfsr_out[10]));
     galois_lfsr #(.POLY(32'h8000019F)) lfsr11 (.clk(clk), .rst_n(rst_n), .en(en), .seed_load(seed1^seed2), .seed_valid(seed_valid), .out(lfsr_out[11]));
 
-    // Sum-and-scale pipeline. Sums the top 16 bits of every LFSR output, recenters the total to
-    // zero mean, and scales down to Q4.12.
+    // Sums top 16 bits, recenters to zero mean, and scales to Q4.12.
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             gauss_out <= 16'h0;
@@ -47,15 +43,13 @@ module clt12_gaussian (
                 reg signed [21:0] centered;
                 reg signed [21:0] shifted;
 
-                // Sums the top 16 bits of all 12 independent LFSR outputs.
                 comb_sum = lfsr_out[0][31:16] + lfsr_out[1][31:16] + lfsr_out[2][31:16] + lfsr_out[3][31:16] +
                            lfsr_out[4][31:16] + lfsr_out[5][31:16] + lfsr_out[6][31:16] + lfsr_out[7][31:16] +
                            lfsr_out[8][31:16] + lfsr_out[9][31:16] + lfsr_out[10][31:16] + lfsr_out[11][31:16];
 
-                // Centers the distribution by subtracting half of 12 * 65535.
+                // Subtracts half of 12 * 65535 to recenter.
                 centered = $signed({1'b0, comb_sum}) - 22'sd393216;
 
-                // Scales down to Q4.12 by arithmetic right-shift of 4.
                 shifted = centered >>> 4;
 
                 gauss_out <= shifted[15:0];

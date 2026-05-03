@@ -1,8 +1,6 @@
 `timescale 1ns/1ps
 
-///
-/// @file price_level_quartus.v
-/// @brief Synthesis wrapper that pins price_level_store at kPriceRange=480.
+// Pins price_level_store at kPriceRange=480 for synthesis.
 
 module price_level_quartus #(
     parameter kPriceWidth    = 32,
