@@ -385,13 +385,13 @@ end
 
 wire [15:0] active_agent_count = 16'd1024;
 
-// Ties off the param loader; no PIO is wired through Qsys yet.
 wire        param_wr_en   = 1'b0;
 wire [15:0] param_wr_addr = 16'd0;
 wire [31:0] param_wr_data = 32'd0;
 
 // Order bus between order_gen_top and matching_engine.
 wire [31:0] order_packet;
+wire [31:0] gbm_price_monitor;
 wire        gen_order_valid;
 wire        me_order_ready;
 
@@ -431,22 +431,33 @@ wire        inject_trigger;
 wire [31:0] inject_count;
 wire        inject_active;
 
+wire [31:0] inject_packet_pio;
+wire        inject_trigger_pio;   
+wire [31:0] inject_count_pio;
+
 wire        gbm_enable;
+
+wire [31:0] gbm_step_period_pio;
+wire [31:0] analog_clock_speed_pio;
+wire [31:0] agent_step_period_pio;
 
 // AnalogClock divider: ~100 snapshots/sec at 50 MHz, drives orderbook_writer only.
 localparam [29:0] SPEED = 30'd500_000;
 
-reg  [29:0] counter;
+reg  [31:0] counter;
 wire        AnalogClock;
-
 always @(posedge CLOCK_50) begin
-    if (!core_rst_n || counter >= SPEED)
-        counter <= 30'd0;
+    if (!core_rst_n || counter >= analog_clock_speed_pio)
+        counter <= 32'd0;
     else
-        counter <= counter + 30'd1;
+        counter <= counter + 32'd1;
 end
+assign AnalogClock = (counter == 32'd0);
 
-assign AnalogClock = (counter == 30'd0);
+// Flash injection PIO hookup
+assign inject_packet  = inject_packet_pio;
+assign inject_trigger = inject_trigger_pio;
+assign inject_count   = inject_count_pio;
 
 // Module instantiations
 
@@ -634,6 +645,16 @@ Computer_System The_System (
 	// KEY[0] for initialization
 	.key0_pio_external_connection_export (KEY[0]),
 	.gbm_enable_external_connection_export (gbm_enable),
+	   
+	.gbm_price_out_external_connection_in_port     (gbm_price_monitor),
+	.gbm_step_period_external_connection_export    (gbm_step_period_pio),
+   .analog_clock_speed_external_connection_export (analog_clock_speed_pio),
+	.agent_step_pio_external_connection_export     (agent_step_period_pio),
+	
+	.inject_packet_pio_external_connection_export  (inject_packet_pio),
+	.inject_trigger_pio_external_connection_export (inject_trigger_pio),
+	.inject_count_pio_external_connection_export   (inject_count_pio),
+	.inject_active_pio_external_connection_export  (inject_active),
 
 	// Ethernet
 	.hps_io_hps_io_gpio_inst_GPIO35  (HPS_ENET_INT_N),
@@ -728,14 +749,17 @@ Computer_System The_System (
 
 // Order generator
 order_gen_top #(
-    .GBM_P0_RECIP (32'h00014726)   // Matches the initial price of 200
+    .GBM_P0_RECIP      (32'h00014726),
+    .NEAR_NOISE_THRESH (9'd5)
 ) u_order_gen (
     .clk                 (CLOCK_50),
     .rst_n               (core_rst_n),
-	 .gbm_enable 			 (gbm_enable),
+    .gbm_enable          (gbm_enable),
     .last_executed_price (me_last_executed_price),
     .trade_valid         (me_trade_valid),
     .active_agent_count  (active_agent_count),
+    .gbm_step_period     (gbm_step_period_pio),
+	 .agent_step_period   (agent_step_period_pio),
     .param_rd_addr       (agent_param_rd_addr),
     .param_rd_data       (agent_param_rd_data),
     .order_packet        (order_packet),
@@ -744,7 +768,8 @@ order_gen_top #(
     .inject_packet       (inject_packet),
     .inject_trigger      (inject_trigger),
     .inject_count        (inject_count),
-    .inject_active       (inject_active)
+    .inject_active       (inject_active),
+    .price_out           (gbm_price_monitor)
 );
 
 
