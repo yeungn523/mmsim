@@ -15,8 +15,8 @@
 
 module matching_engine #(
     parameter kPriceWidth      = 32,
-    parameter kQuantityWidth   = 16,
-    parameter kPriceRange      = 480,
+    parameter kQuantityWidth   = 14,
+    parameter kPriceRange      = 15000,
     // Shifts a tick left to expose last_executed_price as Q8.24.
     parameter kTickShiftBits   = 23
 )(
@@ -52,7 +52,7 @@ module matching_engine #(
     output reg  [kQuantityWidth-1:0]   order_retire_fill_quantity,
 
     // Forwards the VGA depth-read tap to both books; adds one cycle of staleness to best_quantity.
-    input  wire [8:0]                  depth_rd_addr,
+    input  wire [13:0]                  depth_rd_addr,
     output wire [kQuantityWidth-1:0]   bid_depth_rd_data,
     output wire [kQuantityWidth-1:0]   ask_depth_rd_data,
 
