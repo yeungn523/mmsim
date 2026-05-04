@@ -315,23 +315,23 @@ module agent_execution_unit #(
                                 };
                             end
                             2'b10: begin
-                                order_packet <= {
-                                    calc_side, calc_order_type, calc_agent_type,
-                                    3'b000, final_price,
-                                    ((dsp_product[19:10] + 10'd1) > latched_params[9:0]) ?
-                                        {6'd0, latched_params[9:0]} :
-                                        ({6'd0, dsp_product[19:10]} + 16'd1)
-                                };
-                            end
-                            2'b11: begin
-                                order_packet <= {
-                                    calc_side, calc_order_type, calc_agent_type,
-                                    3'b000, final_price,
-                                    ((dsp_product[19:10] + 10'd1) > latched_params[9:0]) ?
-                                        {6'd0, latched_params[9:0]} :
-                                        ({6'd0, dsp_product[19:10]} + 16'd1)
-                                };
-                            end
+										 order_packet <= {
+											  calc_side, calc_order_type, calc_agent_type,
+											  3'b000, final_price,
+											  ((dsp_product[15:0] + 16'd1) > {6'd0, latched_params[9:0]}) ?
+													{6'd0, latched_params[9:0]} :
+													(dsp_product[15:0] + 16'd1)
+										 };
+									end
+									2'b11: begin
+										 order_packet <= {
+											  calc_side, calc_order_type, calc_agent_type,
+											  3'b000, final_price,
+											  ((dsp_product[15:0] + 16'd1) > {6'd0, latched_params[9:0]}) ?
+													{6'd0, latched_params[9:0]} :
+													(dsp_product[15:0] + 16'd1)
+										 };
+									end
                             default: begin
                                 order_packet <= 32'd0;
                             end
