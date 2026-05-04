@@ -21,7 +21,10 @@ module gbm_logspace #(
     parameter        [31:0] SIGMA_INIT_DEF    = 32'h00000451,
     parameter        [31:0] ALPHA_FP_DEF      = 32'h00FD70A4,
     parameter        [31:0] P0_RECIP_DEF      = 32'h00028F5C,
-    parameter signed [31:0] L0_DEF            = 32'sh049AEC6F
+    // Lands on LUT bin 6806, the lowest bin with exp() in tick 200.
+    parameter signed [31:0] L0_DEF            = 32'sh049B6C16,
+    // Equals LUT[L0_DEF bin]; mirrors GBM_P0_HELD and matching_engine last_executed_price reset.
+    parameter        [31:0] P0_INIT_DEF       = 32'h64083501
 )(
     input  wire        clk,
     input  wire        rst_n,
@@ -155,17 +158,17 @@ module gbm_logspace #(
         if (!rst_n) begin
             state             <= S_IDLE;
             price_valid       <= 1'b0;
-            price_out         <= 32'h64000000;
+            price_out         <= P0_INIT_DEF;
             sigma_out         <= SIGMA_INIT_DEF;
-            L_reg             <= 32'sh049AEC6F;
-            P_reg             <= 32'h64000000;
+            L_reg             <= L0_DEF;
+            P_reg             <= P0_INIT_DEF;
             sigma_reg         <= SIGMA_INIT_DEF;
             z_latch           <= 16'sd0;
             diff_full         <= 64'sd0;
             diffusion         <= 32'sd0;
-            L_new             <= 32'sh049AEC6F;
+            L_new             <= L0_DEF;
             lut_addr          <= 13'd0;
-            P_new             <= 32'h64000000;
+            P_new             <= P0_INIT_DEF;
             delta_P           <= 32'd0;
             abs_ret_full      <= 64'd0;
             alpha_full        <= 64'd0;

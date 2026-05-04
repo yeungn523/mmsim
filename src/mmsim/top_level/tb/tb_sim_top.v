@@ -1,58 +1,74 @@
 `timescale 1ns/1ns
 
-///
-/// @file tb_sim_top.v
-/// @brief Integration testbench wiring order_gen_top and matching_engine over the canonical valid/ready boundary.
-///
-/// Phase 1: Writes minimal noise trader parameters into all active agent slots via the
-///          parameter write port. Parameters are biased toward limit inserts with a wide
-///          spread so both sides of the book seed quickly.
-/// Phase 2: Releases control and lets the stochastic system run freely. Invariant checkers
-///          activate once both best_bid_valid and best_ask_valid have been observed, ensuring
-///          assertions only fire on a live book.
-///
-/// Invariants checked continuously once active:
-///   1. trade_price was an occupied level on the opposite side at fill time
-///   2. best_quantity > 0 when best_valid, persistent for 2 cycles (allows 1-cycle settle)
-///   3. order_fifo full never asserts
-///   4. in_flight count never exceeds 2
-///   5. trade_quantity > 0 on every trade_valid
-///   6. fill conservation: order_retire_fill_quantity matches accumulated trade_quantity
-///
-/// ModelSim:
-///   vlog galois_lfsr.v ziggurat_gaussian.v gbm_logspace.v price_level_store.v matching_engine.v order_arbiter.v order_fifo.v order_gen_top.v agent_execution_unit.v top_level.v tb_sim_top.v
-///   vsim -do run_sim_top.tcl
-///
+// Wires order_gen_top to matching_engine and seeds agent params from $value$plusargs so an
+// outer sweep harness drives parameter sweeps without recompiling the TB.
+//
+// Plusargs (10-bit fields pack into a 32-bit param word with type in bits[31:30]):
+//   +P1_NOISE +P2_NOISE +P3_NOISE        defaults 700, 32, 8
+//   +P1_MM    +P2_MM    +P3_MM           defaults 800, 4, 5
+//   +P1_MOM   +P2_MOM   +P3_MOM          defaults 15, 4, 4
+//   +P1_VAL   +P2_VAL   +P3_VAL          defaults 8, 16, 10
+//   +RUN_CYCLES=N                         default 5000
+//   +OUT_TAG=string                       default "default"
+//   +SUMMARY_PATH=path                    default "sweep_results.csv", appended
+//   +VCD=1                                default off; enables $dumpvars when set
+//
+// Drift metric: exec_tick - gbm_tick, both = price[31:23] saturated at 479.
 
 module tb_sim_top;
     localparam kClockPeriod  = 20;
-    localparam kRunCycles    = 10000;
-    localparam kWatchdog     = 100000;
+    localparam kWatchdogMul  = 50;
 
     localparam NUM_UNITS        = 4;
     localparam SLOTS_PER_UNIT   = 64;
     localparam kPriceWidth      = 32;
     localparam kQuantityWidth   = 16;
     localparam kPriceRange      = 480;
+    localparam TICK_SHIFT       = 23;
 
-    localparam kNoiseCount    = 16;
-    localparam kMMCount       = 16;
-    localparam kMomentumCount = 16;
-    localparam kValueCount    = 16;
-    localparam [31:0] kNoiseTraderParam = {2'b00, 10'd700, 10'd32, 10'd8};
-    localparam [31:0] kMMTraderParam    = {2'b01, 10'd800, 10'd4,  10'd5};
-    localparam [31:0] kMomentumParam    = {2'b10, 10'd15,  10'd4,  10'd4};
-    localparam [31:0] kValueParam       = {2'b11, 10'd8,   10'd16, 10'd10};
+    // Holds plusarg-loaded parameter values; populated in the main initial block.
+    reg [9:0] p1_noise, p2_noise, p3_noise;
+    reg [9:0] p1_mm,    p2_mm,    p3_mm;
+    reg [9:0] p1_mom,   p2_mom,   p3_mom;
+    reg [9:0] p1_val,   p2_val,   p3_val;
+
+    reg [31:0] noise_param, mm_param, mom_param, val_param;
+
+    integer     run_cycles;
+    integer     watchdog_cycles;
+    reg [255:0]  out_tag;
+    reg [1023:0] summary_path;
+    integer     vcd_enable;
 
     reg clk;
     reg rst_n;
     initial clk = 0;
     always #(kClockPeriod / 2) clk = ~clk;
 
-    reg         param_wr_en;
-    reg  [15:0] param_wr_addr;
-    reg  [31:0] param_wr_data;
+    reg         gbm_enable;
     reg  [15:0] active_agent_count;
+
+    wire [NUM_UNITS*10-1:0]  agent_param_rd_addr;
+    wire [NUM_UNITS*32-1:0]  agent_param_rd_data;
+
+    // Mirrors HPS-side param memory; indexed as unit*SLOTS_PER_UNIT + slot.
+    reg [31:0] param_mem [0:NUM_UNITS*SLOTS_PER_UNIT-1];
+
+    // Mimics M10K with a 1-cycle synchronous read.
+    reg [31:0] param_rd_data_reg [0:NUM_UNITS-1];
+    genvar gu;
+    generate
+        for (gu = 0; gu < NUM_UNITS; gu = gu + 1) begin : gen_param_mem_read
+            wire [9:0] addr_in = agent_param_rd_addr[gu*10 +: 10];
+            always @(posedge clk) begin
+                if (addr_in < SLOTS_PER_UNIT)
+                    param_rd_data_reg[gu] <= param_mem[gu*SLOTS_PER_UNIT + addr_in];
+                else
+                    param_rd_data_reg[gu] <= 32'd0;
+            end
+            assign agent_param_rd_data[gu*32 +: 32] = param_rd_data_reg[gu];
+        end
+    endgenerate
 
     wire [31:0]               order_packet;
     wire                      order_valid;
@@ -73,50 +89,20 @@ module tb_sim_top;
     wire                      order_retire_valid;
     wire [kQuantityWidth-1:0] order_retire_trade_count;
     wire [kQuantityWidth-1:0] order_retire_fill_quantity;
+    wire [1:0]                order_retire_agent_type;
 
-    // Taps the producer FIFO's full flag for the "FIFO never full" invariant.
-    wire fifo_full;
-    assign fifo_full = tb_sim_top.u_order_gen.u_fifo.full;
+    // Stubs the inject bus; sweep does not exercise injection.
+    wire        inject_active_unused;
 
-    // Pulses once per packet handshake into the matching engine; replaces the old fifo_rd_en
-    // tap now that the matching engine has no internal Accept FIFO.
+    // Taps internal nets for invariants and the drift metric.
+    wire fifo_full = tb_sim_top.u_order_gen.u_fifo.full;
+    wire arb_valid_tap = tb_sim_top.u_order_gen.arb_valid;
     wire packet_accepted = order_valid && order_ready;
-
-    // Taps the per-tick occupancy bitmaps inside each book for the trade-price invariant.
-    wire bid_level_valid_tap [0:kPriceRange-1];
-    wire ask_level_valid_tap [0:kPriceRange-1];
-    genvar i;
-    generate
-        for (i = 0; i < kPriceRange; i = i + 1) begin : gen_level_taps
-            assign bid_level_valid_tap[i] = tb_sim_top.u_matching_engine.bid_book.level_valid[i];
-            assign ask_level_valid_tap[i] = tb_sim_top.u_matching_engine.ask_book.level_valid[i];
-        end
-    endgenerate
-
-    // Aligns the level_valid check with trade_valid: the M10K latency from grant to trade_valid
-    // is 4 cycles regardless of any prior stall, so _d4 always points to the cycle the CONSUME
-    // was accepted.
-    reg bid_level_valid_d1 [0:kPriceRange-1];
-    reg bid_level_valid_d2 [0:kPriceRange-1];
-    reg bid_level_valid_d3 [0:kPriceRange-1];
-    reg bid_level_valid_d4 [0:kPriceRange-1];
-    reg ask_level_valid_d1 [0:kPriceRange-1];
-    reg ask_level_valid_d2 [0:kPriceRange-1];
-    reg ask_level_valid_d3 [0:kPriceRange-1];
-    reg ask_level_valid_d4 [0:kPriceRange-1];
-    integer lv_i;
-    always @(posedge clk) begin
-        for (lv_i = 0; lv_i < kPriceRange; lv_i = lv_i + 1) begin
-            bid_level_valid_d1[lv_i] <= bid_level_valid_tap[lv_i];
-            bid_level_valid_d2[lv_i] <= bid_level_valid_d1[lv_i];
-            bid_level_valid_d3[lv_i] <= bid_level_valid_d2[lv_i];
-            bid_level_valid_d4[lv_i] <= bid_level_valid_d3[lv_i];
-            ask_level_valid_d1[lv_i] <= ask_level_valid_tap[lv_i];
-            ask_level_valid_d2[lv_i] <= ask_level_valid_d1[lv_i];
-            ask_level_valid_d3[lv_i] <= ask_level_valid_d2[lv_i];
-            ask_level_valid_d4[lv_i] <= ask_level_valid_d3[lv_i];
-        end
-    end
+    wire [31:0] gbm_price_q824 = tb_sim_top.u_order_gen.u_gbm.price_out;
+    wire [8:0]  gbm_tick_raw   = (gbm_price_q824[31:TICK_SHIFT] > 9'd479)
+                                 ? 9'd479 : gbm_price_q824[31:TICK_SHIFT];
+    wire [8:0]  exec_tick_raw  = (last_executed_price[31:TICK_SHIFT] > 9'd479)
+                                 ? 9'd479 : last_executed_price[31:TICK_SHIFT];
 
     order_gen_top #(
         .NUM_UNITS      (NUM_UNITS),
@@ -125,19 +111,24 @@ module tb_sim_top;
     ) u_order_gen (
         .clk                 (clk),
         .rst_n               (rst_n),
+        .gbm_enable          (gbm_enable),
         .last_executed_price (last_executed_price),
         .trade_valid         (trade_valid),
         .active_agent_count  (active_agent_count),
-        .param_wr_en         (param_wr_en),
-        .param_wr_addr       (param_wr_addr),
-        .param_wr_data       (param_wr_data),
         .order_packet        (order_packet),
         .order_valid         (order_valid),
-        .order_ready         (order_ready)
+        .order_ready         (order_ready),
+        .inject_packet       (32'd0),
+        .inject_trigger      (1'b0),
+        .inject_count        (32'd0),
+        .inject_active       (inject_active_unused),
+        .param_rd_addr       (agent_param_rd_addr),
+        .param_rd_data       (agent_param_rd_data)
     );
 
-    wire arb_valid_tap;
-    assign arb_valid_tap = u_order_gen.arb_valid;
+    // Stubs the depth read port; not consumed here.
+    wire [kQuantityWidth-1:0] bid_depth_rd_data_unused;
+    wire [kQuantityWidth-1:0] ask_depth_rd_data_unused;
 
     matching_engine #(
         .kPriceWidth    (kPriceWidth),
@@ -163,398 +154,364 @@ module tb_sim_top;
         .best_ask_valid             (best_ask_valid),
         .order_retire_valid         (order_retire_valid),
         .order_retire_trade_count   (order_retire_trade_count),
-        .order_retire_fill_quantity (order_retire_fill_quantity)
+        .order_retire_fill_quantity (order_retire_fill_quantity),
+        .order_retire_agent_type    (order_retire_agent_type),
+        .depth_rd_addr              (9'd0),
+        .bid_depth_rd_data          (bid_depth_rd_data_unused),
+        .ask_depth_rd_data          (ask_depth_rd_data_unused)
     );
 
-    reg  invariants_active;
-    reg  book_ever_live;
-    reg  [3:0] in_flight_count;
-    reg  [kQuantityWidth-1:0] accumulated_fill;
+    // ---------------- Counters / accumulators ----------------
+    integer cycle_count;
+    integer trades_active;
+    // Gates metrics until the book is two-sided and gbm_enable has been live >= 50 cycles.
+    reg     measurement_active;
+    reg     book_live;
 
-    reg  bid_qty_zero_prev;
-    reg  bid_qty_zero_prev2;
-    reg  bid_qty_zero_prev3;
-    reg  ask_qty_zero_prev;
-    reg  ask_qty_zero_prev2;
-    reg  ask_qty_zero_prev3;
+    // 32-bit accumulators are safe for runs up to ~10M cycles given the 480-tick range.
+    integer drift_sum_sq;
+    integer drift_sum_abs;
+    integer drift_samples;
+    integer terminal_drift;
+    integer min_exec_tick;
+    integer max_exec_tick;
+    integer max_drawdown;
 
-    integer total_trades;
-    integer total_retires;
+    // Sampled only when both sides of the book are valid.
+    integer spread_sum;
+    integer spread_samples;
+    integer bid_qty_sum;
+    integer ask_qty_sum;
+    integer qty_samples;
+
+    integer qty_noise_total;
+    integer qty_mm_total;
+    integer qty_mom_total;
+    integer qty_val_total;
+
     integer total_crosses_missed;
     integer total_phantom_valid;
     integer total_fifo_full_events;
     integer total_conservation_errors;
     integer total_invalid_trade_price;
     integer max_in_flight;
-    integer cycle_count;
+    reg [3:0] in_flight_count;
+    reg [kQuantityWidth-1:0] accumulated_fill;
 
-    integer events_file;
+    // Pipelines zero-qty 3 cycles deep so the phantom-valid invariant lets the book settle.
+    reg bid_qty_zero_p1, bid_qty_zero_p2, bid_qty_zero_p3;
+    reg ask_qty_zero_p1, ask_qty_zero_p2, ask_qty_zero_p3;
+    reg crossed_book_prev;
+
     integer summary_file;
-    integer snapshot_file;
+    integer running_max_exec;
 
+    // ---------------- Cycle counter ----------------
     always @(posedge clk) begin
         if (!rst_n) cycle_count <= 0;
         else        cycle_count <= cycle_count + 1;
     end
 
-    // Flips invariants_active once the book has been two-sided live for at least 50 cycles.
+    // ---------------- Drift / liquidity sampling ----------------
     always @(posedge clk) begin
         if (!rst_n) begin
-            book_ever_live    <= 1'b0;
-            invariants_active <= 1'b0;
+            book_live          <= 1'b0;
+            measurement_active <= 1'b0;
         end else begin
-            if (best_bid_valid && best_ask_valid)
-                book_ever_live <= 1'b1;
-            if (book_ever_live && cycle_count > 50)
-                invariants_active <= 1'b1;
+            if (gbm_enable && best_bid_valid && best_ask_valid)
+                book_live <= 1'b1;
+            if (book_live && cycle_count > 50)
+                measurement_active <= 1'b1;
         end
     end
 
-    // Invariant 1: trade_price was an occupied level on the correct side.
-    always @(posedge clk) begin
-        if (invariants_active && trade_valid) begin
-            if (trade_price < kPriceRange) begin
-                if (trade_side == 1'b0) begin
-                    if (!ask_level_valid_d4[trade_price]) begin
-                        $fwrite(events_file,
-                            "%0d,INVALID_TRADE_PRICE,side=buy,price=%0d,level_was_empty\n",
-                            cycle_count, trade_price);
-                        total_invalid_trade_price <= total_invalid_trade_price + 1;
-                    end
-                end else begin
-                    if (!bid_level_valid_d4[trade_price]) begin
-                        $fwrite(events_file,
-                            "%0d,INVALID_TRADE_PRICE,side=sell,price=%0d,level_was_empty\n",
-                            cycle_count, trade_price);
-                        total_invalid_trade_price <= total_invalid_trade_price + 1;
-                    end
-                end
-            end else begin
-                $fwrite(events_file,
-                    "%0d,TRADE_PRICE_OUT_OF_RANGE,price=%0d\n",
-                    cycle_count, trade_price);
-                total_invalid_trade_price <= total_invalid_trade_price + 1;
-            end
-        end
-    end
+    integer drift_signed;
+    integer exec_tick_int;
+    integer gbm_tick_int;
 
-    // Invariant 2: no phantom valid; persists for 2 cycles to allow settle.
     always @(posedge clk) begin
         if (!rst_n) begin
-            bid_qty_zero_prev  <= 1'b0;
-            bid_qty_zero_prev2 <= 1'b0;
-            bid_qty_zero_prev3 <= 1'b0;
-            ask_qty_zero_prev  <= 1'b0;
-            ask_qty_zero_prev2 <= 1'b0;
-            ask_qty_zero_prev3 <= 1'b0;
-        end else begin
-            bid_qty_zero_prev  <= invariants_active && best_bid_valid
-                                  && (best_bid_quantity == {kQuantityWidth{1'b0}});
-            bid_qty_zero_prev2 <= bid_qty_zero_prev;
-            bid_qty_zero_prev3 <= bid_qty_zero_prev2;
-            ask_qty_zero_prev  <= invariants_active && best_ask_valid
-                                  && (best_ask_quantity == {kQuantityWidth{1'b0}});
-            ask_qty_zero_prev2 <= ask_qty_zero_prev;
-            ask_qty_zero_prev3 <= ask_qty_zero_prev2;
-            if (bid_qty_zero_prev3 && best_bid_valid
-                    && (best_bid_quantity == {kQuantityWidth{1'b0}})) begin
-                $fwrite(events_file,
-                    "%0d,PHANTOM_BID_VALID,qty=0\n", cycle_count);
-                total_phantom_valid <= total_phantom_valid + 1;
+            drift_sum_sq    <= 0;
+            drift_sum_abs   <= 0;
+            drift_samples   <= 0;
+            terminal_drift  <= 0;
+            min_exec_tick   <= 480;
+            max_exec_tick   <= -1;
+            max_drawdown    <= 0;
+            running_max_exec<= 0;
+            spread_sum      <= 0;
+            spread_samples  <= 0;
+            bid_qty_sum     <= 0;
+            ask_qty_sum     <= 0;
+            qty_samples     <= 0;
+            trades_active   <= 0;
+        end else if (measurement_active) begin
+            exec_tick_int = exec_tick_raw;
+            gbm_tick_int  = gbm_tick_raw;
+            drift_signed  = exec_tick_int - gbm_tick_int;
+
+            drift_sum_sq  <= drift_sum_sq + drift_signed * drift_signed;
+            drift_sum_abs <= drift_sum_abs + ((drift_signed < 0) ? -drift_signed : drift_signed);
+            drift_samples <= drift_samples + 1;
+            terminal_drift <= drift_signed;
+
+            if (exec_tick_int < min_exec_tick) min_exec_tick <= exec_tick_int;
+            if (exec_tick_int > max_exec_tick) max_exec_tick <= exec_tick_int;
+            if (exec_tick_int > running_max_exec) running_max_exec <= exec_tick_int;
+            if ((running_max_exec - exec_tick_int) > max_drawdown)
+                max_drawdown <= running_max_exec - exec_tick_int;
+
+            if (best_bid_valid && best_ask_valid) begin
+                spread_sum     <= spread_sum + (best_ask_price[8:0] - best_bid_price[8:0]);
+                spread_samples <= spread_samples + 1;
+                bid_qty_sum    <= bid_qty_sum + best_bid_quantity;
+                ask_qty_sum    <= ask_qty_sum + best_ask_quantity;
+                qty_samples    <= qty_samples + 1;
             end
-            if (ask_qty_zero_prev3 && best_ask_valid
-                    && (best_ask_quantity == {kQuantityWidth{1'b0}})) begin
-                $fwrite(events_file,
-                    "%0d,PHANTOM_ASK_VALID,qty=0\n", cycle_count);
-                total_phantom_valid <= total_phantom_valid + 1;
-            end
+
+            if (trade_valid) trades_active <= trades_active + 1;
         end
     end
 
-    // Invariant 3: order_fifo full never asserts.
+    // ---------------- Per-type retire qty ----------------
     always @(posedge clk) begin
-        if (rst_n && fifo_full && arb_valid_tap) begin
-            $fwrite(events_file, "%0d,FIFO_FULL\n", cycle_count);
-            total_fifo_full_events <= total_fifo_full_events + 1;
+        if (!rst_n) begin
+            qty_noise_total <= 0;
+            qty_mm_total    <= 0;
+            qty_mom_total   <= 0;
+            qty_val_total   <= 0;
+        end else if (order_retire_valid) begin
+            case (order_retire_agent_type)
+                2'b00: qty_noise_total <= qty_noise_total + order_retire_fill_quantity;
+                2'b01: qty_mm_total    <= qty_mm_total    + order_retire_fill_quantity;
+                2'b10: qty_mom_total   <= qty_mom_total   + order_retire_fill_quantity;
+                2'b11: qty_val_total   <= qty_val_total   + order_retire_fill_quantity;
+            endcase
         end
     end
 
-    // Invariant 4: in-flight count never exceeds 2.
+    // ---------------- Invariants (count-only) ----------------
     always @(posedge clk) begin
         if (!rst_n) begin
             in_flight_count <= 4'd0;
             max_in_flight   <= 0;
+            accumulated_fill <= {kQuantityWidth{1'b0}};
+            total_conservation_errors <= 0;
         end else begin
             case ({packet_accepted, order_retire_valid})
                 2'b10:   in_flight_count <= in_flight_count + 1'b1;
                 2'b01:   in_flight_count <= in_flight_count - 1'b1;
                 default: in_flight_count <= in_flight_count;
             endcase
-            if (in_flight_count > max_in_flight)
-                max_in_flight <= in_flight_count;
-            if (invariants_active && in_flight_count > 4'd2) begin
-                $fwrite(events_file,
-                    "%0d,IN_FLIGHT_OVERFLOW,count=%0d\n",
-                    cycle_count, in_flight_count);
-            end
-        end
-    end
+            if (in_flight_count > max_in_flight) max_in_flight <= in_flight_count;
 
-    // Invariant 5: trade_quantity > 0 on every trade_valid.
-    always @(posedge clk) begin
-        if (invariants_active && trade_valid) begin
-            total_trades <= total_trades + 1;
-            if (trade_quantity == {kQuantityWidth{1'b0}}) begin
-                $fwrite(events_file,
-                    "%0d,ZERO_QTY_TRADE,price=%0d,side=%0d\n",
-                    cycle_count, trade_price, trade_side);
-            end
-        end
-    end
-
-    // Logs every trade so the analysis script can compute statistics.
-    always @(posedge clk) begin
-        if (rst_n && trade_valid) begin
-            $fwrite(events_file,
-                "%0d,TRADE,price=%0d,qty=%0d,side=%0d\n",
-                cycle_count, trade_price, trade_quantity, trade_side);
-        end
-    end
-
-    // Invariant 6: fill conservation across each retire.
-    always @(posedge clk) begin
-        if (!rst_n) begin
-            accumulated_fill <= {kQuantityWidth{1'b0}};
-        end else begin
             if (trade_valid && !order_retire_valid)
                 accumulated_fill <= accumulated_fill + trade_quantity;
             if (order_retire_valid) begin
-                total_retires <= total_retires + 1;
                 if (trade_valid) begin
-                    if ((accumulated_fill + trade_quantity) != order_retire_fill_quantity) begin
-                        $fwrite(events_file,
-                            "%0d,CONSERVATION_ERROR,accumulated=%0d,reported=%0d\n",
-                            cycle_count,
-                            accumulated_fill + trade_quantity,
-                            order_retire_fill_quantity);
+                    if ((accumulated_fill + trade_quantity) != order_retire_fill_quantity)
                         total_conservation_errors <= total_conservation_errors + 1;
-                    end
                 end else begin
-                    if (accumulated_fill != order_retire_fill_quantity) begin
-                        $fwrite(events_file,
-                            "%0d,CONSERVATION_ERROR,accumulated=%0d,reported=%0d\n",
-                            cycle_count,
-                            accumulated_fill,
-                            order_retire_fill_quantity);
+                    if (accumulated_fill != order_retire_fill_quantity)
                         total_conservation_errors <= total_conservation_errors + 1;
-                    end
                 end
-                $fwrite(events_file,
-                    "%0d,RETIRE,trade_count=%0d,fill_qty=%0d,bid=%0d,ask=%0d,bid_v=%0d,ask_v=%0d\n",
-                    cycle_count,
-                    order_retire_trade_count,
-                    order_retire_fill_quantity,
-                    best_bid_price,
-                    best_ask_price,
-                    best_bid_valid,
-                    best_ask_valid);
                 accumulated_fill <= {kQuantityWidth{1'b0}};
             end
         end
     end
 
-    reg crossed_book_prev;
-
     always @(posedge clk) begin
         if (!rst_n) begin
-            crossed_book_prev <= 1'b0;
+            total_crosses_missed      <= 0;
+            total_phantom_valid       <= 0;
+            total_fifo_full_events    <= 0;
+            total_invalid_trade_price <= 0;
+            crossed_book_prev         <= 1'b0;
+            bid_qty_zero_p1 <= 1'b0; bid_qty_zero_p2 <= 1'b0; bid_qty_zero_p3 <= 1'b0;
+            ask_qty_zero_p1 <= 1'b0; ask_qty_zero_p2 <= 1'b0; ask_qty_zero_p3 <= 1'b0;
         end else begin
-            crossed_book_prev <= invariants_active && best_bid_valid && best_ask_valid
-                                && (best_bid_price >= best_ask_price);
-            if (crossed_book_prev && invariants_active && best_bid_valid && best_ask_valid
-                    && (best_bid_price >= best_ask_price)) begin
-                $fwrite(events_file,
-                    "%0d,CROSSED_BOOK,bid=%0d,ask=%0d\n",
-                    cycle_count, best_bid_price, best_ask_price);
+            if (fifo_full && arb_valid_tap)
+                total_fifo_full_events <= total_fifo_full_events + 1;
+
+            if (measurement_active && trade_valid && (trade_price[8:0] >= 9'd480))
+                total_invalid_trade_price <= total_invalid_trade_price + 1;
+
+            crossed_book_prev <= measurement_active && best_bid_valid && best_ask_valid
+                                 && (best_bid_price >= best_ask_price);
+            if (crossed_book_prev && measurement_active && best_bid_valid && best_ask_valid
+                    && (best_bid_price >= best_ask_price))
                 total_crosses_missed <= total_crosses_missed + 1;
-            end
+
+            bid_qty_zero_p1 <= measurement_active && best_bid_valid
+                               && (best_bid_quantity == {kQuantityWidth{1'b0}});
+            bid_qty_zero_p2 <= bid_qty_zero_p1;
+            bid_qty_zero_p3 <= bid_qty_zero_p2;
+            ask_qty_zero_p1 <= measurement_active && best_ask_valid
+                               && (best_ask_quantity == {kQuantityWidth{1'b0}});
+            ask_qty_zero_p2 <= ask_qty_zero_p1;
+            ask_qty_zero_p3 <= ask_qty_zero_p2;
+            if (bid_qty_zero_p3 && best_bid_valid
+                    && (best_bid_quantity == {kQuantityWidth{1'b0}}))
+                total_phantom_valid <= total_phantom_valid + 1;
+            if (ask_qty_zero_p3 && best_ask_valid
+                    && (best_ask_quantity == {kQuantityWidth{1'b0}}))
+                total_phantom_valid <= total_phantom_valid + 1;
         end
     end
 
-    // Snapshots top-of-book and last execution price every 100 cycles for plotting.
-    always @(posedge clk) begin
-        if (invariants_active && (cycle_count % 100 == 0)) begin
-            $fwrite(snapshot_file,
-                "%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d\n",
-                cycle_count,
-                best_bid_price,
-                best_bid_quantity,
-                best_bid_valid,
-                best_ask_price,
-                best_ask_quantity,
-                best_ask_valid,
-                last_executed_price);
-        end
-    end
-
+    // ---------------- Helpers ----------------
     task tick;
-        begin
-            @(posedge clk); #1;
-        end
+        begin @(posedge clk); #1; end
     endtask
 
     task tick_n;
         input integer n;
         integer j;
         begin
-            for (j = 0; j < n; j = j + 1) begin
-                tick;
-            end
+            for (j = 0; j < n; j = j + 1) tick;
         end
     endtask
 
-    task write_param;
-        input [15:0] addr;
-        input [31:0] data;
+    function [31:0] pack_param;
+        input [1:0] kind;
+        input [9:0] p1;
+        input [9:0] p2;
+        input [9:0] p3;
         begin
-            param_wr_en   <= 1'b1;
-            param_wr_addr <= addr;
-            param_wr_data <= data;
-            tick;
-            param_wr_en   <= 1'b0;
-            tick;
+            pack_param = {kind, p1, p2, p3};
         end
-    endtask
+    endfunction
 
     task write_summary;
+        integer mean_abs_x1000;
+        integer trade_rate_x1000;
+        integer mean_spread_x1000;
+        integer mean_bid_x1000;
+        integer mean_ask_x1000;
+        integer drift_avg_sq;
         begin
-            $fwrite(summary_file, "metric,value\n");
-            $fwrite(summary_file, "total_cycles,%0d\n",               cycle_count);
-            $fwrite(summary_file, "total_trades,%0d\n",               total_trades);
-            $fwrite(summary_file, "total_retires,%0d\n",              total_retires);
-            $fwrite(summary_file, "crossed_book_events,%0d\n",        total_crosses_missed);
-            $fwrite(summary_file, "phantom_valid_events,%0d\n",       total_phantom_valid);
-            $fwrite(summary_file, "fifo_full_events,%0d\n",           total_fifo_full_events);
-            $fwrite(summary_file, "conservation_errors,%0d\n",        total_conservation_errors);
-            $fwrite(summary_file, "invalid_trade_price_events,%0d\n", total_invalid_trade_price);
-            $fwrite(summary_file, "max_in_flight,%0d\n",              max_in_flight);
-            $fwrite(summary_file, "hostile_writes,%0d\n",             hostile_writes);
-            $fclose(events_file);
+            // Reports MSE here; the Python analyzer takes sqrt for RMS.
+            drift_avg_sq = (drift_samples > 0) ? (drift_sum_sq / drift_samples) : 0;
+            mean_abs_x1000 = (drift_samples > 0)
+                              ? (drift_sum_abs * 1000) / drift_samples : 0;
+            trade_rate_x1000 = (run_cycles > 0)
+                              ? (trades_active * 1000) / run_cycles : 0;
+            mean_spread_x1000 = (spread_samples > 0)
+                              ? (spread_sum * 1000) / spread_samples : 0;
+            mean_bid_x1000 = (qty_samples > 0)
+                              ? (bid_qty_sum * 1000) / qty_samples : 0;
+            mean_ask_x1000 = (qty_samples > 0)
+                              ? (ask_qty_sum * 1000) / qty_samples : 0;
+
+            $fwrite(summary_file,
+                "%0s,%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d\n",
+                out_tag,
+                p1_noise, p2_noise, p3_noise,
+                p1_mm,    p2_mm,    p3_mm,
+                p1_mom,   p2_mom,   p3_mom,
+                p1_val,   p2_val,   p3_val,
+                cycle_count, trades_active, trade_rate_x1000,
+                drift_avg_sq, terminal_drift, mean_abs_x1000,
+                max_drawdown, min_exec_tick, max_exec_tick,
+                mean_spread_x1000, mean_bid_x1000, mean_ask_x1000,
+                qty_noise_total, qty_mm_total, qty_mom_total, qty_val_total,
+                total_crosses_missed, total_phantom_valid, total_fifo_full_events,
+                total_conservation_errors, total_invalid_trade_price);
             $fclose(summary_file);
-            $fclose(snapshot_file);
         end
     endtask
 
-    // Issues bursts of unauthorized parameter writes during Phase 2 to confirm the engine
-    // tolerates concurrent slot-table updates from a hostile manager.
-    reg  [15:0] hostile_lfsr;
-    integer     hostile_writes;
-    initial begin
-        hostile_lfsr   = 16'hACE1;
-        hostile_writes = 0;
-        wait(invariants_active);
-        tick_n(100);
-        repeat (200) begin
-            tick_n(50 + {9'd0, hostile_lfsr[6:0]});
-            @(posedge clk); #1;
-            param_wr_en   <= 1'b1;
-            param_wr_addr <= {hostile_lfsr[9:4], hostile_lfsr[5:0]};
-            param_wr_data <= kNoiseTraderParam;
-            @(posedge clk); #1;
-            param_wr_en   <= 1'b0;
-            hostile_lfsr <= {hostile_lfsr[14:0],
-                             hostile_lfsr[15] ^ hostile_lfsr[13]
-                             ^ hostile_lfsr[12] ^ hostile_lfsr[10]};
-            hostile_writes = hostile_writes + 1;
-        end
-    end
-
-    integer unit;
+    // ---------------- Main ----------------
     integer slot;
-    integer global_slot;
-    reg [31:0] slot_param;
+
     initial begin
-        $dumpfile("tb_sim_top.vcd");
-        $dumpvars(0, tb_sim_top);
-        events_file   = $fopen("sim_top_events.csv",    "w");
-        summary_file  = $fopen("sim_top_summary.csv",   "w");
-        snapshot_file = $fopen("sim_top_snapshots.csv", "w");
-        $fwrite(events_file,  "cycle,event,detail\n");
-        $fwrite(snapshot_file,
-            "cycle,best_bid_price,best_bid_qty,best_bid_valid,best_ask_price,best_ask_qty,best_ask_valid,last_executed_price\n");
+        if (!$value$plusargs("P1_NOISE=%d", p1_noise)) p1_noise = 10'd700;
+        if (!$value$plusargs("P2_NOISE=%d", p2_noise)) p2_noise = 10'd32;
+        if (!$value$plusargs("P3_NOISE=%d", p3_noise)) p3_noise = 10'd8;
+        if (!$value$plusargs("P1_MM=%d",    p1_mm))    p1_mm    = 10'd800;
+        if (!$value$plusargs("P2_MM=%d",    p2_mm))    p2_mm    = 10'd4;
+        if (!$value$plusargs("P3_MM=%d",    p3_mm))    p3_mm    = 10'd5;
+        if (!$value$plusargs("P1_MOM=%d",   p1_mom))   p1_mom   = 10'd15;
+        if (!$value$plusargs("P2_MOM=%d",   p2_mom))   p2_mom   = 10'd4;
+        if (!$value$plusargs("P3_MOM=%d",   p3_mom))   p3_mom   = 10'd4;
+        if (!$value$plusargs("P1_VAL=%d",   p1_val))   p1_val   = 10'd8;
+        if (!$value$plusargs("P2_VAL=%d",   p2_val))   p2_val   = 10'd16;
+        if (!$value$plusargs("P3_VAL=%d",   p3_val))   p3_val   = 10'd10;
+        if (!$value$plusargs("RUN_CYCLES=%d", run_cycles)) run_cycles = 5000;
+        if (!$value$plusargs("VCD=%d", vcd_enable)) vcd_enable = 0;
+        if (!$value$plusargs("OUT_TAG=%s", out_tag))      out_tag = "default";
+        if (!$value$plusargs("SUMMARY_PATH=%s", summary_path))
+            summary_path = "sweep_results.csv";
+
+        watchdog_cycles = run_cycles * kWatchdogMul;
+
+        noise_param = pack_param(2'b00, p1_noise, p2_noise, p3_noise);
+        mm_param    = pack_param(2'b01, p1_mm,    p2_mm,    p3_mm);
+        mom_param   = pack_param(2'b10, p1_mom,   p2_mom,   p3_mom);
+        val_param   = pack_param(2'b11, p1_val,   p2_val,   p3_val);
+
+        if (vcd_enable) begin
+            $dumpfile("tb_sim_top.vcd");
+            $dumpvars(0, tb_sim_top);
+        end
+
+        // Append-only; the sweep driver writes the CSV header.
+        summary_file = $fopen(summary_path, "a");
+        if (summary_file == 0) begin
+            $display("[ERROR] could not open summary path: %0s", summary_path);
+            $finish;
+        end
 
         rst_n              <= 1'b0;
-        param_wr_en        <= 1'b0;
-        param_wr_addr      <= 16'd0;
-        param_wr_data      <= 32'd0;
+        gbm_enable         <= 1'b0;
         active_agent_count <= 16'd0;
-        total_trades              = 0;
-        total_retires             = 0;
-        total_crosses_missed      = 0;
-        total_phantom_valid       = 0;
-        total_fifo_full_events    = 0;
-        total_conservation_errors = 0;
-        total_invalid_trade_price = 0;
-        tick_n(4);
-        rst_n <= 1'b1;
-        tick_n(2);
 
-        global_slot = 0;
-        for (unit = 0; unit < NUM_UNITS; unit = unit + 1) begin
-            for (slot = 0; slot < SLOTS_PER_UNIT; slot = slot + 1) begin
-                global_slot = unit * SLOTS_PER_UNIT + slot;
-                if      (global_slot < kNoiseCount)
-                    slot_param = kNoiseTraderParam;
-                else if (global_slot < kNoiseCount + kMMCount)
-                    slot_param = kMMTraderParam;
-                else if (global_slot < kNoiseCount + kMMCount + kMomentumCount)
-                    slot_param = kMomentumParam;
-                else if (global_slot < kNoiseCount + kMMCount + kMomentumCount + kValueCount)
-                    slot_param = kValueParam;
-                else
-                    slot_param = kNoiseTraderParam; // fill remainder with noise
-                write_param((unit[15:0] << 6) | slot[15:0], slot_param);
-            end
+        // Unit 0 = noise, 1 = MM, 2 = momentum, 3 = value.
+        for (slot = 0; slot < SLOTS_PER_UNIT; slot = slot + 1) begin
+            param_mem[0*SLOTS_PER_UNIT + slot] = noise_param;
+            param_mem[1*SLOTS_PER_UNIT + slot] = mm_param;
+            param_mem[2*SLOTS_PER_UNIT + slot] = mom_param;
+            param_mem[3*SLOTS_PER_UNIT + slot] = val_param;
         end
 
-        wait(u_order_gen.gbm_price_valid);
-        tick_n(4);  
+        tick_n(8);
+        rst_n <= 1'b1;
+        tick_n(8);
 
+        // Phase 1: seeds the book at GBM_P0_HELD with gbm_enable low.
         active_agent_count <= 16'd64;
-        tick_n(2);
+        tick_n(200);
 
-        // Phase 2: free run with invariant checkers and hostile writes in parallel.
-        tick_n(kRunCycles);
+        // Phase 2: releases GBM for the measurement window.
+        gbm_enable <= 1'b1;
+        tick_n(run_cycles);
 
+        // Drains in-flight orders before final sampling.
         while (in_flight_count > 0) tick;
-        tick_n(10);
+        tick_n(20);
 
         write_summary;
-        $display("Integration test complete: %0d cycles", cycle_count);
-        $display("  Trades:                %0d", total_trades);
-        $display("  Retires:               %0d", total_retires);
-        $display("  Crossed book:          %0d", total_crosses_missed);
-        $display("  Phantom valid:         %0d", total_phantom_valid);
-        $display("  FIFO full:             %0d", total_fifo_full_events);
-        $display("  Conservation errors:   %0d", total_conservation_errors);
-        $display("  Invalid trade price:   %0d", total_invalid_trade_price);
-        $display("  Max in-flight:         %0d", max_in_flight);
-        $display("  Hostile writes:        %0d", hostile_writes);
-        if (total_crosses_missed      == 0 &&
-            total_phantom_valid       == 0 &&
-            total_fifo_full_events    == 0 &&
-            total_conservation_errors == 0 &&
-            total_invalid_trade_price == 0) begin
-            $display("PASS: all invariants held");
-        end else begin
-            $display("FAIL: invariant violations -- check sim_top_events.csv");
-        end
+
+        $display("=== sweep run [%0s] complete ===", out_tag);
+        $display("  cycles=%0d trades=%0d trade_rate(/k)=%0d",
+                 cycle_count, trades_active,
+                 (run_cycles > 0) ? (trades_active * 1000) / run_cycles : 0);
+        $display("  drift_mse=%0d term_drift=%0d max_dd=%0d min_exec=%0d max_exec=%0d",
+                 (drift_samples > 0) ? (drift_sum_sq / drift_samples) : 0,
+                 terminal_drift, max_drawdown, min_exec_tick, max_exec_tick);
+        $display("  qty noise=%0d mm=%0d mom=%0d val=%0d",
+                 qty_noise_total, qty_mm_total, qty_mom_total, qty_val_total);
+        $display("  invariants cross=%0d phantom=%0d fifo=%0d cons=%0d invprice=%0d",
+                 total_crosses_missed, total_phantom_valid, total_fifo_full_events,
+                 total_conservation_errors, total_invalid_trade_price);
         $finish;
     end
 
+    // Bounds total sim time at RUN_CYCLES * kWatchdogMul.
     initial begin
-        #(kClockPeriod * kWatchdog);
-        $display("[ERROR] Watchdog timeout -- dumping partial results");
+        wait (run_cycles > 0);
+        while (cycle_count < watchdog_cycles) #(kClockPeriod * 100);
+        $display("[ERROR] Watchdog timeout (%0d cycles)", watchdog_cycles);
         write_summary;
         $finish;
     end

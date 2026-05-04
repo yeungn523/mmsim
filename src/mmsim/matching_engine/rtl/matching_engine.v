@@ -254,8 +254,8 @@ module matching_engine #(
             trade_price            <= {kPriceWidth{1'b0}};
             trade_quantity         <= {kQuantityWidth{1'b0}};
             trade_side             <= 1'b0;
-//            last_executed_price    <= {kPriceWidth{1'b0}};
-			   last_executed_price       <= 32'h64000000;
+            // Anchors at tick 200; mirrors gbm_logspace P0_INIT_DEF and order_gen_top GBM_P0_HELD.
+			   last_executed_price       <= 32'h64083501;
             last_executed_price_valid <= 1'b0;
 
             bid_in_flight <= 1'b0;

@@ -13,9 +13,9 @@ module order_gen_top #(
     parameter [31:0] LFSR_SEED_BASE    = 32'hCAFEBABE,
     parameter [31:0] LFSR_POLY         = 32'hB4BCD35C,
     parameter [8:0]  NEAR_NOISE_THRESH = 9'd16,
-    // Initial GBM price held to agents when gbm_enable is low; must match
-    // matching_engine kInitialPrice and GBM_P0_RECIP to avoid divergence on startup.
-    parameter [31:0] GBM_P0_HELD       = 32'h64000000   // tick 200 in Q8.24
+    // Holds the GBM price for agents while gbm_enable is low; mirrors gbm_logspace
+    // P0_INIT_DEF and matching_engine last_executed_price reset. LUT[6806], tick 200.
+    parameter [31:0] GBM_P0_HELD       = 32'h64083501
 )(
     input  wire        clk,
     input  wire        rst_n,
@@ -145,7 +145,8 @@ module order_gen_top #(
                 .NUM_AGENT_SLOTS   (SLOTS_PER_UNIT),
                 .LFSR_POLY         (LFSR_POLY),
                 .LFSR_SEED         (LFSR_SEED_BASE + g),
-                .NEAR_NOISE_THRESH (NEAR_NOISE_THRESH)
+                .NEAR_NOISE_THRESH (NEAR_NOISE_THRESH),
+                .INIT_PRICE        (GBM_P0_HELD)
             ) u_agent (
                 .clk                 (clk),
                 .rst_n               (rst_n),

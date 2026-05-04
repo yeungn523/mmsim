@@ -10,7 +10,9 @@ module agent_execution_unit #(
     // Shifts a Q8.24 price right to obtain the 9-bit tick (23 yields $0.50 per tick).
     parameter integer TICK_SHIFT_BITS    = 23,
     // Caps tick at the highest valid index (price_level_store kPriceRange - 1).
-    parameter [8:0]   MAX_TICK          = 9'd479
+    parameter [8:0]   MAX_TICK          = 9'd479,
+    // Seeds the executed-price shift register on reset; mirrors GBM_P0_HELD and matching_engine last_executed_price.
+    parameter [31:0]  INIT_PRICE        = 32'h64083501
 )(
     input  wire        clk,
     input  wire        rst_n,
@@ -64,10 +66,11 @@ module agent_execution_unit #(
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            executed_price_shift_reg_0 <= 32'd0;
-            executed_price_shift_reg_1 <= 32'd0;
-            executed_price_shift_reg_2 <= 32'd0;
-            executed_price_shift_reg_3 <= 32'd0;
+            // Primes the window with INIT_PRICE so momentum_delta is 0 until real trades arrive.
+            executed_price_shift_reg_0 <= INIT_PRICE;
+            executed_price_shift_reg_1 <= INIT_PRICE;
+            executed_price_shift_reg_2 <= INIT_PRICE;
+            executed_price_shift_reg_3 <= INIT_PRICE;
         end else if (trade_valid) begin
             executed_price_shift_reg_0 <= last_executed_price;
             executed_price_shift_reg_1 <= executed_price_shift_reg_0;
