@@ -6,13 +6,13 @@ module order_gen_top #(
     parameter SLOTS_PER_UNIT  = 1024,
     parameter FIFO_DEPTH      = 256,
     parameter signed [31:0] GBM_MU_ITO_DT     = 32'sh00000000,
-    parameter signed [31:0] GBM_SIGMA_SQRT_DT = 32'sh00000451,
-    parameter        [31:0] GBM_SIGMA_INIT    = 32'h00000451,
+	 parameter signed [31:0] GBM_SIGMA_SQRT_DT = 32'sh00000008,
+	 parameter        [31:0] GBM_SIGMA_INIT    = 32'h00000100,
     parameter        [31:0] GBM_ALPHA         = 32'h00FD70A4,
     parameter        [31:0] GBM_P0_RECIP      = 32'h00028F5C,
     parameter [31:0] LFSR_SEED_BASE    = 32'hCAFEBABE,
     parameter [31:0] LFSR_POLY         = 32'hB4BCD35C,
-    parameter [8:0]  NEAR_NOISE_THRESH = 9'd16,
+    parameter [8:0]  NEAR_NOISE_THRESH = 9'd5,
     // Initial GBM price held to agents when gbm_enable is low; must match
     // matching_engine kInitialPrice and GBM_P0_RECIP to avoid divergence on startup.
     parameter [31:0] GBM_P0_HELD       = 32'h64000000   // tick 200 in Q8.24
@@ -23,6 +23,9 @@ module order_gen_top #(
     input  wire [31:0] last_executed_price,
     input  wire        trade_valid,
     input  wire [15:0] active_agent_count,
+	 input  wire [31:0] gbm_step_period,
+	 input  wire [31:0] agent_step_period,
+    output wire [31:0] price_out,
     output wire [31:0] order_packet,
     output wire        order_valid,
     input  wire        order_ready,
@@ -93,6 +96,18 @@ module order_gen_top #(
     end
 
     assign inject_active = inject_busy;
+	 
+	 reg [31:0] gbm_throttle_counter;
+    wire       gbm_step_en = (gbm_throttle_counter >= gbm_step_period);
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n)
+            gbm_throttle_counter <= 32'd0;
+        else if (gbm_step_en)
+            gbm_throttle_counter <= 32'd0;
+        else
+            gbm_throttle_counter <= gbm_throttle_counter + 32'd1;
+    end
+    wire z_valid_gated = zig_valid_out && gbm_step_en;
 
     // Ziggurat always enabled so it stays warm and produces valid Gaussian samples
     // immediately when gbm_enable goes high; gating en instead would cause a pipeline
@@ -119,7 +134,7 @@ module order_gen_top #(
     ) u_gbm (
         .clk              (clk),
         .rst_n            (rst_n),
-        .z_valid          (zig_valid_out),
+        .z_valid          (zig_valid_gated),
         .z_in             ($signed(zig_gauss_out)),
         .param_load       (1'b0),
         .mu_ito_dt_in     (32'sd0),
@@ -181,9 +196,32 @@ module order_gen_top #(
 
     assign arb_ready = !fifo_almost_full && !fifo_full;
 
-    assign order_valid  = inject_busy ? 1'b1              : !fifo_empty;
-    assign order_packet = inject_busy ? inject_packet_reg : fifo_dout;
+    // Agent throttle — token-based rate limiter on matching engine consumption.
+    // Generates one token every agent_step_period cycles; token held until
+    // matching engine accepts the order, preventing dropped orders.
+    reg [31:0] agent_throttle_counter;
+    wire       agent_step_en = (agent_throttle_counter >= agent_step_period);
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n)
+            agent_throttle_counter <= 32'd0;
+        else if (agent_step_en)
+            agent_throttle_counter <= 32'd0;
+        else
+            agent_throttle_counter <= agent_throttle_counter + 32'd1;
+    end
 
+    reg agent_throttle_allow;
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n)
+            agent_throttle_allow <= 1'b0;
+        else if (agent_step_en)
+            agent_throttle_allow <= 1'b1;
+        else if (!inject_busy && !fifo_empty && agent_throttle_allow && order_ready)
+            agent_throttle_allow <= 1'b0;
+    end
+
+    assign order_valid  = inject_busy ? 1'b1 : (!fifo_empty && agent_throttle_allow);
+    assign order_packet = inject_busy ? inject_packet_reg : fifo_dout;
     order_fifo #(
         .DATA_WIDTH          (32),
         .DEPTH               (FIFO_DEPTH),
@@ -195,9 +233,11 @@ module order_gen_top #(
         .din         (arb_packet),
         .full        (fifo_full),
         .almost_full (fifo_almost_full),
-        .rd_en       (!inject_busy && !fifo_empty && order_ready),
+        .rd_en       (!inject_busy && !fifo_empty && agent_throttle_allow && order_ready),
         .dout        (fifo_dout),
         .empty       (fifo_empty)
     );
+	 
+	 assign price_out = gbm_price_gated;
 
 endmodule
