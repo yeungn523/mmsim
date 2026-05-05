@@ -6,7 +6,7 @@ module order_gen_top #(
     parameter SLOTS_PER_UNIT  = 1024,
     parameter FIFO_DEPTH      = 256,
     parameter signed [31:0] GBM_MU_ITO_DT     = 32'sh00000000,
-	 parameter signed [31:0] GBM_SIGMA_SQRT_DT = 32'sh00000008,
+	 parameter signed [31:0] GBM_SIGMA_SQRT_DT = 32'sh00001000,
 	 parameter        [31:0] GBM_SIGMA_INIT    = 32'h00000100,
     parameter        [31:0] GBM_ALPHA         = 32'h00FD70A4,
     parameter        [31:0] GBM_P0_RECIP      = 32'h00028F5C,
@@ -98,16 +98,37 @@ module order_gen_top #(
     assign inject_active = inject_busy;
 	 
 	 reg [31:0] gbm_throttle_counter;
-    wire       gbm_step_en = (gbm_throttle_counter >= gbm_step_period);
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n)
-            gbm_throttle_counter <= 32'd0;
-        else if (gbm_step_en)
-            gbm_throttle_counter <= 32'd0;
-        else
-            gbm_throttle_counter <= gbm_throttle_counter + 32'd1;
-    end
-    wire zig_valid_gated = zig_valid_out && gbm_step_en;
+		wire       gbm_step_en = (gbm_step_period > 0) && (gbm_throttle_counter >= gbm_step_period);
+
+		always @(posedge clk or negedge rst_n) begin
+			 if (!rst_n)
+				  gbm_throttle_counter <= 32'd0;
+			 else if (gbm_step_en)
+				  gbm_throttle_counter <= 32'd0;
+			 else
+				  gbm_throttle_counter <= gbm_throttle_counter + 32'd1;
+		end
+	 
+		reg  [15:0] zig_sample_buf;
+		reg         zig_sample_ready;
+
+		// Ziggurat deposits into buffer whenever it produces a sample and buffer is empty
+		always @(posedge clk or negedge rst_n) begin
+			 if (!rst_n) begin
+				  zig_sample_buf   <= 16'd0;
+				  zig_sample_ready <= 1'b0;
+			 end else begin
+				  if (zig_valid_out && !zig_sample_ready) begin
+						zig_sample_buf   <= zig_gauss_out;
+						zig_sample_ready <= 1'b1;
+				  end else if (gbm_step_en && zig_sample_ready) begin
+						zig_sample_ready <= 1'b0;   // consumed
+				  end
+			 end
+		end
+
+		wire        z_valid_to_gbm = gbm_step_en && zig_sample_ready;
+		wire [15:0] z_data_to_gbm  = zig_sample_buf;
 
     // Ziggurat always enabled so it stays warm and produces valid Gaussian samples
     // immediately when gbm_enable goes high; gating en instead would cause a pipeline
@@ -134,8 +155,8 @@ module order_gen_top #(
     ) u_gbm (
         .clk              (clk),
         .rst_n            (rst_n),
-        .z_valid          (zig_valid_gated),
-        .z_in             ($signed(zig_gauss_out)),
+        .z_valid          (z_valid_to_gbm),
+        .z_in             ($signed(z_data_to_gbm)),
         .param_load       (1'b0),
         .mu_ito_dt_in     (32'sd0),
         .sigma_sqrt_dt_in (32'sd0),
@@ -237,7 +258,7 @@ module order_gen_top #(
         .dout        (fifo_dout),
         .empty       (fifo_empty)
     );
-	 
+
 	 assign price_out = gbm_price_gated;
 
 endmodule
