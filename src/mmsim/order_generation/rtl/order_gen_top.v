@@ -107,7 +107,7 @@ module order_gen_top #(
         else
             gbm_throttle_counter <= gbm_throttle_counter + 32'd1;
     end
-    wire z_valid_gated = zig_valid_out && gbm_step_en;
+    wire zig_valid_gated = zig_valid_out && gbm_step_en;
 
     // Ziggurat always enabled so it stays warm and produces valid Gaussian samples
     // immediately when gbm_enable goes high; gating en instead would cause a pipeline
