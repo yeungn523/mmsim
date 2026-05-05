@@ -6,16 +6,17 @@ module order_gen_top #(
     parameter SLOTS_PER_UNIT  = 1024,
     parameter FIFO_DEPTH      = 256,
     parameter signed [31:0] GBM_MU_ITO_DT     = 32'sh00000000,
-	 parameter signed [31:0] GBM_SIGMA_SQRT_DT = 32'sh00001000,
+	 parameter signed [31:0] GBM_SIGMA_SQRT_DT = 32'sh00000008,
 	 parameter        [31:0] GBM_SIGMA_INIT    = 32'h00000100,
     parameter        [31:0] GBM_ALPHA         = 32'h00FD70A4,
     parameter        [31:0] GBM_P0_RECIP      = 32'h00028F5C,
     parameter [31:0] LFSR_SEED_BASE    = 32'hCAFEBABE,
     parameter [31:0] LFSR_POLY         = 32'hB4BCD35C,
     parameter [8:0]  NEAR_NOISE_THRESH = 9'd5,
-    // Initial GBM price held to agents when gbm_enable is low; must match
-    // matching_engine kInitialPrice and GBM_P0_RECIP to avoid divergence on startup.
-    parameter [31:0] GBM_P0_HELD       = 32'h64000000   // tick 200 in Q8.24
+    // Holds tick 200 to agents until gbm_enable asserts; must match matching_engine kInitialPrice.
+    parameter [31:0] GBM_P0_HELD       = 32'h64000000,  // tick 200 in Q8.24
+    // Paces flash-injection packets so agents observe last_exec dropping during the burst.
+    parameter [31:0] INJECT_STEP_PERIOD = 32'd500
 )(
     input  wire        clk,
     input  wire        rst_n,
@@ -72,6 +73,30 @@ module order_gen_top #(
     reg         inject_trigger_prev;
     wire inject_trigger_rise = inject_trigger && !inject_trigger_prev;
 
+    // Generates one inject token every INJECT_STEP_PERIOD cycles; the allow latch
+    // below holds the token until the matching engine accepts the inject packet.
+    reg [31:0] inject_throttle_counter;
+    wire       inject_step_en = (inject_throttle_counter >= INJECT_STEP_PERIOD);
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n)
+            inject_throttle_counter <= 32'd0;
+        else if (inject_step_en)
+            inject_throttle_counter <= 32'd0;
+        else
+            inject_throttle_counter <= inject_throttle_counter + 32'd1;
+    end
+
+    reg inject_throttle_allow;
+    wire inject_fire = inject_busy && inject_throttle_allow;
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n)
+            inject_throttle_allow <= 1'b0;
+        else if (inject_step_en)
+            inject_throttle_allow <= 1'b1;
+        else if (inject_fire && order_ready)
+            inject_throttle_allow <= 1'b0;
+    end
+
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             inject_remaining    <= 32'd0;
@@ -84,7 +109,7 @@ module order_gen_top #(
                 inject_busy       <= 1'b1;
                 inject_remaining  <= inject_count;
                 inject_packet_reg <= inject_packet;
-            end else if (inject_busy && order_ready) begin
+            end else if (inject_fire && order_ready) begin
                 if (inject_remaining <= 32'd1) begin
                     inject_busy      <= 1'b0;
                     inject_remaining <= 32'd0;
@@ -237,12 +262,14 @@ module order_gen_top #(
             agent_throttle_allow <= 1'b0;
         else if (agent_step_en)
             agent_throttle_allow <= 1'b1;
-        else if (!inject_busy && !fifo_empty && agent_throttle_allow && order_ready)
+        else if (!inject_fire && !fifo_empty && agent_throttle_allow && order_ready)
             agent_throttle_allow <= 1'b0;
     end
 
-    assign order_valid  = inject_busy ? 1'b1 : (!fifo_empty && agent_throttle_allow);
-    assign order_packet = inject_busy ? inject_packet_reg : fifo_dout;
+    // Gives inject_fire priority on its throttle pulse and lets the FIFO drain on
+    // dead cycles so momentum/value agents interleave during the burst.
+    assign order_valid  = inject_fire ? 1'b1 : (!fifo_empty && agent_throttle_allow);
+    assign order_packet = inject_fire ? inject_packet_reg : fifo_dout;
     order_fifo #(
         .DATA_WIDTH          (32),
         .DEPTH               (FIFO_DEPTH),
@@ -254,7 +281,7 @@ module order_gen_top #(
         .din         (arb_packet),
         .full        (fifo_full),
         .almost_full (fifo_almost_full),
-        .rd_en       (!inject_busy && !fifo_empty && agent_throttle_allow && order_ready),
+        .rd_en       (!inject_fire && !fifo_empty && agent_throttle_allow && order_ready),
         .dout        (fifo_dout),
         .empty       (fifo_empty)
     );

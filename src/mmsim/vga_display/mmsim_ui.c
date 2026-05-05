@@ -1121,7 +1121,7 @@ int main(int argc, char *argv[])
             else
             {
                 type = TYPE_VALUE;
-                p1   = rand_range(25, 1000);
+                p1   = rand_range(15, 150);
                 p2   = rand_range(2, 80);
                 p3   = rand_range(5, 50);
             }
