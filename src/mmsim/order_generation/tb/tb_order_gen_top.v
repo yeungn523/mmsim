@@ -45,7 +45,6 @@ module tb_order_gen_top;
         .clk               (clk),
         .rst_n             (rst_n),
         .last_executed_price   (last_executed_price),
-        .trade_valid       (trade_valid),
         .active_agent_count(active_agent_count),
         .param_wr_en       (param_wr_en),
         .param_wr_addr     (param_wr_addr),

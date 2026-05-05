@@ -10,7 +10,10 @@ module agent_execution_unit #(
     // Shifts a Q8.24 price right to obtain the 9-bit tick (23 yields $0.50 per tick).
     parameter integer TICK_SHIFT_BITS    = 23,
     // Caps tick at the highest valid index (price_level_store kPriceRange - 1).
-    parameter [8:0]   MAX_TICK          = 9'd479
+    parameter [8:0]   MAX_TICK          = 9'd479,
+    // Anchors the momentum lookback window to wall-clock time instead of per-fill
+    // events; pulses the shift register every MOMENTUM_SAMPLE_PERIOD cycles.
+    parameter [31:0]  MOMENTUM_SAMPLE_PERIOD = 32'd100_000
 )(
     input  wire        clk,
     input  wire        rst_n,
@@ -20,9 +23,7 @@ module agent_execution_unit #(
     input  wire [31:0] last_executed_price,
     input  wire [15:0] sigma,
 
-    input  wire        trade_valid,
-
-    // param_data lags param_addr by one cycle (M10K synchronous read).
+    // Lags one cycle behind param_addr (M10K synchronous read).
     output reg  [15:0] param_addr,
     input  wire [31:0] param_data,
 
@@ -41,7 +42,7 @@ module agent_execution_unit #(
 
     reg [1:0] state;
 
-    // Internal LFSR
+    // Drives the internal LFSR for randomness.
     wire [31:0] lfsr_out;
     galois_lfsr #(
         .POLY (LFSR_POLY),
@@ -56,11 +57,24 @@ module agent_execution_unit #(
     );
 
 
-    // executed_price_shift_reg[0] = most recent, [3] = oldest
+    // Maps shift-register indices: [0] = most recent, [3] = oldest.
     reg [31:0] executed_price_shift_reg_0;
     reg [31:0] executed_price_shift_reg_1;
     reg [31:0] executed_price_shift_reg_2;
     reg [31:0] executed_price_shift_reg_3;
+
+    // Pulses momentum_sample_en once every MOMENTUM_SAMPLE_PERIOD cycles so the
+    // momentum lookback reflects price drift over a stable wall-clock window.
+    reg [31:0] momentum_sample_counter;
+    wire       momentum_sample_en = (momentum_sample_counter >= MOMENTUM_SAMPLE_PERIOD);
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n)
+            momentum_sample_counter <= 32'd0;
+        else if (momentum_sample_en)
+            momentum_sample_counter <= 32'd0;
+        else
+            momentum_sample_counter <= momentum_sample_counter + 32'd1;
+    end
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -68,7 +82,7 @@ module agent_execution_unit #(
             executed_price_shift_reg_1 <= 32'd0;
             executed_price_shift_reg_2 <= 32'd0;
             executed_price_shift_reg_3 <= 32'd0;
-        end else if (trade_valid) begin
+        end else if (momentum_sample_en) begin
             executed_price_shift_reg_0 <= last_executed_price;
             executed_price_shift_reg_1 <= executed_price_shift_reg_0;
             executed_price_shift_reg_2 <= executed_price_shift_reg_1;
@@ -97,7 +111,7 @@ module agent_execution_unit #(
     wire [8:0] gbm_tick;
     assign gbm_tick = (gbm_price[31:TICK_SHIFT_BITS] > MAX_TICK) ? MAX_TICK : gbm_price[31:TICK_SHIFT_BITS];
 
-    // Value Investor Combinational Logic
+    // Computes value-investor divergence between the GBM tick and the last executed tick.
     wire [8:0] last_executed_tick;
     assign last_executed_tick = (last_executed_price[31:TICK_SHIFT_BITS] > MAX_TICK)
                             ? MAX_TICK : last_executed_price[31:TICK_SHIFT_BITS];
@@ -115,7 +129,7 @@ module agent_execution_unit #(
                     ? (~divergence[9:0] + 10'd1)
                     : divergence[9:0];
 
-    // Momentum Trader Combinational Logic
+    // Computes momentum-trader delta between the latest and oldest executed ticks.
     wire [8:0] oldest_executed_tick;
     assign oldest_executed_tick = (executed_price_shift_reg_3[31:TICK_SHIFT_BITS] > MAX_TICK) ? MAX_TICK : executed_price_shift_reg_3[31:TICK_SHIFT_BITS];
 
@@ -130,9 +144,9 @@ module agent_execution_unit #(
                     ? (~momentum_delta[9:0] + 10'd1)
                     : momentum_delta[9:0];
 
-    // Combinational price assembly based on Agent Type
+    // Assembles the final price combinationally based on agent type.
     always @(*) begin
-        // Noise trader offset math (default)
+        // Computes noise-trader offset math (used as the default branch).
         offset_raw   = dsp_product[19:10];
         offset_ticks = (offset_raw > {1'b0, MAX_TICK}) ? MAX_TICK : offset_raw[8:0];
 
@@ -174,7 +188,7 @@ module agent_execution_unit #(
         endcase
     end
 
-    // Main FSM
+    // Drives the main FSM that walks agent slots and emits packets.
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             state           <= kStateLoad;
@@ -255,8 +269,7 @@ module agent_execution_unit #(
                         2'b10: begin
                             if (abs_mom > param_data[29:20]) begin
                                 emit_flag <= 1'b1;
-                                // delta > 0 means price is rising -> Buy (0)
-                                // delta < 0 means price is falling -> Sell (1)
+                                // Maps delta > 0 (price rising) to Buy (0); delta < 0 (price falling) to Sell (1).
                                 calc_side <= (momentum_delta > 0) ? 1'b0 : 1'b1;
 
                                 // Routes to the DSP for volume scaling.
@@ -274,8 +287,7 @@ module agent_execution_unit #(
                         2'b11: begin
                             if (abs_div > param_data[29:20]) begin
                                 emit_flag <= 1'b1;
-                                // divergence > 0 means GBM > Exec (undervalued -> Buy: 0)
-                                // divergence < 0 means GBM < Exec (overvalued -> Sell: 1)
+                                // Maps divergence > 0 (GBM > Exec, undervalued) to Buy (0); divergence < 0 (overvalued) to Sell (1).
                                 calc_side <= (divergence > 0) ? 1'b0 : 1'b1;
 
                                 // Routes to the DSP for volume scaling.
@@ -351,7 +363,7 @@ module agent_execution_unit #(
                         end
 
                     end else begin
-                        // No emission: deasserts valid and advances immediately.
+                        // Deasserts valid and advances immediately when there's no emission this cycle.
                         order_valid <= 1'b0;
                         if (active_agent_count == 16'd0) begin
                             slot_counter <= 16'd0;

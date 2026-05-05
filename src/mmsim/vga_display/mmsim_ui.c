@@ -70,12 +70,12 @@
 #define CANDLE_X0    0
 #define CANDLE_WIDTH 320
 
-// Volume histogram - bottom-left
-#define VOLUME_X0     0
-#define VOLUME_WIDTH  CANDLE_WIDTH
-#define VOLUME_Y0     370
-#define VOLUME_HEIGHT 110
-#define VOLUME_Y1     (VOLUME_Y0 + VOLUME_HEIGHT - 1)
+// Buy-orders-placed stacked bar chart - bottom-left
+#define BUYS_X0     0
+#define BUYS_WIDTH  CANDLE_WIDTH
+#define BUYS_Y0     370
+#define BUYS_HEIGHT 110
+#define BUYS_Y1     (BUYS_Y0 + BUYS_HEIGHT - 1)
 
 // Depth - top-right
 #define DEPTH_X0     320
@@ -135,11 +135,20 @@ static uint32_t orderbook_memory[1024];
 #define OB_MM_VOLUME       orderbook_memory[806]
 #define OB_MOMENTUM_VOLUME orderbook_memory[807]
 #define OB_VALUE_VOLUME    orderbook_memory[808]
+#define OB_NOISE_BUYS    orderbook_memory[809]
+#define OB_MM_BUYS       orderbook_memory[810]
+#define OB_MOMENTUM_BUYS orderbook_memory[811]
+#define OB_VALUE_BUYS    orderbook_memory[812]
 
 static uint32_t previous_noise_volume    = 0;
 static uint32_t previous_mm_volume       = 0;
 static uint32_t previous_momentum_volume = 0;
 static uint32_t previous_value_volume    = 0;
+
+static uint32_t previous_noise_buys    = 0;
+static uint32_t previous_mm_buys       = 0;
+static uint32_t previous_momentum_buys = 0;
+static uint32_t previous_value_buys    = 0;
 
 // Candle + volume + composition state
 typedef struct
@@ -166,11 +175,10 @@ static int      axis_maximum  = 250;
 static int      last_label_rows[20];
 static int      last_label_count = 0;
 
-static uint32_t volume_history[MAXIMUM_CANDLES];
-static int      volume_head    = 0;
-static int      volume_count   = 0;
-static uint32_t volume_maximum = 1;
-static uint32_t volume_at_open = 0;
+// Stores per-candle counts of buy orders placed by each agent type (absolute, not normalized).
+static uint32_t buys_history[MAXIMUM_CANDLES][NUMBER_TRADER_TYPES];
+static int      buys_head    = 0;
+static int      buys_count   = 0;
 
 static uint8_t composition_history[COMPOSITION_MAXIMUM_COLUMNS][NUMBER_TRADER_TYPES];
 static int     composition_head  = 0;
@@ -309,6 +317,10 @@ void read_fpga_snapshot(void)
     orderbook_memory[806] = fpga_orderbook[806];
     orderbook_memory[807] = fpga_orderbook[807];
     orderbook_memory[808] = fpga_orderbook[808];
+    orderbook_memory[809] = fpga_orderbook[809];
+    orderbook_memory[810] = fpga_orderbook[810];
+    orderbook_memory[811] = fpga_orderbook[811];
+    orderbook_memory[812] = fpga_orderbook[812];
 
     uint32_t best_bid = orderbook_memory[801];
     uint32_t best_ask = orderbook_memory[802];
@@ -517,7 +529,6 @@ void update_candle(void)
         current_open   = price;
         current_high   = price;
         current_low    = price;
-        volume_at_open = OB_VOLUME;
     }
 
     if (price > current_high) current_high = price;
@@ -534,23 +545,21 @@ void update_candle(void)
         candle.green = (current_close >= current_open);
         candles[candle_head] = candle;
 
+        // Captures buy-order deltas per agent type for this candle window.
         {
-            uint32_t candle_volume =
-                (OB_VOLUME >= volume_at_open)
-                    ? (OB_VOLUME - volume_at_open)
-                    : (0xFFFFFFFF - volume_at_open + OB_VOLUME + 1);
-            volume_history[candle_head] = candle_volume;
-            if (candle_volume >= volume_maximum)
-            {
-                volume_maximum = candle_volume;
-            }
-            else if (volume_count == MAXIMUM_CANDLES)
-            {
-                int j;
-                volume_maximum = 1;
-                for (j = 0; j < MAXIMUM_CANDLES; j++)
-                    if (volume_history[j] > volume_maximum) volume_maximum = volume_history[j];
-            }
+            uint32_t delta_noise_b    = OB_NOISE_BUYS    - previous_noise_buys;
+            uint32_t delta_mm_b       = OB_MM_BUYS       - previous_mm_buys;
+            uint32_t delta_momentum_b = OB_MOMENTUM_BUYS - previous_momentum_buys;
+            uint32_t delta_value_b    = OB_VALUE_BUYS    - previous_value_buys;
+            previous_noise_buys    = OB_NOISE_BUYS;
+            previous_mm_buys       = OB_MM_BUYS;
+            previous_momentum_buys = OB_MOMENTUM_BUYS;
+            previous_value_buys    = OB_VALUE_BUYS;
+
+            buys_history[candle_head][0] = delta_noise_b;
+            buys_history[candle_head][1] = delta_mm_b;
+            buys_history[candle_head][2] = delta_momentum_b;
+            buys_history[candle_head][3] = delta_value_b;
         }
 
         {
@@ -582,11 +591,11 @@ void update_candle(void)
 
         candle_head      = (candle_head + 1) % MAXIMUM_CANDLES;
         composition_head = (composition_head + 1) % COMPOSITION_MAXIMUM_COLUMNS;
-        volume_head      = candle_head;
+        buys_head        = candle_head;
 
         if (candle_count < MAXIMUM_CANDLES)                   candle_count++;
         if (composition_count < COMPOSITION_MAXIMUM_COLUMNS)  composition_count++;
-        if (volume_count < MAXIMUM_CANDLES)                   volume_count++;
+        if (buys_count < MAXIMUM_CANDLES)                     buys_count++;
 
         window_tick  = 0;
         current_high = 0;
@@ -745,32 +754,41 @@ void render_candles(void)
     VGA_vline(CANDLE_X0 + CANDLE_WIDTH - 1, CHART_Y0, chart_bottom, gray);
 }
 
-void render_volume_histogram(void)
+// Renders bottom-left as stacked-absolute bars: one column per candle, segments per agent type
+// (noise/MM/momentum/value), height proportional to total BUY orders placed during that candle
+// window. Tall value (purple) segment after a crash confirms value-investor dip-buying;
+// tall momentum (orange) segment during a rally confirms trend-chasing.
+void render_buys_placed(void)
 {
     int i, x, y;
-    int n = volume_count;
-    uint32_t maximum_volume = 1;
+    int n = buys_count;
+    static const short trader_colors[NUMBER_TRADER_TYPES] = {
+        color_noise, color_mm, color_momentum, color_value
+    };
 
+    uint32_t maximum_total = 1;
     for (i = 0; i < n; i++)
     {
-        int index = (volume_head - n + i + MAXIMUM_CANDLES) % MAXIMUM_CANDLES;
-        if (volume_history[index] > maximum_volume) maximum_volume = volume_history[index];
+        int index = (buys_head - n + i + MAXIMUM_CANDLES) % MAXIMUM_CANDLES;
+        uint32_t row_total = buys_history[index][0] + buys_history[index][1]
+                           + buys_history[index][2] + buys_history[index][3];
+        if (row_total > maximum_total) maximum_total = row_total;
     }
 
     int ref_y[3];
-    ref_y[0] = VOLUME_Y0 + (VOLUME_HEIGHT * 1) / 4;
-    ref_y[1] = VOLUME_Y0 + (VOLUME_HEIGHT * 2) / 4;
-    ref_y[2] = VOLUME_Y0 + (VOLUME_HEIGHT * 3) / 4;
+    ref_y[0] = BUYS_Y0 + (BUYS_HEIGHT * 1) / 4;
+    ref_y[1] = BUYS_Y0 + (BUYS_HEIGHT * 2) / 4;
+    ref_y[2] = BUYS_Y0 + (BUYS_HEIGHT * 3) / 4;
 
-    for (y = VOLUME_Y0; y <= VOLUME_Y1; y++)
+    for (y = BUYS_Y0; y <= BUYS_Y1; y++)
     {
-        int y_fraction = ((VOLUME_Y1 - y) * 255) / (VOLUME_HEIGHT - 1);
-        int is_ref     = (y == ref_y[0] || y == ref_y[1] || y == ref_y[2]);
+        int height_from_bottom = BUYS_Y1 - y;
+        int is_ref             = (y == ref_y[0] || y == ref_y[1] || y == ref_y[2]);
 
-        for (x = VOLUME_X0; x < VOLUME_X0 + VOLUME_WIDTH; x++)
+        for (x = BUYS_X0; x < BUYS_X0 + BUYS_WIDTH; x++)
         {
-            int slot   = (x - VOLUME_X0) / SLOT;
-            int slot_x = (x - VOLUME_X0) % SLOT;
+            int slot   = (x - BUYS_X0) / SLOT;
+            int slot_x = (x - BUYS_X0) % SLOT;
             if (slot_x == SLOT - 1) { VGA_PIXEL(x, y, black); continue; }
             if (slot >= n)
             {
@@ -778,14 +796,31 @@ void render_volume_histogram(void)
                 continue;
             }
 
-            int      history_index = (volume_head - n + slot + MAXIMUM_CANDLES) % MAXIMUM_CANDLES;
-            uint32_t volume_value  = volume_history[history_index];
-            int      bar_fraction  = (int)(((uint64_t)volume_value * 255) / maximum_volume);
+            int history_index = (buys_head - n + slot + MAXIMUM_CANDLES) % MAXIMUM_CANDLES;
+            int bar_pixels    = (int)(((uint64_t)(buys_history[history_index][0]
+                                                + buys_history[history_index][1]
+                                                + buys_history[history_index][2]
+                                                + buys_history[history_index][3])
+                                       * (BUYS_HEIGHT - 1)) / maximum_total);
 
-            if (y_fraction <= bar_fraction)
+            if (height_from_bottom < bar_pixels)
             {
-                int intensity = 10 + (int)(((uint64_t)volume_value * 53) / maximum_volume);
-                VGA_PIXEL(x, y, RGB(0, intensity, intensity));
+                // Walks the four segments bottom-up to find which agent type owns this pixel.
+                int      cumulative = 0;
+                int      t;
+                short    seg_color  = black;
+                uint64_t row_total  = buys_history[history_index][0]
+                                    + buys_history[history_index][1]
+                                    + buys_history[history_index][2]
+                                    + buys_history[history_index][3];
+                if (row_total == 0) row_total = 1;
+                for (t = 0; t < NUMBER_TRADER_TYPES; t++)
+                {
+                    cumulative += (int)((buys_history[history_index][t] * (uint64_t)bar_pixels) / row_total);
+                    if (height_from_bottom < cumulative) { seg_color = trader_colors[t]; break; }
+                }
+                if (seg_color == black) seg_color = trader_colors[NUMBER_TRADER_TYPES - 1];
+                VGA_PIXEL(x, y, seg_color);
             }
             else if (is_ref && ((x >> 2) & 1))
             {
@@ -798,7 +833,7 @@ void render_volume_histogram(void)
         }
     }
 
-    VGA_hline(VOLUME_X0, VOLUME_X0 + VOLUME_WIDTH - 1, VOLUME_Y0, gray);
+    VGA_hline(BUYS_X0, BUYS_X0 + BUYS_WIDTH - 1, BUYS_Y0, gray);
 }
 
 void render_composition(void)
@@ -1206,7 +1241,7 @@ int main(int argc, char *argv[])
         {
             uint32_t exec = OB_EXEC > 0 ? OB_EXEC : 200;
             printf("\n>>> FLASH CRASH triggered at tick %u\n\n", exec);
-            flash_inject(1, 0, 9000, 105000);
+            flash_inject(1, 0, 50, 80);
         }
         else if (key == 'b' || key == 'B')
         {
@@ -1229,7 +1264,7 @@ int main(int argc, char *argv[])
         render_topbar();
         render_candles();
         render_depth();
-        render_volume_histogram();
+        render_buys_placed();
         render_composition();
         render_debug_overlay();
     }

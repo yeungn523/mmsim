@@ -6,7 +6,7 @@ module order_gen_top #(
     parameter SLOTS_PER_UNIT  = 1024,
     parameter FIFO_DEPTH      = 256,
     parameter signed [31:0] GBM_MU_ITO_DT     = 32'sh00000000,
-	 parameter signed [31:0] GBM_SIGMA_SQRT_DT = 32'sh00000008,
+	 parameter signed [31:0] GBM_SIGMA_SQRT_DT = 32'sh00000040,
 	 parameter        [31:0] GBM_SIGMA_INIT    = 32'h00000100,
     parameter        [31:0] GBM_ALPHA         = 32'h00FD70A4,
     parameter        [31:0] GBM_P0_RECIP      = 32'h00028F5C,
@@ -22,7 +22,6 @@ module order_gen_top #(
     input  wire        rst_n,
     input  wire        gbm_enable,       // gates GBM price output to agents; held at GBM_P0_HELD when low
     input  wire [31:0] last_executed_price,
-    input  wire        trade_valid,
     input  wire [15:0] active_agent_count,
 	 input  wire [31:0] gbm_step_period,
 	 input  wire [31:0] agent_step_period,
@@ -31,7 +30,7 @@ module order_gen_top #(
     output wire        order_valid,
     input  wire        order_ready,
 
-    // Flash injection
+    // Threads flash-injection ports through to the inject FSM.
     input  wire [31:0] inject_packet,
     input  wire        inject_trigger,
     input  wire [31:0] inject_count,
@@ -50,8 +49,8 @@ module order_gen_top #(
     wire        gbm_price_valid;
 
     // Gates GBM price to agents — holds at tick 200 until gbm_enable asserted.
-    // Ziggurat always runs so it has valid outputs ready the moment enable goes high;
-    // GBM steps internally but agents see exactly GBM_P0_HELD until enabled.
+    // Runs the ziggurat continuously so it has valid outputs ready the moment enable goes high;
+    // advances GBM internally while agents see exactly GBM_P0_HELD until enabled.
     wire [31:0] gbm_price_gated = gbm_enable ? gbm_price_out : GBM_P0_HELD;
 
     wire [NUM_UNITS-1:0]    unit_order_valid;
@@ -66,7 +65,7 @@ module order_gen_top #(
     wire        fifo_empty;
     wire [31:0] fifo_dout;
 
-    // Flash injection FSM
+    // Holds flash-injection FSM state and the in-flight packet register.
     reg [31:0]  inject_remaining;
     reg         inject_busy;
     reg [31:0]  inject_packet_reg;
@@ -137,7 +136,7 @@ module order_gen_top #(
 		reg  [15:0] zig_sample_buf;
 		reg         zig_sample_ready;
 
-		// Ziggurat deposits into buffer whenever it produces a sample and buffer is empty
+		// Deposits ziggurat samples into the buffer whenever it produces one and the buffer is empty.
 		always @(posedge clk or negedge rst_n) begin
 			 if (!rst_n) begin
 				  zig_sample_buf   <= 16'd0;
@@ -155,9 +154,6 @@ module order_gen_top #(
 		wire        z_valid_to_gbm = gbm_step_en && zig_sample_ready;
 		wire [15:0] z_data_to_gbm  = zig_sample_buf;
 
-    // Ziggurat always enabled so it stays warm and produces valid Gaussian samples
-    // immediately when gbm_enable goes high; gating en instead would cause a pipeline
-    // bubble on the first enable cycle and agents would see gbm_price=0 transiently.
     ziggurat_gaussian u_ziggurat (
         .clk        (clk),
         .rst_n      (rst_n),
@@ -215,7 +211,6 @@ module order_gen_top #(
                 .gbm_price           (gbm_price_gated),
                 .last_executed_price (last_executed_price),
                 .sigma               (gbm_sigma_out[15:0]),
-                .trade_valid         (trade_valid),
                 .param_addr          (unit_param_addr),
                 .param_data          (param_rd_data[g*32 +: 32]),
                 .active_agent_count  (active_agent_count),
@@ -242,9 +237,9 @@ module order_gen_top #(
 
     assign arb_ready = !fifo_almost_full && !fifo_full;
 
-    // Agent throttle — token-based rate limiter on matching engine consumption.
-    // Generates one token every agent_step_period cycles; token held until
-    // matching engine accepts the order, preventing dropped orders.
+    // Throttles agent submissions with a token-based rate limiter on matching-engine consumption.
+    // Generates one token every agent_step_period cycles and holds it until the matching engine
+    // accepts the order, which prevents dropped orders.
     reg [31:0] agent_throttle_counter;
     wire       agent_step_en = (agent_throttle_counter >= agent_step_period);
     always @(posedge clk or negedge rst_n) begin

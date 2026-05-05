@@ -71,7 +71,6 @@ module agent_execution_unit_tb;
         .gbm_price         (gbm_price),
         .last_executed_price (last_executed_price),
         .sigma             (sigma),
-        .trade_valid       (trade_valid),
         .param_addr        (param_addr),
         .param_data        (param_data),
         .active_agent_count(active_agent_count),
