@@ -1132,33 +1132,33 @@ int main(int argc, char *argv[])
         {
             uint32_t type, p1, p2, p3;
             int roll = rand() % 100;
-            if (roll < 10)
+            if (roll < 25)
             {
                 type = TYPE_NOISE;
                 p1   = rand_range(25, 80);
                 p2   = rand_range(3, 80);
                 p3   = rand_range(5, 30);
             }
-            else if (roll < 85)
+            else if (roll < 75)
             {
                 type = TYPE_MM;
                 p1   = rand_range(25, 80);
                 p2   = rand_range(3, 80);
                 p3   = rand_range(5, 30);
             }
-            else if (roll < 95)
+            else if (roll < 98)
             {
                 type = TYPE_MOMENTUM;
-                p1   = rand_range(25, 80);
+                p1   = rand_range(3, 30);
                 p2   = rand_range(3, 60);
                 p3   = rand_range(2, 30);
             }
             else
             {
                 type = TYPE_VALUE;
-                p1   = rand_range(15, 150);
-                p2   = rand_range(2, 80);
-                p3   = rand_range(5, 50);
+                p1   = rand_range(15, 80);
+                p2   = rand_range(2, 30);
+                p3   = rand_range(2, 5);
             }
             counts[type]++;
             local_agents[unit][slot] = PACK_AGENT(type, p1, p2, p3);
@@ -1241,13 +1241,13 @@ int main(int argc, char *argv[])
         {
             uint32_t exec = OB_EXEC > 0 ? OB_EXEC : 200;
             printf("\n>>> FLASH CRASH triggered at tick %u\n\n", exec);
-            flash_inject(1, 0, 50, 80);
+            flash_inject(1, 0, 4, 50000);
         }
         else if (key == 'b' || key == 'B')
         {
             uint32_t exec = OB_EXEC > 0 ? OB_EXEC : 200;
             printf("\n>>> FLASH RALLY triggered at tick %u\n\n", exec);
-            flash_inject(0, 399, 100, 150);
+            flash_inject(0, 399, 4, 50000);
         }
         else if (key == 'q' || key == 'Q')
         {

@@ -16,7 +16,7 @@ module order_gen_top #(
     // Holds tick 200 to agents until gbm_enable asserts; must match matching_engine kInitialPrice.
     parameter [31:0] GBM_P0_HELD       = 32'h64000000,  // tick 200 in Q8.24
     // Paces flash-injection packets so agents observe last_exec dropping during the burst.
-    parameter [31:0] INJECT_STEP_PERIOD = 32'd500
+    parameter [31:0] INJECT_STEP_PERIOD = 32'd5000
 )(
     input  wire        clk,
     input  wire        rst_n,
