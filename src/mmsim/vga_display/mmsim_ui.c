@@ -96,7 +96,7 @@
 #define GAP             1
 #define SLOT            (BODY_WIDTH + GAP)
 #define MAXIMUM_CANDLES (CANDLE_WIDTH / SLOT)
-#define TICKS_PER_CANDLE 10
+#define TICKS_PER_CANDLE 3
 
 // Depth binning
 #define DEPTH_BIN_SIZE      4
@@ -220,6 +220,12 @@ void flash_inject(int side, int price_tick, int volume, int count)
     if (!inject_packet_pio || !inject_trigger_pio ||
         !inject_count_pio  || !inject_active_pio) return;
 
+    // Wait for previous inject to finish instead of dropping
+    int timeout = 3000;
+    while ((*inject_active_pio & 0x1) && timeout-- > 0) usleep(1000);
+    if (timeout <= 0)
+        printf("  WARNING: inject_active timeout, firing anyway\n");
+
     uint32_t packet =
         ((uint32_t)(side       & 0x1)   << 31) |
         ((uint32_t)(0)                  << 30) |
@@ -232,11 +238,6 @@ void flash_inject(int side, int price_tick, int volume, int count)
     *inject_trigger_pio = 1;
     usleep(1000);
     *inject_trigger_pio = 0;
-
-    int timeout = 5000;
-    while ((*inject_active_pio & 0x1) && timeout-- > 0) usleep(1000);
-    if (timeout <= 0)
-        printf("  WARNING: inject_active never deasserted\n");
 }
 
 // VGA line primitives
@@ -1091,8 +1092,8 @@ int main(int argc, char *argv[])
 
     *gbm_enable_pio   = 0;
     *gbm_step_pio     = 500000;
-    *analog_speed_pio = 5000000;
-    *agent_step_pio   = 1000;
+    *analog_speed_pio = 1000000;
+    *agent_step_pio   = 3000;
 
     printf("GBM step period: %u cycles (~%u Hz)\n",    500000, 50000000 / 500000);
     printf("Analog clock period: %u cycles (~%u fps)\n", 5000000, 50000000 / 5000000);
@@ -1132,21 +1133,22 @@ int main(int argc, char *argv[])
         {
             uint32_t type, p1, p2, p3;
             int roll = rand() % 100;
-            if (roll < 25)
+            // Change the roll distribution in main():
+            if (roll < 20)
             {
                 type = TYPE_NOISE;
                 p1   = rand_range(25, 80);
                 p2   = rand_range(3, 80);
                 p3   = rand_range(5, 30);
             }
-            else if (roll < 75)
+            else if (roll < 60)
             {
-                type = TYPE_MM;
-                p1   = rand_range(25, 80);
-                p2   = rand_range(3, 80);
-                p3   = rand_range(5, 30);
+              type = TYPE_MM;
+              p1   = rand_range(25, 80);   // higher emission — they post frequently
+              p2   = rand_range(3, 30);    // moderate spread — wide enough to survive, tight enough to trade
+              p3   = rand_range(5, 20);    // decent volume per order
             }
-            else if (roll < 98)
+            else if (roll < 85)
             {
                 type = TYPE_MOMENTUM;
                 p1   = rand_range(3, 30);
@@ -1156,9 +1158,10 @@ int main(int argc, char *argv[])
             else
             {
                 type = TYPE_VALUE;
-                p1   = rand_range(15, 80);
-                p2   = rand_range(2, 30);
-                p3   = rand_range(2, 5);
+                type = TYPE_VALUE;
+                p1   = rand_range(3, 15);   // triggers at 3-15 tick divergence, not 15-40
+                p2   = rand_range(10, 40);  // moderate aggression
+                p3   = rand_range(3, 10);
             }
             counts[type]++;
             local_agents[unit][slot] = PACK_AGENT(type, p1, p2, p3);
@@ -1239,22 +1242,47 @@ int main(int argc, char *argv[])
         char key = poll_key();
         if (key == 's' || key == 'S')
         {
+            read_fpga_snapshot();
+    
+            // Sum current bid side depth
+            uint32_t total_bid = 0;
+            for (int i = 0; i < 400; i++) total_bid += OB_BUY(i);
+    
+            // Target consuming 80% of the bid book over 500 packets (5 seconds at 10ms/packet)
+            uint32_t target_shares  = total_bid * 80 / 100;
+            uint32_t vol_per_packet = target_shares / 500;
+            if (vol_per_packet < 5)   vol_per_packet = 5;    // minimum — always moves price
+            if (vol_per_packet > 200) vol_per_packet = 200;  // cap — never nukes instantly
+    
             uint32_t exec = OB_EXEC > 0 ? OB_EXEC : 200;
-            printf("\n>>> FLASH CRASH triggered at tick %u\n\n", exec);
-            flash_inject(1, 0, 4, 50000);
+            printf("\n>>> FLASH CRASH triggered at tick %u  bid_depth=%u  vol_per_packet=%u  total_inject=%u\n\n",
+                   exec, total_bid, vol_per_packet, vol_per_packet * 500);
+            flash_inject(1, 0, (int)vol_per_packet, 500);
         }
         else if (key == 'b' || key == 'B')
         {
+            read_fpga_snapshot();
+    
+            // Mirror logic for rally — consume 80% of ask side
+            uint32_t total_ask = 0;
+            for (int i = 0; i < 400; i++) total_ask += OB_SELL(i);
+    
+            uint32_t target_shares  = total_ask * 80 / 100;
+            uint32_t vol_per_packet = target_shares / 500;
+            if (vol_per_packet < 5)   vol_per_packet = 5;
+            if (vol_per_packet > 200) vol_per_packet = 200;
+    
             uint32_t exec = OB_EXEC > 0 ? OB_EXEC : 200;
-            printf("\n>>> FLASH RALLY triggered at tick %u\n\n", exec);
-            flash_inject(0, 399, 4, 50000);
+            printf("\n>>> FLASH RALLY triggered at tick %u  ask_depth=%u  vol_per_packet=%u  total_inject=%u\n\n",
+                   exec, total_ask, vol_per_packet, vol_per_packet * 500);
+            flash_inject(0, 399, (int)vol_per_packet, 500);
         }
         else if (key == 'q' || key == 'Q')
         {
             printf("\nQuitting...\n");
             break;
         }
-
+    
         read_fpga_snapshot();
         debug_print_status();
         if (OB_FRAME == last_frame) { usleep(1000); continue; }
