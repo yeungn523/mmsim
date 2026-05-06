@@ -389,13 +389,13 @@ wire        param_wr_en   = 1'b0;
 wire [15:0] param_wr_addr = 16'd0;
 wire [31:0] param_wr_data = 32'd0;
 
-// Connects the order bus between order_gen_top and matching_engine.
+// Order bus between order_gen_top and matching_engine.
 wire [31:0] order_packet;
 wire [31:0] gbm_price_monitor;
 wire        gen_order_valid;
 wire        me_order_ready;
 
-// Carries the matching engine scalar outputs.
+// Matching engine scalar outputs.
 wire [31:0] me_trade_price;
 wire [15:0] me_trade_quantity;
 wire        me_trade_side;
@@ -409,23 +409,23 @@ wire [31:0] me_best_ask_price;
 wire [15:0] me_best_ask_quantity;
 wire        me_best_ask_valid;
 
-// Carries the matching engine retire bus.
+// Matching engine retire bus.
 wire        me_order_retire_valid;
 wire [15:0] me_order_retire_trade_count;
 wire [15:0] me_order_retire_fill_quantity;
 wire [ 1:0] me_order_retire_agent_type;
 
-// Taps depth between matching_engine and orderbook_writer.
+// Depth tap between matching_engine and orderbook_writer.
 wire [ 8:0] depth_rd_addr;
 wire [15:0] me_bid_depth_rd_data;
 wire [15:0] me_ask_depth_rd_data;
 
-// Drives the orderbook M10K write port; Qsys s1 reads it.
+// Orderbook M10K write port (driven by orderbook_writer, read by Qsys s1).
 wire [ 9:0] ob_mem_addr;
 wire        ob_mem_write;
 wire [31:0] ob_mem_writedata;
 
-// Carries the injection debug bus from order_gen_top.
+// Injection debug bus from order_gen_top.
 wire [31:0] inject_packet;
 wire        inject_trigger;
 wire [31:0] inject_count;
@@ -441,7 +441,7 @@ wire [31:0] gbm_step_period_pio;
 wire [31:0] analog_clock_speed_pio;
 wire [31:0] agent_step_period_pio;
 
-// Divides CLOCK_50 down to ~100 snapshots/sec for AnalogClock; drives orderbook_writer only.
+// AnalogClock divider: ~100 snapshots/sec at 50 MHz, drives orderbook_writer only.
 localparam [29:0] SPEED = 30'd500_000;
 
 reg  [31:0] counter;
@@ -454,14 +454,14 @@ always @(posedge CLOCK_50) begin
 end
 assign AnalogClock = (counter == 32'd0);
 
-// Wires flash-injection PIOs straight through to the order_gen_top inject ports.
+// Flash injection PIO hookup
 assign inject_packet  = inject_packet_pio;
 assign inject_trigger = inject_trigger_pio;
 assign inject_count   = inject_count_pio;
 
-// Instantiates the submodules.
+// Module instantiations
 
-// Wraps the Qsys Computer_System with HPS, SDRAM, agent memories, PIOs, and VGA.
+// Qsys Computer_System
 Computer_System The_System (
 	////////////////////////////////////
 	// FPGA Side
@@ -642,7 +642,7 @@ Computer_System The_System (
 	.agent_15_byteenable (4'b1111),
 	.agent_15_readdata   (agent_rdata[15]),
 	
-	// Exposes KEY[0] to the HPS for the initialization handshake.
+	// KEY[0] for initialization
 	.key0_pio_external_connection_export (KEY[0]),
 	.gbm_enable_external_connection_export (gbm_enable),
 	   
@@ -747,7 +747,7 @@ Computer_System The_System (
 	.vga_B                   (VGA_B)
 );
 
-// Instantiates the order generator (GBM source + agent units + arbiter + FIFO).
+// Order generator
 order_gen_top #(
     .GBM_P0_RECIP      (32'h00014726),
     .NEAR_NOISE_THRESH (9'd5)
@@ -756,6 +756,7 @@ order_gen_top #(
     .rst_n               (core_rst_n),
     .gbm_enable          (gbm_enable),
     .last_executed_price (me_last_executed_price),
+    .trade_valid         (me_trade_valid),
     .active_agent_count  (active_agent_count),
     .gbm_step_period     (gbm_step_period_pio),
 	 .agent_step_period   (agent_step_period_pio),
@@ -816,9 +817,6 @@ orderbook_writer u_ob_writer (
     .best_bid_valid             (me_best_bid_valid),
     .best_ask_price             (me_best_ask_price),
     .best_ask_valid             (me_best_ask_valid),
-    .order_packet               (order_packet),
-    .order_valid                (gen_order_valid),
-    .order_ready                (me_order_ready),
     .order_retire_valid         (me_order_retire_valid),
     .order_retire_agent_type    (me_order_retire_agent_type),
     .order_retire_fill_quantity (me_order_retire_fill_quantity),
@@ -844,7 +842,7 @@ always @(posedge CLOCK_50) begin
     end
 end
 
-// Drives the HEX display from retire_count to prove orders are cycling.
+// HEX display — retire_count proves orders are cycling.
 assign hex5_hex0 = retire_count;
 assign LEDR = {trade_ever, me_trade_valid, 2'b00, retire_count[5:0]};
 
@@ -866,10 +864,6 @@ endmodule
 //   [806]        mm_volume
 //   [807]        momentum_volume
 //   [808]        value_volume
-//   [809]        noise_buys_placed
-//   [810]        mm_buys_placed
-//   [811]        momentum_buys_placed
-//   [812]        value_buys_placed
 module orderbook_writer #(
     parameter kPriceRange    = 400,
     parameter kTickShiftBits = 23
@@ -878,12 +872,12 @@ module orderbook_writer #(
     input  wire        rst_n,
     input  wire        analog_clock,
 
-    // Taps the matching-engine depth read port.
+    // Matching engine depth tap
     output reg  [8:0]  depth_rd_addr,
     input  wire [15:0] bid_depth_rd_data,
     input  wire [15:0] ask_depth_rd_data,
 
-    // Receives the matching-engine scalar outputs.
+    // Matching engine scalar outputs
     input  wire [31:0] last_executed_price,
     input  wire        last_executed_price_valid,
     input  wire [31:0] best_bid_price,
@@ -891,18 +885,12 @@ module orderbook_writer #(
     input  wire [31:0] best_ask_price,
     input  wire        best_ask_valid,
 
-    // Carries the order admit bus; counts one buy packet per cycle where order_valid && order_ready
-    // && order_packet[31] == 0 (side 0 = buy), keyed off the agent type in order_packet[29:28].
-    input  wire [31:0] order_packet,
-    input  wire        order_valid,
-    input  wire        order_ready,
-
-    // Receives the retire bus from the matching engine.
+    // Retire bus
     input  wire        order_retire_valid,
     input  wire [ 1:0] order_retire_agent_type,
     input  wire [15:0] order_retire_fill_quantity,
 
-    // Drives the orderbook M10K s1 write port.
+    // Orderbook M10K s1 port
     output reg  [ 9:0] mem_address,
     output reg         mem_write,
     output reg  [31:0] mem_writedata,
@@ -915,7 +903,7 @@ module orderbook_writer #(
     assign mem_clken      = 1'b1;
     assign mem_byteenable = 4'b1111;
 
-    // Defines the FSM states.
+    // FSM States
     localparam [2:0] kStateDone       = 3'd0;
     localparam [2:0] kStateScanSetup  = 3'd1;
     localparam [2:0] kStateScanRead   = 3'd2;
@@ -930,19 +918,13 @@ module orderbook_writer #(
     reg [15:0] latched_bid;
     reg [15:0] latched_ask;
 
-    // Counts cumulative fill volume per agent type.
+    // Cumulative volume counters per agent type.
     reg [31:0] cumulative_volume;
     reg [31:0] frame_counter;
     reg [31:0] noise_volume;
     reg [31:0] mm_volume;
     reg [31:0] momentum_volume;
     reg [31:0] value_volume;
-
-    // Counts buy orders placed per agent type; increments once per accepted buy packet.
-    reg [31:0] noise_buys_placed;
-    reg [31:0] mm_buys_placed;
-    reg [31:0] momentum_buys_placed;
-    reg [31:0] value_buys_placed;
 
     // Updates the price latches whenever the matching engine asserts valid.
     reg [31:0] last_exec_latch;
@@ -964,7 +946,7 @@ module orderbook_writer #(
         end
     end
 
-    // Accumulates fill volume on the retire bus.
+    // Volume accumulation on the retire bus
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             cumulative_volume <= 32'd0;
@@ -983,25 +965,7 @@ module orderbook_writer #(
         end
     end
 
-    // Accumulates buy-order counts on the admit handshake; gates on side bit (0 = buy) and reads
-    // agent type from order_packet[29:28].
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            noise_buys_placed    <= 32'd0;
-            mm_buys_placed       <= 32'd0;
-            momentum_buys_placed <= 32'd0;
-            value_buys_placed    <= 32'd0;
-        end else if (order_valid && order_ready && order_packet[31] == 1'b0) begin
-            case (order_packet[29:28])
-                2'd0: noise_buys_placed    <= noise_buys_placed    + 32'd1;
-                2'd1: mm_buys_placed       <= mm_buys_placed       + 32'd1;
-                2'd2: momentum_buys_placed <= momentum_buys_placed + 32'd1;
-                2'd3: value_buys_placed    <= value_buys_placed    + 32'd1;
-            endcase
-        end
-    end
-
-    // Drives the main scan FSM that snapshots depth and metadata each AnalogClock cycle.
+    // Main scan FSM
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             state         <= kStateDone;
@@ -1060,26 +1024,22 @@ module orderbook_writer #(
                     end
                 end
 
-                // Writes 13 metadata words (indices 0-12) sequentially.
+                // Writes 9 metadata words (indices 0-8) sequentially.
                 kStateMetaWrite: begin
                     mem_write <= 1'b1;
                     case (meta_idx)
-                        4'd0:  begin mem_address <= 10'd800; mem_writedata <= last_exec_latch;        end
-                        4'd1:  begin mem_address <= 10'd801; mem_writedata <= best_bid_latch;         end
-                        4'd2:  begin mem_address <= 10'd802; mem_writedata <= best_ask_latch;         end
-                        4'd3:  begin mem_address <= 10'd803; mem_writedata <= cumulative_volume;      end
-                        4'd4:  begin mem_address <= 10'd804; mem_writedata <= frame_counter;          end
-                        4'd5:  begin mem_address <= 10'd805; mem_writedata <= noise_volume;           end
-                        4'd6:  begin mem_address <= 10'd806; mem_writedata <= mm_volume;              end
-                        4'd7:  begin mem_address <= 10'd807; mem_writedata <= momentum_volume;        end
-                        4'd8:  begin mem_address <= 10'd808; mem_writedata <= value_volume;           end
-                        4'd9:  begin mem_address <= 10'd809; mem_writedata <= noise_buys_placed;    end
-                        4'd10: begin mem_address <= 10'd810; mem_writedata <= mm_buys_placed;       end
-                        4'd11: begin mem_address <= 10'd811; mem_writedata <= momentum_buys_placed; end
-                        default: begin mem_address <= 10'd812; mem_writedata <= value_buys_placed;  end
+                        4'd0: begin mem_address <= 10'd800; mem_writedata <= last_exec_latch;   end
+                        4'd1: begin mem_address <= 10'd801; mem_writedata <= best_bid_latch;    end
+                        4'd2: begin mem_address <= 10'd802; mem_writedata <= best_ask_latch;    end
+                        4'd3: begin mem_address <= 10'd803; mem_writedata <= cumulative_volume; end
+                        4'd4: begin mem_address <= 10'd804; mem_writedata <= frame_counter;     end
+                        4'd5: begin mem_address <= 10'd805; mem_writedata <= noise_volume;      end
+                        4'd6: begin mem_address <= 10'd806; mem_writedata <= mm_volume;         end
+                        4'd7: begin mem_address <= 10'd807; mem_writedata <= momentum_volume;   end
+                        default: begin mem_address <= 10'd808; mem_writedata <= value_volume;   end
                     endcase
 
-                    if (meta_idx == 4'd12)
+                    if (meta_idx == 4'd8)
                         state <= kStateDone;
                     else
                         meta_idx <= meta_idx + 4'd1;
