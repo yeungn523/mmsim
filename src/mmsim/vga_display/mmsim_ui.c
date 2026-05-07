@@ -96,7 +96,7 @@
 #define GAP             1
 #define SLOT            (BODY_WIDTH + GAP)
 #define MAXIMUM_CANDLES (CANDLE_WIDTH / SLOT)
-#define TICKS_PER_CANDLE 10
+#define TICKS_PER_CANDLE 5
 
 // Depth binning
 #define DEPTH_BIN_SIZE      4
@@ -840,27 +840,10 @@ void render_depth(void)
     int half = DEPTH_WIDTH / 2;
     static uint32_t bin_bid[DEPTH_BINS];
     static uint32_t bin_ask[DEPTH_BINS];
-    static int smooth_center = 200;
-
-    if (OB_EXEC > 0)
-    {
-        int target = (int)OB_EXEC;
-        int diff   = target - smooth_center;
-        if      (diff > 8)  smooth_center += diff / 8;
-        else if (diff < -8) smooth_center += diff / 8;
-        else if (diff != 0) smooth_center += (diff > 0) ? 1 : -1;
-    }
-
-    int depth_view_minimum = smooth_center - 80;
-    int depth_view_maximum = smooth_center + 80;
-    if (depth_view_minimum < 0)   depth_view_minimum = 0;
-    if (depth_view_maximum > 399) depth_view_maximum = 399;
-    int depth_view_range = depth_view_maximum - depth_view_minimum;
-    if (depth_view_range < 10) depth_view_range = 10;
-
-    int visible_ticks = depth_view_range;
-    int bin_size      = (visible_ticks + DEPTH_BINS - 1) / DEPTH_BINS;
-    if (bin_size < 1) bin_size = 1;
+    int depth_view_minimum = 0;
+    int depth_view_maximum = 399;
+    int depth_view_range   = 400;
+    int bin_size           = 400 / DEPTH_BINS;
 
     uint32_t maximum_bid_quantity = 1;
     uint32_t maximum_ask_quantity = 1;
@@ -934,16 +917,11 @@ void render_depth(void)
     }
 
     char buffer[8];
-    int  label_prices[4];
-    label_prices[0] = depth_view_minimum + (depth_view_range * 1) / 4;
-    label_prices[1] = depth_view_minimum + (depth_view_range * 2) / 4;
-    label_prices[2] = depth_view_minimum + (depth_view_range * 3) / 4;
-    label_prices[3] = depth_view_maximum;
-
-    for (i = 0; i < 4; i++)
+    int  label_prices[5] = {0, 100, 200, 300, 399};
+    for (i = 0; i < 5; i++)
     {
         int grid_y = DEPTH_Y0 + DEPTH_HEIGHT - 1 -
-                     ((label_prices[i] - depth_view_minimum) * (DEPTH_HEIGHT - 1)) / depth_view_range;
+                     (label_prices[i] * (DEPTH_HEIGHT - 1)) / 399;
         if (grid_y < DEPTH_Y0) grid_y = DEPTH_Y0;
         if (grid_y > DEPTH_Y1) grid_y = DEPTH_Y1;
         sprintf(buffer, "%-3d", label_prices[i]);
@@ -1055,9 +1033,9 @@ int main(int argc, char *argv[])
     gbm_price_pio_global = gbm_price_pio;
 
     *gbm_enable_pio   = 0;
-    *gbm_step_pio     = 500000;
-    *analog_speed_pio = 5000000;
-    *agent_step_pio   = 1000;
+    *gbm_step_pio     = 5000000;
+    *analog_speed_pio = 100000;
+    *agent_step_pio   = 5000;
 
     printf("GBM step period: %u cycles (~%u Hz)\n",    500000, 50000000 / 500000);
     printf("Analog clock period: %u cycles (~%u fps)\n", 5000000, 50000000 / 5000000);
@@ -1114,16 +1092,16 @@ int main(int argc, char *argv[])
             else if (roll < 95)
             {
                 type = TYPE_MOMENTUM;
-                p1   = rand_range(25, 80);
-                p2   = rand_range(3, 60);
-                p3   = rand_range(2, 30);
+                p1   = rand_range(3, 15);
+                p2   = rand_range(10, 60);
+                p3   = rand_range(5, 30);
             }
             else
             {
                 type = TYPE_VALUE;
-                p1   = rand_range(25, 1000);
-                p2   = rand_range(2, 80);
-                p3   = rand_range(5, 50);
+                p1   = rand_range(3, 20);
+                p2   = rand_range(10, 80);
+                p3   = rand_range(10, 50);
             }
             counts[type]++;
             local_agents[unit][slot] = PACK_AGENT(type, p1, p2, p3);
@@ -1206,13 +1184,13 @@ int main(int argc, char *argv[])
         {
             uint32_t exec = OB_EXEC > 0 ? OB_EXEC : 200;
             printf("\n>>> FLASH CRASH triggered at tick %u\n\n", exec);
-            flash_inject(1, 0, 9000, 105000);
+            flash_inject(1, 0, 50, 5000);
         }
         else if (key == 'b' || key == 'B')
         {
             uint32_t exec = OB_EXEC > 0 ? OB_EXEC : 200;
             printf("\n>>> FLASH RALLY triggered at tick %u\n\n", exec);
-            flash_inject(0, 399, 100, 150);
+            flash_inject(0, 399, 50, 5000);
         }
         else if (key == 'q' || key == 'Q')
         {

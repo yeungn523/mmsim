@@ -62,13 +62,20 @@ module agent_execution_unit #(
     reg [31:0] executed_price_shift_reg_2;
     reg [31:0] executed_price_shift_reg_3;
 
+    // A sweep is complete when we are advancing past the final active agent slot.
+    wire advance_slot = ((state == kStateEmit) && emit_flag && order_granted) || 
+                        ((state == kStateEmit) && !emit_flag);
+    wire sweep_complete = advance_slot && (active_agent_count > 16'd0) && 
+                          (slot_counter >= active_agent_count - 16'd1);
+
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            executed_price_shift_reg_0 <= 32'd0;
-            executed_price_shift_reg_1 <= 32'd0;
-            executed_price_shift_reg_2 <= 32'd0;
-            executed_price_shift_reg_3 <= 32'd0;
-        end else if (trade_valid) begin
+            // Initialize to tick 200 (Q8.24 format) to prevent massive startup deltas
+            executed_price_shift_reg_0 <= 32'h64000000;
+            executed_price_shift_reg_1 <= 32'h64000000;
+            executed_price_shift_reg_2 <= 32'h64000000;
+            executed_price_shift_reg_3 <= 32'h64000000;
+        end else if (sweep_complete) begin
             executed_price_shift_reg_0 <= last_executed_price;
             executed_price_shift_reg_1 <= executed_price_shift_reg_0;
             executed_price_shift_reg_2 <= executed_price_shift_reg_1;
@@ -315,23 +322,23 @@ module agent_execution_unit #(
                                 };
                             end
                             2'b10: begin
-										 order_packet <= {
-											  calc_side, calc_order_type, calc_agent_type,
-											  3'b000, final_price,
-											  ((dsp_product[15:0] + 16'd1) > {6'd0, latched_params[9:0]}) ?
-													{6'd0, latched_params[9:0]} :
-													(dsp_product[15:0] + 16'd1)
-										 };
-									end
-									2'b11: begin
-										 order_packet <= {
-											  calc_side, calc_order_type, calc_agent_type,
-											  3'b000, final_price,
-											  ((dsp_product[15:0] + 16'd1) > {6'd0, latched_params[9:0]}) ?
-													{6'd0, latched_params[9:0]} :
-													(dsp_product[15:0] + 16'd1)
-										 };
-									end
+                                order_packet <= {
+                                    calc_side, calc_order_type, calc_agent_type,
+                                    3'b000, final_price,
+                                    ((dsp_product[19:10] + 10'd1) > latched_params[9:0]) ?
+                                        {6'd0, latched_params[9:0]} :
+                                        ({6'd0, dsp_product[19:10]} + 16'd1)
+                                };
+                            end
+                            2'b11: begin
+                                order_packet <= {
+                                    calc_side, calc_order_type, calc_agent_type,
+                                    3'b000, final_price,
+                                    ((dsp_product[19:10] + 10'd1) > latched_params[9:0]) ?
+                                        {6'd0, latched_params[9:0]} :
+                                        ({6'd0, dsp_product[19:10]} + 16'd1)
+                                };
+                            end
                             default: begin
                                 order_packet <= 32'd0;
                             end
