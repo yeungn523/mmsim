@@ -655,7 +655,7 @@ def main(
     price_mean: float | None,
     price_stddev: float | None,
 ) -> None:
-    """Generate CSVs or diff existing Verilog output against the golden model."""
+    """Generates CSVs or diffs existing Verilog output against the golden model."""
     output_directory = Path(__file__).resolve().parent.parent / "sim"
     output_directory.mkdir(exist_ok=True)
     packets_path = output_directory / "matching_engine_packets.csv"

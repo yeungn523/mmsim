@@ -48,7 +48,7 @@ def run_stage(description: str, command: list[str], working_directory: Path) -> 
 
 @click.command()
 def main() -> None:
-    """Run the three-stage CSV verification pipeline for the no-cancellation store."""
+    """Runs the three-stage CSV verification pipeline for the no-cancellation store."""
     matching_engine_directory = Path(__file__).resolve().parent.parent
     simulation_directory = matching_engine_directory / "sim"
     project_root = matching_engine_directory.parent.parent.parent

@@ -1,4 +1,4 @@
-"""Golden model and structural checker for order_arbiter.v.
+"""Provides the golden model and structural checker for order_arbiter.v.
 
 Reads the per-cycle CSV emitted by tb_order_arbiter.v, replays the round-robin arbitration in Python, and compares
 every grant and stall event. Usage: python order_arbiter_verify.py arbiter_log.csv.

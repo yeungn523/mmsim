@@ -1,6 +1,4 @@
-// =============================================================================
-// gbm_euler.v - GBM Price Pipeline: Euler-Maruyama
-// =============================================================================
+// Advances the GBM price one step using an Euler-Maruyama discretization with EWMA volatility.
 
 module gbm_euler #(
     parameter PRICE_WIDTH  = 32,
@@ -13,7 +11,7 @@ module gbm_euler #(
     parameter [31:0] PRICE_MIN = 32'h00000001,
     parameter [31:0] PRICE_MAX = 32'hFFFFFFFF,
 
-    // Constants
+    // Defines the default fixed-point constants.
     parameter signed [31:0] MU_ITO_FP_DEF  = 32'sh00000000,
     parameter        [31:0] SIGMA_INIT_DEF = 32'h00000451,
     parameter        [31:0] ALPHA_FP_DEF   = 32'h00FD70A4,
@@ -37,7 +35,7 @@ module gbm_euler #(
     output reg                    price_valid
 );
 
-    // FSM States
+    // Defines FSM states.
     localparam [3:0]
         S_IDLE      = 4'd0,
         S_LATCH     = 4'd1,
@@ -57,12 +55,12 @@ module gbm_euler #(
 
     reg [3:0] state;
 
-    // Registers
+    // Holds runtime-loaded parameter and state registers.
     reg signed [31:0] mu_ito_reg;
     reg        [31:0] sigma_init_reg, alpha_reg, one_m_alpha_reg, p0_recip_reg;
     reg        [31:0] P_reg, sigma_reg;
 
-    // Pipeline Registers
+    // Holds intermediate pipeline values across FSM stages.
     reg signed [15:0] z_latch;
     reg signed [63:0] drift_full, diff_full;
     reg signed [31:0] drift, diffusion;

@@ -59,7 +59,7 @@ module gbm_logspace #(
 
     reg [3:0] state;
 
-    // Runtime registers
+    // Holds runtime-loaded parameter registers.
     reg signed [31:0] mu_ito_dt_reg;
     reg signed [31:0] sigma_sqrt_dt_reg;
     reg        [31:0] sigma_init_reg;
@@ -67,12 +67,12 @@ module gbm_logspace #(
     reg        [31:0] one_m_alpha_reg;
     reg        [31:0] p0_recip_reg;
 
-    // Persistent state
+    // Holds persistent state across price updates.
     reg signed [31:0] L_reg;
     reg        [31:0] P_reg;
     reg        [31:0] sigma_reg;
 
-    // Pipeline registers
+    // Holds intermediate pipeline values across FSM stages.
     reg signed [15:0]  z_latch;
     reg signed [63:0]  diff_full;
     reg signed [31:0]  diffusion;
@@ -106,7 +106,7 @@ module gbm_logspace #(
                       + $signed({{2{mu_ito_dt_reg[31]}}, mu_ito_dt_reg})
                       + $signed({{2{diffusion[31]}}, diffusion});
 
-    // M10K ROM
+    // Instantiates the exp-LUT M10K ROM.
     `ifdef SYNTHESIS
         altsyncram #(
             .operation_mode  ("ROM"),
@@ -131,7 +131,7 @@ module gbm_logspace #(
         end
     `endif
 
-    // Parameter Load
+    // Latches runtime parameters on param_load and applies defaults on reset.
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             mu_ito_dt_reg     <= MU_ITO_DT_DEF;
@@ -150,7 +150,7 @@ module gbm_logspace #(
         end
     end
 
-    // Pipeline Logic
+    // Drives the multi-stage pipeline that updates log-price and EWMA volatility.
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             state             <= S_IDLE;

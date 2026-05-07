@@ -33,6 +33,7 @@ htmlcov/
 *.csv
 *.json
 *.png
+*.tex
 
 # ---- ModelSim / Questa ----
 work/

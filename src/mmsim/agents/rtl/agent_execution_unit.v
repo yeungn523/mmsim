@@ -41,7 +41,7 @@ module agent_execution_unit #(
 
     reg [1:0] state;
 
-    // Internal LFSR
+    // Drives the internal LFSR shared across all agent slots.
     wire [31:0] lfsr_out;
     galois_lfsr #(
         .POLY (LFSR_POLY),
@@ -56,13 +56,13 @@ module agent_execution_unit #(
     );
 
 
-    // executed_price_shift_reg[0] = most recent, [3] = oldest
+    // Holds executed-price history with [0] as the most recent and [3] as the oldest sample.
     reg [31:0] executed_price_shift_reg_0;
     reg [31:0] executed_price_shift_reg_1;
     reg [31:0] executed_price_shift_reg_2;
     reg [31:0] executed_price_shift_reg_3;
 
-    // A sweep is complete when we are advancing past the final active agent slot.
+    // Marks a completed sweep when advancing past the final active agent slot.
     wire advance_slot = ((state == kStateEmit) && emit_flag && order_granted) || 
                         ((state == kStateEmit) && !emit_flag);
     wire sweep_complete = advance_slot && (active_agent_count > 16'd0) && 
@@ -70,7 +70,7 @@ module agent_execution_unit #(
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            // Initialize to tick 200 (Q8.24 format) to prevent massive startup deltas
+            // Initializes to tick 200 (Q8.24 format) to prevent massive startup deltas.
             executed_price_shift_reg_0 <= 32'h64000000;
             executed_price_shift_reg_1 <= 32'h64000000;
             executed_price_shift_reg_2 <= 32'h64000000;
@@ -104,7 +104,7 @@ module agent_execution_unit #(
     wire [8:0] gbm_tick;
     assign gbm_tick = (gbm_price[31:TICK_SHIFT_BITS] > MAX_TICK) ? MAX_TICK : gbm_price[31:TICK_SHIFT_BITS];
 
-    // Value Investor Combinational Logic
+    // Computes Value Investor combinational signals.
     wire [8:0] last_executed_tick;
     assign last_executed_tick = (last_executed_price[31:TICK_SHIFT_BITS] > MAX_TICK)
                             ? MAX_TICK : last_executed_price[31:TICK_SHIFT_BITS];
@@ -122,7 +122,7 @@ module agent_execution_unit #(
                     ? (~divergence[9:0] + 10'd1)
                     : divergence[9:0];
 
-    // Momentum Trader Combinational Logic
+    // Computes Momentum Trader combinational signals.
     wire [8:0] oldest_executed_tick;
     assign oldest_executed_tick = (executed_price_shift_reg_3[31:TICK_SHIFT_BITS] > MAX_TICK) ? MAX_TICK : executed_price_shift_reg_3[31:TICK_SHIFT_BITS];
 
@@ -137,9 +137,9 @@ module agent_execution_unit #(
                     ? (~momentum_delta[9:0] + 10'd1)
                     : momentum_delta[9:0];
 
-    // Combinational price assembly based on Agent Type
+    // Assembles the final price combinationally based on agent type.
     always @(*) begin
-        // Noise trader offset math (default)
+        // Defaults to noise-trader offset math.
         offset_raw   = dsp_product[19:10];
         offset_ticks = (offset_raw > {1'b0, MAX_TICK}) ? MAX_TICK : offset_raw[8:0];
 
@@ -181,7 +181,7 @@ module agent_execution_unit #(
         endcase
     end
 
-    // Main FSM
+    // Drives the main FSM.
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             state           <= kStateLoad;
@@ -266,7 +266,7 @@ module agent_execution_unit #(
                                 // delta < 0 means price is falling -> Sell (1)
                                 calc_side <= (momentum_delta > 0) ? 1'b0 : 1'b1;
 
-                                // Routes to the DSP for volume scaling.
+                                // Routes operands to the DSP for volume scaling.
                                 dsp_a <= abs_mom;
                                 dsp_b <= param_data[19:10];
                             end else begin
@@ -285,7 +285,7 @@ module agent_execution_unit #(
                                 // divergence < 0 means GBM < Exec (overvalued -> Sell: 1)
                                 calc_side <= (divergence > 0) ? 1'b0 : 1'b1;
 
-                                // Routes to the DSP for volume scaling.
+                                // Routes operands to the DSP for volume scaling.
                                 dsp_a <= abs_div;
                                 dsp_b <= param_data[19:10];
                             end else begin
@@ -358,7 +358,7 @@ module agent_execution_unit #(
                         end
 
                     end else begin
-                        // No emission: deasserts valid and advances immediately.
+                        // Deasserts valid and advances immediately when no emission occurs.
                         order_valid <= 1'b0;
                         if (active_agent_count == 16'd0) begin
                             slot_counter <= 16'd0;

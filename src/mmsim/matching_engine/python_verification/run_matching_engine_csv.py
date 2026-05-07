@@ -68,7 +68,7 @@ def main(
     price_mean: float | None,
     price_stddev: float | None,
 ) -> None:
-    """Run the three-stage CSV verification pipeline for the matching engine."""
+    """Runs the three-stage CSV verification pipeline for the matching engine."""
     matching_engine_directory = Path(__file__).resolve().parent.parent
     simulation_directory = matching_engine_directory / "sim"
     project_root = matching_engine_directory.parent.parent.parent

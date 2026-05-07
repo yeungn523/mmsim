@@ -66,7 +66,7 @@ module order_gen_top #(
     wire        fifo_empty;
     wire [31:0] fifo_dout;
 
-    // Flash injection FSM
+    // Drives the flash-injection FSM and its bookkeeping registers.
     reg [31:0]  inject_remaining;
     reg         inject_busy;
     reg [31:0]  inject_packet_reg;
@@ -137,7 +137,7 @@ module order_gen_top #(
 		reg  [15:0] zig_sample_buf;
 		reg         zig_sample_ready;
 
-		// Ziggurat deposits into buffer whenever it produces a sample and buffer is empty
+		// Deposits each new ziggurat sample into the buffer when the buffer is empty.
 		always @(posedge clk or negedge rst_n) begin
 			 if (!rst_n) begin
 				  zig_sample_buf   <= 16'd0;
@@ -155,9 +155,9 @@ module order_gen_top #(
 		wire        z_valid_to_gbm = gbm_step_en && zig_sample_ready;
 		wire [15:0] z_data_to_gbm  = zig_sample_buf;
 
-    // Ziggurat always enabled so it stays warm and produces valid Gaussian samples
-    // immediately when gbm_enable goes high; gating en instead would cause a pipeline
-    // bubble on the first enable cycle and agents would see gbm_price=0 transiently.
+    // Keeps the ziggurat always enabled so it stays warm and produces valid Gaussian
+    // samples immediately when gbm_enable goes high; gating en instead would cause a
+    // pipeline bubble on the first enable cycle and agents would see gbm_price=0 transiently.
     ziggurat_gaussian u_ziggurat (
         .clk        (clk),
         .rst_n      (rst_n),
@@ -210,8 +210,8 @@ module order_gen_top #(
             ) u_agent (
                 .clk                 (clk),
                 .rst_n               (rst_n),
-                // Uses gated price so agents see exactly tick 200 until gbm_enable
-                // asserted, preventing value investor divergence on startup.
+                // Feeds the gated price so agents see exactly tick 200 until gbm_enable
+                // asserts, preventing value-investor divergence on startup.
                 .gbm_price           (gbm_price_gated),
                 .last_executed_price (last_executed_price),
                 .sigma               (gbm_sigma_out[15:0]),
@@ -242,9 +242,9 @@ module order_gen_top #(
 
     assign arb_ready = !fifo_almost_full && !fifo_full;
 
-    // Agent throttle — token-based rate limiter on matching engine consumption.
-    // Generates one token every agent_step_period cycles; token held until
-    // matching engine accepts the order, preventing dropped orders.
+    // Throttles agent emission with a token-based rate limiter on matching-engine consumption.
+    // Generates one token every agent_step_period cycles; holds the token until
+    // the matching engine accepts the order, preventing dropped orders.
     reg [31:0] agent_throttle_counter;
     wire       agent_step_en = (agent_throttle_counter >= agent_step_period);
     always @(posedge clk or negedge rst_n) begin

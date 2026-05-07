@@ -408,7 +408,7 @@ def verify_against_verilog(expected_path: Path, actual_path: Path) -> dict[str, 
 @click.option("--price-range", type=int, default=_DEFAULT_PRICE_RANGE, show_default=True,
               help="Number of addressable price ticks.")
 def main(verify: bool, price_range: int) -> None:
-    """Generate CSVs or diff existing Verilog output against the golden model.
+    """Generates CSVs or diffs existing Verilog output against the golden model.
 
     Default mode runs the golden model against the deterministic sweep and writes
     lob_no_cancellation_commands.csv and lob_no_cancellation_expected.csv into sim/.

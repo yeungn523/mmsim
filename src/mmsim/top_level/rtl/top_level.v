@@ -441,7 +441,7 @@ wire [31:0] gbm_step_period_pio;
 wire [31:0] analog_clock_speed_pio;
 wire [31:0] agent_step_period_pio;
 
-// AnalogClock divider: ~100 snapshots/sec at 50 MHz, drives orderbook_writer only.
+// Divides CLOCK_50 to produce ~100 AnalogClock snapshots/sec for orderbook_writer.
 localparam [29:0] SPEED = 30'd500_000;
 
 reg  [31:0] counter;
@@ -454,7 +454,7 @@ always @(posedge CLOCK_50) begin
 end
 assign AnalogClock = (counter == 32'd0);
 
-// Flash injection PIO hookup
+// Wires the flash-injection PIO signals into the order generator.
 assign inject_packet  = inject_packet_pio;
 assign inject_trigger = inject_trigger_pio;
 assign inject_count   = inject_count_pio;
@@ -842,7 +842,7 @@ always @(posedge CLOCK_50) begin
     end
 end
 
-// HEX display — retire_count proves orders are cycling.
+// Drives the HEX display with retire_count as a heartbeat that orders are cycling.
 assign hex5_hex0 = retire_count;
 assign LEDR = {trade_ever, me_trade_valid, 2'b00, retire_count[5:0]};
 
@@ -903,7 +903,7 @@ module orderbook_writer #(
     assign mem_clken      = 1'b1;
     assign mem_byteenable = 4'b1111;
 
-    // FSM States
+    // Defines FSM states.
     localparam [2:0] kStateDone       = 3'd0;
     localparam [2:0] kStateScanSetup  = 3'd1;
     localparam [2:0] kStateScanRead   = 3'd2;
@@ -918,7 +918,7 @@ module orderbook_writer #(
     reg [15:0] latched_bid;
     reg [15:0] latched_ask;
 
-    // Cumulative volume counters per agent type.
+    // Holds cumulative volume counters per agent type.
     reg [31:0] cumulative_volume;
     reg [31:0] frame_counter;
     reg [31:0] noise_volume;
@@ -946,7 +946,7 @@ module orderbook_writer #(
         end
     end
 
-    // Volume accumulation on the retire bus
+    // Accumulates traded volume per agent type on each retire-bus pulse.
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             cumulative_volume <= 32'd0;
@@ -965,7 +965,7 @@ module orderbook_writer #(
         end
     end
 
-    // Main scan FSM
+    // Drives the main scan FSM.
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             state         <= kStateDone;

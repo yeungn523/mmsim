@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pandas as pd
 
-_EVENTS_CSV: Path = Path(r"C:\Users\gaa59\Desktop\mmsim\src\mmsim\top_level\sim\sim_top_events.csv")
+_EVENTS_CSV: Path = Path(__file__).resolve().parent.parent / "sim" / "sim_top_events.csv"
 _PREVIEW_ROW_COUNT: int = 5
 _EVENT_DETAIL_COLUMNS: tuple[str, ...] = ("c2", "c3", "c4", "c5", "c6", "c7")
 

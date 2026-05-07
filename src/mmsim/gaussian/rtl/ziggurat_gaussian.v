@@ -27,7 +27,7 @@ module ziggurat_gaussian (
     reg [31:0] inv_r_product;
     reg [15:0] x_q412;
 
-    // LFSR (Galois, 32-bit)
+    // Holds the four 32-bit Galois LFSR states.
     reg [31:0] s0, s1, s2, s3;
     localparam [31:0] P0 = 32'h80000057;
     localparam [31:0] P1 = 32'h80000062;
@@ -94,7 +94,7 @@ module ziggurat_gaussian (
     end
 `endif
 
-    // FSM States
+    // Defines FSM states.
     localparam S_IDLE      = 4'd0;
     localparam S_DRAW      = 4'd1;
     localparam S_ROM_X     = 4'd2;
@@ -197,7 +197,7 @@ module ziggurat_gaussian (
         endcase
     endfunction
 
-    // FSM
+    // Drives the ziggurat FSM.
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             s0        <= 32'hDEADBEEF;

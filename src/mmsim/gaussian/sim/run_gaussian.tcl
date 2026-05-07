@@ -3,22 +3,25 @@
 # Usage: vsim -do run_gaussian.tcl    (from this directory)
 #        do run_gaussian.tcl          (from an open ModelSim session)
 
+# Recreates the work library to drop stale compilations.
 if {[file exists work]} {
     vdel -lib work -all
 }
-
 vlib work
 
+# Compiles the LFSR dependency, both Gaussian RTL variants, and the comparison testbench.
 vlog -work work ../../lfsr/galois_lfsr.v
 vlog -work work -sv ../rtl/clt12_gaussian.v
 vlog -work work -sv ../rtl/ziggurat_gaussian.v
 vlog -work work -sv ../tb/tb_gaussian_comparison.v
 
+# Loads the testbench into the simulator and aborts on failure.
 if {[catch {vsim -t 1ns -novopt work.tb_gaussian_comparison} err]} {
     puts "ERROR: vsim failed: $err"
     return
 }
 
+# Adds debug waves for clocks, generator outputs, and Ziggurat internal state.
 add wave -divider "Clock / Reset"
 add wave /tb_gaussian_comparison/clk
 add wave /tb_gaussian_comparison/rst_n
@@ -47,6 +50,7 @@ add wave -radix hex /tb_gaussian_comparison/dut_zig/x_layer_m1
 add wave -radix hex /tb_gaussian_comparison/dut_zig/y_layer
 add wave -radix hex /tb_gaussian_comparison/dut_zig/y_layer_m1
 
+# Runs the simulation to completion.
 run -all
 
 puts ""

@@ -1,4 +1,4 @@
-"""Structural checker for the order_gen_top.v integration test.
+"""Provides the structural checker for the order_gen_top.v integration test.
 
 Does not predict exact values because the GBM and LFSR chain is too deep to replay in Python; instead, asserts
 per-phase invariants on agent_type, price, the reserved bit field, the round-robin alternation, and the param-decoded

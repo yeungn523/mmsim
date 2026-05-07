@@ -55,4 +55,5 @@ add wave -radix unsigned    /tb_gbm_comparison/log_count
 add wave -radix unsigned    /tb_gbm_comparison/error_count
 add wave -radix unsigned    /tb_gbm_comparison/cycle_count
 
+# Runs the simulation to completion.
 run -all
