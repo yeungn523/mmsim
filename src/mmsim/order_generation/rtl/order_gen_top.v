@@ -10,6 +10,8 @@ module order_gen_top #(
 	 parameter        [31:0] GBM_SIGMA_INIT    = 32'h00000100,
     parameter        [31:0] GBM_ALPHA         = 32'h00FD70A4,
     parameter        [31:0] GBM_P0_RECIP      = 32'h00028F5C,
+    // Sets the long-run log-price target for OU mean reversion (Q8.24 signed); ln(100) anchors price at tick 200.
+    parameter signed [31:0] GBM_L_TARGET      = 32'sh049AEC6F,
     parameter [31:0] LFSR_SEED_BASE    = 32'hCAFEBABE,
     parameter [31:0] LFSR_POLY         = 32'hB4BCD35C,
     parameter [8:0]  NEAR_NOISE_THRESH = 9'd5,
@@ -18,24 +20,28 @@ module order_gen_top #(
     // Paces flash-injection packets so agents observe last_exec dropping during the burst.
     parameter [31:0] INJECT_STEP_PERIOD = 32'd500
 )(
-    input  wire        clk,
-    input  wire        rst_n,
-    input  wire        gbm_enable,       // gates GBM price output to agents; held at GBM_P0_HELD when low
-    input  wire [31:0] last_executed_price,
-    input  wire        trade_valid,
-    input  wire [15:0] active_agent_count,
+    input  wire         clk,
+    input  wire         rst_n,
+    input  wire         gbm_enable,       // gates GBM price output to agents; held at GBM_P0_HELD when low
+    input  wire [31:0]  last_executed_price,
+    input  wire         trade_valid,
+    input  wire [15:0]  active_agent_count,
 	 input  wire [31:0] gbm_step_period,
 	 input  wire [31:0] agent_step_period,
-    output wire [31:0] price_out,
-    output wire [31:0] order_packet,
-    output wire        order_valid,
-    input  wire        order_ready,
+    output wire [31:0]  price_out,
+    output wire [31:0]  order_packet,
+    output wire         order_valid,
+    input  wire         order_ready,
 
     // Flash injection
     input  wire [31:0] inject_packet,
     input  wire        inject_trigger,
     input  wire [31:0] inject_count,
     output wire        inject_active,
+
+    // GBM price shock (V-shape crash + recovery driven by mu_ito_dt).
+    input  wire        gbm_shock_trigger,
+    output wire        gbm_shock_active,
 
     // Exposes external param memory read-only to the FPGA; HPS writes via the Qsys AXI bridge.
     output wire [NUM_UNITS*10-1:0]  param_rd_addr,
@@ -66,94 +72,56 @@ module order_gen_top #(
     wire        fifo_empty;
     wire [31:0] fifo_dout;
 
-    // Drives the flash-injection FSM and its bookkeeping registers.
-    reg [31:0]  inject_remaining;
-    reg         inject_busy;
-    reg [31:0]  inject_packet_reg;
-    reg         inject_trigger_prev;
-    wire inject_trigger_rise = inject_trigger && !inject_trigger_prev;
+    // Drives the flash-injection burst onto the order_packet mux below.
+    wire        inject_fire;
+    wire [31:0] inject_packet_out;
 
-    // Generates one inject token every INJECT_STEP_PERIOD cycles; the allow latch
-    // below holds the token until the matching engine accepts the inject packet.
-    reg [31:0] inject_throttle_counter;
-    wire       inject_step_en = (inject_throttle_counter >= INJECT_STEP_PERIOD);
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n)
-            inject_throttle_counter <= 32'd0;
-        else if (inject_step_en)
-            inject_throttle_counter <= 32'd0;
-        else
-            inject_throttle_counter <= inject_throttle_counter + 32'd1;
-    end
+    order_flash_injector #(
+        .INJECT_STEP_PERIOD (INJECT_STEP_PERIOD)
+    ) u_flash_injector (
+        .clk                (clk),
+        .rst_n              (rst_n),
+        .inject_trigger     (inject_trigger),
+        .inject_packet      (inject_packet),
+        .inject_count       (inject_count),
+        .inject_fire        (inject_fire),
+        .inject_packet_out  (inject_packet_out),
+        .inject_active      (inject_active),
+        .order_ready        (order_ready)
+    );
 
-    reg inject_throttle_allow;
-    wire inject_fire = inject_busy && inject_throttle_allow;
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n)
-            inject_throttle_allow <= 1'b0;
-        else if (inject_step_en)
-            inject_throttle_allow <= 1'b1;
-        else if (inject_fire && order_ready)
-            inject_throttle_allow <= 1'b0;
-    end
+    // Paces GBM ticks at one strobe per gbm_step_period cycles.
+    wire gbm_step_en;
+    pacer u_gbm_pacer (
+        .clk         (clk),
+        .rst_n       (rst_n),
+        .period      (gbm_step_period),
+        .consume     (1'b0),
+        .step_en     (gbm_step_en),
+        .token_valid ()
+    );
 
+
+    reg  [15:0] zig_sample_buf;
+    reg         zig_sample_ready;
+
+    // Deposits each new ziggurat sample into the buffer when the buffer is empty.
     always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            inject_remaining    <= 32'd0;
-            inject_busy         <= 1'b0;
-            inject_packet_reg   <= 32'd0;
-            inject_trigger_prev <= 1'b0;
-        end else begin
-            inject_trigger_prev <= inject_trigger;
-            if (inject_trigger_rise && !inject_busy) begin
-                inject_busy       <= 1'b1;
-                inject_remaining  <= inject_count;
-                inject_packet_reg <= inject_packet;
-            end else if (inject_fire && order_ready) begin
-                if (inject_remaining <= 32'd1) begin
-                    inject_busy      <= 1'b0;
-                    inject_remaining <= 32'd0;
-                end else begin
-                    inject_remaining <= inject_remaining - 32'd1;
+            if (!rst_n) begin
+                zig_sample_buf   <= 16'd0;
+                zig_sample_ready <= 1'b0;
+            end else begin
+                if (zig_valid_out && !zig_sample_ready) begin
+                    zig_sample_buf   <= zig_gauss_out;
+                    zig_sample_ready <= 1'b1;
+                end else if (gbm_step_en && zig_sample_ready) begin
+                    zig_sample_ready <= 1'b0;   // consumed
                 end
             end
-        end
     end
 
-    assign inject_active = inject_busy;
-	 
-	 reg [31:0] gbm_throttle_counter;
-		wire       gbm_step_en = (gbm_step_period > 0) && (gbm_throttle_counter >= gbm_step_period);
-
-		always @(posedge clk or negedge rst_n) begin
-			 if (!rst_n)
-				  gbm_throttle_counter <= 32'd0;
-			 else if (gbm_step_en)
-				  gbm_throttle_counter <= 32'd0;
-			 else
-				  gbm_throttle_counter <= gbm_throttle_counter + 32'd1;
-		end
-	 
-		reg  [15:0] zig_sample_buf;
-		reg         zig_sample_ready;
-
-		// Deposits each new ziggurat sample into the buffer when the buffer is empty.
-		always @(posedge clk or negedge rst_n) begin
-			 if (!rst_n) begin
-				  zig_sample_buf   <= 16'd0;
-				  zig_sample_ready <= 1'b0;
-			 end else begin
-				  if (zig_valid_out && !zig_sample_ready) begin
-						zig_sample_buf   <= zig_gauss_out;
-						zig_sample_ready <= 1'b1;
-				  end else if (gbm_step_en && zig_sample_ready) begin
-						zig_sample_ready <= 1'b0;   // consumed
-				  end
-			 end
-		end
-
-		wire        z_valid_to_gbm = gbm_step_en && zig_sample_ready;
-		wire [15:0] z_data_to_gbm  = zig_sample_buf;
+    wire        z_valid_to_gbm = gbm_step_en && zig_sample_ready;
+    wire [15:0] z_data_to_gbm  = zig_sample_buf;
 
     // Keeps the ziggurat always enabled so it stays warm and produces valid Gaussian
     // samples immediately when gbm_enable goes high; gating en instead would cause a
@@ -171,23 +139,43 @@ module order_gen_top #(
         .valid_out  (zig_valid_out)
     );
 
+    // Sequences gbm_logspace through CRASH (negative mu, theta=0) and RECOVERY (mu=0, theta>0) on each gbm_shock_trigger;
+    // remaining param_load lanes carry their defaults so the pulse only mutates mu and theta.
+    wire        shock_param_load;
+    wire signed [31:0] shock_mu_ito_dt;
+    wire        [31:0] shock_theta;
+
+    gbm_mean_reversion u_gbm_mean_reversion (
+        .clk            (clk),
+        .rst_n          (rst_n),
+        .shock_trigger  (gbm_shock_trigger),
+        .price_valid    (gbm_price_valid),
+        .param_load     (shock_param_load),
+        .mu_ito_dt_out  (shock_mu_ito_dt),
+        .theta_out      (shock_theta),
+        .shock_active   (gbm_shock_active)
+    );
+
     gbm_logspace #(
         .MU_ITO_DT_DEF      (GBM_MU_ITO_DT),
         .SIGMA_SQRT_DT_DEF  (GBM_SIGMA_SQRT_DT),
         .SIGMA_INIT_DEF     (GBM_SIGMA_INIT),
         .ALPHA_FP_DEF       (GBM_ALPHA),
-        .P0_RECIP_DEF       (GBM_P0_RECIP)
+        .P0_RECIP_DEF       (GBM_P0_RECIP),
+        .L_TARGET_DEF       (GBM_L_TARGET)
     ) u_gbm (
         .clk              (clk),
         .rst_n            (rst_n),
         .z_valid          (z_valid_to_gbm),
         .z_in             ($signed(z_data_to_gbm)),
-        .param_load       (1'b0),
-        .mu_ito_dt_in     (32'sd0),
-        .sigma_sqrt_dt_in (32'sd0),
-        .sigma_init_in    (32'd0),
-        .alpha_in         (32'd0),
-        .p0_recip_in      (32'd0),
+        .param_load       (shock_param_load),
+        .mu_ito_dt_in     (shock_mu_ito_dt),
+        .sigma_sqrt_dt_in (GBM_SIGMA_SQRT_DT),
+        .sigma_init_in    (GBM_SIGMA_INIT),
+        .alpha_in         (GBM_ALPHA),
+        .p0_recip_in      (GBM_P0_RECIP),
+        .theta_in         (shock_theta),
+        .L_target_in      (GBM_L_TARGET),
         .price_out        (gbm_price_out),
         .sigma_out        (gbm_sigma_out),
         .price_valid      (gbm_price_valid)
@@ -242,34 +230,22 @@ module order_gen_top #(
 
     assign arb_ready = !fifo_almost_full && !fifo_full;
 
-    // Throttles agent emission with a token-based rate limiter on matching-engine consumption.
-    // Generates one token every agent_step_period cycles; holds the token until
-    // the matching engine accepts the order, preventing dropped orders.
-    reg [31:0] agent_throttle_counter;
-    wire       agent_step_en = (agent_throttle_counter >= agent_step_period);
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n)
-            agent_throttle_counter <= 32'd0;
-        else if (agent_step_en)
-            agent_throttle_counter <= 32'd0;
-        else
-            agent_throttle_counter <= agent_throttle_counter + 32'd1;
-    end
+    // Paces FIFO drain at one packet per agent_step_period cycles.
+    wire agent_throttle_allow;
+    wire fifo_rd_en = !inject_fire && !fifo_empty && agent_throttle_allow && order_ready;
 
-    reg agent_throttle_allow;
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n)
-            agent_throttle_allow <= 1'b0;
-        else if (agent_step_en)
-            agent_throttle_allow <= 1'b1;
-        else if (!inject_fire && !fifo_empty && agent_throttle_allow && order_ready)
-            agent_throttle_allow <= 1'b0;
-    end
+    pacer u_agent_throttle (
+        .clk         (clk),
+        .rst_n       (rst_n),
+        .period      (agent_step_period),
+        .consume     (fifo_rd_en),
+        .step_en     (),
+        .token_valid (agent_throttle_allow)
+    );
 
-    // Gives inject_fire priority on its throttle pulse and lets the FIFO drain on
-    // dead cycles so momentum/value agents interleave during the burst.
+    // Inject path takes priority over the FIFO on the order bus.
     assign order_valid  = inject_fire ? 1'b1 : (!fifo_empty && agent_throttle_allow);
-    assign order_packet = inject_fire ? inject_packet_reg : fifo_dout;
+    assign order_packet = inject_fire ? inject_packet_out : fifo_dout;
     order_fifo #(
         .DATA_WIDTH          (32),
         .DEPTH               (FIFO_DEPTH),
@@ -281,7 +257,7 @@ module order_gen_top #(
         .din         (arb_packet),
         .full        (fifo_full),
         .almost_full (fifo_almost_full),
-        .rd_en       (!inject_fire && !fifo_empty && agent_throttle_allow && order_ready),
+        .rd_en       (fifo_rd_en),
         .dout        (fifo_dout),
         .empty       (fifo_empty)
     );

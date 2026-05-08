@@ -30,6 +30,10 @@ ___
 - Ziggurat-based Gaussian random number generator and a log-space Geometric Brownian Motion
   core driving the price process. Central Limit Theorem and Euler variants are also included
   for comparison purposes only and are not part of the deployed datapath.
+- PIO-triggered flash-crash and flash-rally injection that emits a configurable burst of
+  stress packets onto the order bus.
+- GBM shock controller that drives the log-space drift through a crash-then-recover FSM to
+  produce a V-shaped price shock with mean-reversion recovery.
 - Python golden models and ModelSim TCL pipelines for every RTL submodule.
 - DE1-SoC top-level integration with HEX display readout of the last executed price.
 
@@ -122,17 +126,28 @@ Per-block contents:
 - **`gaussian/`** — Ziggurat and CLT-12 Gaussian random number generators;
   shared Ziggurat lookup tables sit under `rtl/lut/`.
 - **`gbm/`** — Log-space and Euler Geometric Brownian Motion price evolution
-  cores; `rtl/lut/` holds the `exp()` LUT and its generator.
+  cores and a shock controller that drives the log-space drift through a
+  crash-then-recover FSM for V-shaped price shocks; `rtl/lut/` holds the
+  `exp()` LUT and its generator.
 - **`lfsr/`** — Galois LFSR pseudo-random source used to seed the Gaussian
   and agent blocks.
 - **`matching_engine/`** — Pipelined Accept/Match/Commit matching engine and
   price-level store backing the 480-tick limit order book; `sim/` carries the
   CSV stimulus and expected-trade vectors used by the regression CLIs.
-- **`order_generation/`** — Order FIFO, round-robin arbiter, and
-  `order_gen_top` that fans agent output into the matching engine.
+- **`order_generation/`** — Order FIFO, round-robin arbiter, flash-injection
+  unit for PIO-triggered burst stress tests, rate-token throttle for
+  runtime-tunable agent pacing, and `order_gen_top` that fans agent output
+  into the matching engine.
 - **`top_level/`** — DE1-SoC integration wrapper and full-system testbench.
-- **`vga_display/`** — VGA visualization for the live system.
 - **`utilities/`** — Shared Python helpers used by all verification CLIs.
+
+The HPS-side C code sits directly under `src/mmsim/` rather than in a block
+subfolder:
+
+- **`mmsim_ui.c`** — HPS-side VGA dashboard that renders the live order book,
+  candlestick chart, volume histogram, depth heatmap, and trader-composition
+  bar; also drives the flash-crash and flash-rally injection from keyboard
+  input.
 
 ### Packet Format
 

@@ -432,8 +432,12 @@ wire [31:0] inject_count;
 wire        inject_active;
 
 wire [31:0] inject_packet_pio;
-wire        inject_trigger_pio;   
+wire        inject_trigger_pio;
 wire [31:0] inject_count_pio;
+
+// GBM shock controller bus — gbm_shock_trigger drives the FSM, gbm_shock_active reports status to the UI.
+wire        gbm_shock_trigger;
+wire        gbm_shock_active;
 
 wire        gbm_enable;
 
@@ -458,6 +462,10 @@ assign AnalogClock = (counter == 32'd0);
 assign inject_packet  = inject_packet_pio;
 assign inject_trigger = inject_trigger_pio;
 assign inject_count   = inject_count_pio;
+
+// Maps KEY[1] (active-low) to the GBM shock trigger so the demo runs without a Qsys edit; replace with a dedicated PIO
+// (e.g. gbm_shock_trigger_pio_external_connection_export) once the Computer_System is regenerated with the new export.
+assign gbm_shock_trigger = ~KEY[1];
 
 // Module instantiations
 
@@ -769,6 +777,8 @@ order_gen_top #(
     .inject_trigger      (inject_trigger),
     .inject_count        (inject_count),
     .inject_active       (inject_active),
+    .gbm_shock_trigger   (gbm_shock_trigger),
+    .gbm_shock_active    (gbm_shock_active),
     .price_out           (gbm_price_monitor)
 );
 
