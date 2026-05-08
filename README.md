@@ -27,15 +27,15 @@ ___
   order book.
 - Time-multiplexed agent execution unit that round-robins through up to 64 agent parameter
   slots backed by M10K blocks.
-- Ziggurat-based Gaussian random number generator and a log-space Geometric Brownian Motion
-  core driving the price process. Central Limit Theorem and Euler variants are also included
-  for comparison purposes only and are not part of the deployed datapath.
+- Ziggurat-based Gaussian random number generator; a Central Limit Theorem variant is included
+  for comparison only and is not part of the deployed datapath.
+- Extended log-space Geometric Brownian Motion core with Ornstein-Uhlenbeck mean reversion
+  towards a configurable target log-price; an Euler
+  variant is included for comparison only.
 - PIO-triggered flash-crash and flash-rally injection that emits a configurable burst of
   stress packets onto the order bus.
-- GBM shock controller that drives the log-space drift through a crash-then-recover FSM to
-  produce a V-shaped price shock with mean-reversion recovery.
 - Python golden models and ModelSim TCL pipelines for every RTL submodule.
-- DE1-SoC top-level integration with HEX display readout of the last executed price.
+- DE1-SoC top-level integration with HEX display readout of the cumulative retired-order count.
 
 ___
 
@@ -141,8 +141,7 @@ Per-block contents:
 - **`top_level/`** — DE1-SoC integration wrapper and full-system testbench.
 - **`utilities/`** — Shared Python helpers used by all verification CLIs.
 
-The HPS-side C code sits directly under `src/mmsim/` rather than in a block
-subfolder:
+The HPS-side C code is located directly under `src/mmsim/`:
 
 - **`mmsim_ui.c`** — HPS-side VGA dashboard that renders the live order book,
   candlestick chart, volume histogram, depth heatmap, and trader-composition
