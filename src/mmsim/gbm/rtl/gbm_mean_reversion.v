@@ -4,13 +4,13 @@
 module gbm_mean_reversion #(
     // Sets per-step Q8.24 signed log-space drift for the mu_ito_dt path; CRASH magnitude scales with crash depth.
     parameter signed [31:0] MU_NORMAL_DEF  = 32'sh00000000,
-    parameter signed [31:0] MU_CRASH_DEF   = 32'shFFFFF6D3,  // ≈ -0.00014 per step
+    parameter signed [31:0] MU_CRASH_DEF   = 32'shFFFFB7EA,  // ≈ -0.00112 per step → 200 steps drop L by ~0.22 (tick 200 → 160)
     // Sets the OU pull strength theta·dt (Q0.24); ACTIVE engages during RECOVERY, NORMAL disables outside it.
     parameter        [31:0] THETA_NORMAL_DEF = 32'h00000000,
-    parameter        [31:0] THETA_ACTIVE_DEF = 32'h0000C49C,  // ≈ 0.003 per step (half-life ≈ 231 steps)
+    parameter        [31:0] THETA_ACTIVE_DEF = 32'h0001EB85,  // ≈ 0.0075 per step (half-life ≈ 92 steps)
     // Sets each phase's duration in price_valid pulses (one pulse per GBM step).
-    parameter [31:0] CRASH_STEPS_DEF    = 32'd5000,
-    parameter [31:0] RECOVERY_STEPS_DEF = 32'd1500
+    parameter [31:0] CRASH_STEPS_DEF    = 32'd200,
+    parameter [31:0] RECOVERY_STEPS_DEF = 32'd400
 )(
     input  wire        clk,
     input  wire        rst_n,
