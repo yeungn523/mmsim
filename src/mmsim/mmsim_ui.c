@@ -188,6 +188,10 @@ static uint32_t price_history[10];
 static int      price_hist_idx   = 0;
 static int      price_hist_count = 0;
 
+static uint32_t gbm_tick_history[10];
+static int      gbm_tick_hist_idx   = 0;
+static int      gbm_tick_hist_count = 0;
+
 // VGA pointers
 volatile unsigned int *vga_pixel_pointer      = NULL;
 void                  *vga_pixel_virtual_base;
@@ -386,8 +390,24 @@ void debug_print_status(void)
     uint32_t gbm_raw  = gbm_price_pio_global ? *gbm_price_pio_global : 0;
     uint32_t gbm_tick = gbm_raw >> 23;
     int exec_vs_gbm   = (int)exec - (int)gbm_tick;
+
+    gbm_tick_history[gbm_tick_hist_idx] = gbm_tick;
+    gbm_tick_hist_idx                   = (gbm_tick_hist_idx + 1) % 10;
+    if (gbm_tick_hist_count < 10) gbm_tick_hist_count++;
+
+    uint32_t gbm_min = gbm_tick_history[0];
+    uint32_t gbm_max = gbm_tick_history[0];
+    for (j = 1; j < gbm_tick_hist_count; j++)
+    {
+        if (gbm_tick_history[j] < gbm_min) gbm_min = gbm_tick_history[j];
+        if (gbm_tick_history[j] > gbm_max) gbm_max = gbm_tick_history[j];
+    }
+    uint32_t gbm_range = (gbm_tick_hist_count > 1) ? (gbm_max - gbm_min) : 0;
+
     printf("          GBM: raw=0x%08X tick=%u  exec=%u  drift=%+d ticks\n",
            gbm_raw, gbm_tick, exec, exec_vs_gbm);
+    printf("          10s RANGE: gbm=[%u..%u]=%u ticks  exec=%u ticks  (gbm-exec)=%+d\n",
+           gbm_min, gbm_max, gbm_range, volatility_range, (int)gbm_range - (int)volatility_range);
 
     printf("          VOLUMES: noise=%-8u mm=%-8u momentum=%-8u value=%-8u\n",
            OB_NOISE_VOLUME, OB_MM_VOLUME, OB_MOMENTUM_VOLUME, OB_VALUE_VOLUME);
@@ -840,10 +860,7 @@ void render_depth(void)
     int half = DEPTH_WIDTH / 2;
     static uint32_t bin_bid[DEPTH_BINS];
     static uint32_t bin_ask[DEPTH_BINS];
-    int depth_view_minimum = 0;
-    int depth_view_maximum = 399;
-    int depth_view_range   = 400;
-    int bin_size           = 400 / DEPTH_BINS;
+    int bin_size = 400 / DEPTH_BINS;
 
     uint32_t maximum_bid_quantity = 1;
     uint32_t maximum_ask_quantity = 1;
@@ -854,8 +871,8 @@ void render_depth(void)
         uint32_t ask_quantity = 0;
         for (p = 0; p < bin_size; p++)
         {
-            int level = depth_view_minimum + b * bin_size + p;
-            if (level < 0 || level >= 400) continue;
+            int level = b * bin_size + p;
+            if (level >= 400) continue;
             bid_quantity += OB_BUY(level);
             ask_quantity += OB_SELL(level);
         }

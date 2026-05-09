@@ -5,11 +5,11 @@ module order_gen_top #(
     parameter PTR_WIDTH       = 4,                               // log2(NUM_UNITS)
     parameter SLOTS_PER_UNIT  = 1024,
     parameter FIFO_DEPTH      = 256,
-    parameter signed [31:0] GBM_MU_ITO_DT     = 32'sh00000000,
-	 parameter signed [31:0] GBM_SIGMA_SQRT_DT = 32'sh00001000,
+    parameter signed  [31:0] GBM_MU_ITO_DT     = 32'sh00000000,
+	 parameter signed [31:0] GBM_SIGMA_SQRT_DT = 32'sh00002000,
 	 parameter        [31:0] GBM_SIGMA_INIT    = 32'h00000100,
-    parameter        [31:0] GBM_ALPHA         = 32'h00FD70A4,
-    parameter        [31:0] GBM_P0_RECIP      = 32'h00028F5C,
+    parameter         [31:0] GBM_ALPHA         = 32'h00FD70A4,
+    parameter         [31:0] GBM_P0_RECIP      = 32'h00028F5C,
     // Sets the long-run log-price target for OU mean reversion (Q8.24 signed); ln(100) anchors price at tick 200.
     parameter signed [31:0] GBM_L_TARGET      = 32'sh049AEC6F,
     parameter [31:0] LFSR_SEED_BASE    = 32'hCAFEBABE,
