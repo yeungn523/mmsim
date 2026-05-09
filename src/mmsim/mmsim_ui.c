@@ -1103,7 +1103,7 @@ int main(int argc, char *argv[])
             {
                 type = TYPE_MM;
                 p1   = rand_range(25, 80);
-                p2   = rand_range(3, 80);
+                p2   = rand_range(10, 80);
                 p3   = rand_range(5, 30);
             }
             else if (roll < 95)
