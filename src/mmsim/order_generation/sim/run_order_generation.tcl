@@ -13,8 +13,11 @@ vmap work work
 vlog -reportprogress 300 -vlog01compat -work work ../../lfsr/galois_lfsr.v
 vlog -reportprogress 300 -vlog01compat -work work +incdir+../../gaussian/rtl ../../gaussian/rtl/ziggurat_gaussian.v
 vlog -reportprogress 300 -vlog01compat -work work +incdir+../../gbm/rtl ../../gbm/rtl/gbm_logspace.v
+vlog -reportprogress 300 -vlog01compat -work work ../../gbm/rtl/gbm_mean_reversion.v
 vlog -reportprogress 300 -vlog01compat -work work ../../agents/rtl/agent_execution_unit.v
+vlog -reportprogress 300 -vlog01compat -work work ../rtl/pacer.v
 vlog -reportprogress 300 -vlog01compat -work work ../rtl/order_arbiter.v
+vlog -reportprogress 300 -vlog01compat -work work ../rtl/order_flash_injector.v
 vlog -reportprogress 300 -vlog01compat -work work ../rtl/order_gen_top.v
 vlog -reportprogress 300 -vlog01compat -work work ../tb/tb_order_gen_top.v
 

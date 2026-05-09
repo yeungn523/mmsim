@@ -16,10 +16,13 @@ vmap work work
 vlog -work work $ROOT/lfsr/rtl/galois_lfsr.v
 vlog -work work $ROOT/gaussian/rtl/ziggurat_gaussian.v
 vlog -work work $ROOT/gbm/rtl/gbm_logspace.v
+vlog -work work $ROOT/gbm/rtl/gbm_mean_reversion.v
 vlog -work work $ROOT/matching_engine/rtl/price_level_store.v
 vlog -work work $ROOT/matching_engine/rtl/matching_engine.v
+vlog -work work $ROOT/order_generation/rtl/pacer.v
 vlog -work work $ROOT/order_generation/rtl/order_arbiter.v
 vlog -work work $ROOT/order_generation/rtl/order_fifo.v
+vlog -work work $ROOT/order_generation/rtl/order_flash_injector.v
 vlog -work work $ROOT/order_generation/rtl/order_gen_top.v
 vlog -work work $ROOT/agents/rtl/agent_execution_unit.v
 vlog -work work $ROOT/top_level/rtl/top_level.v

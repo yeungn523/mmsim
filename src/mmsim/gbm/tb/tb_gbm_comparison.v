@@ -76,6 +76,8 @@ module tb_gbm_comparison;
         .sigma_init_in   (32'h0),
         .alpha_in        (32'h0),
         .p0_recip_in     (32'h0),
+        .theta_in        (32'h0),
+        .L_target_in     (32'sh0),
         .price_out       (price_out_log),
         .sigma_out       (sigma_out_log),
         .price_valid     (price_valid_log)

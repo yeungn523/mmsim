@@ -1,4 +1,5 @@
-// Accumulates GBM prices in log-space and exponentiates the result through an exp LUT.
+// Accumulates GBM log-prices with optional Ornstein-Uhlenbeck mean reversion toward L_TARGET (THETA=0 disables it),
+// exponentiates through an exp LUT, and outputs an EWMA-smoothed realized-volatility estimate.
 
 module gbm_logspace #(
     parameter PRICE_WIDTH  = 32,
@@ -21,7 +22,11 @@ module gbm_logspace #(
     parameter        [31:0] SIGMA_INIT_DEF    = 32'h00000451,
     parameter        [31:0] ALPHA_FP_DEF      = 32'h00FD70A4,
     parameter        [31:0] P0_RECIP_DEF      = 32'h00028F5C,
-    parameter signed [31:0] L0_DEF            = 32'sh049AEC6F
+    parameter signed [31:0] L0_DEF            = 32'sh049AEC6F,
+    // Sets the per-step OU pull strength theta·dt (Q0.24); leave at 0 to fully disable mean reversion.
+    parameter        [31:0] THETA_DEF         = 32'h00000000,
+    // Sets the long-run log-price target (Q8.24 signed); ignored when THETA_DEF=0.
+    parameter signed [31:0] L_TARGET_DEF      = 32'sh049AEC6F
 )(
     input  wire        clk,
     input  wire        rst_n,
@@ -35,6 +40,8 @@ module gbm_logspace #(
     input  wire        [31:0] sigma_init_in,
     input  wire        [31:0] alpha_in,
     input  wire        [31:0] p0_recip_in,
+    input  wire        [31:0] theta_in,
+    input  wire signed [31:0] L_target_in,
 
     // Outputs price_out as Q8.24 unsigned and sigma_out as Q0.24 unsigned.
     output reg  [PRICE_WIDTH-1:0] price_out,
@@ -66,6 +73,8 @@ module gbm_logspace #(
     reg        [31:0] alpha_reg;
     reg        [31:0] one_m_alpha_reg;
     reg        [31:0] p0_recip_reg;
+    reg        [31:0] theta_reg;
+    reg signed [31:0] L_target_reg;
 
     // Holds persistent state across price updates.
     reg signed [31:0] L_reg;
@@ -76,6 +85,8 @@ module gbm_logspace #(
     reg signed [15:0]  z_latch;
     reg signed [63:0]  diff_full;
     reg signed [31:0]  diffusion;
+    reg signed [63:0]  mr_full;
+    reg signed [31:0]  mr_term;
     reg signed [31:0]  L_new;
     reg        [12:0]  lut_addr;
     wire       [31:0]  lut_data;
@@ -104,7 +115,8 @@ module gbm_logspace #(
     wire signed [33:0] L_sum_wire;
     assign L_sum_wire = $signed({{2{L_reg[31]}}, L_reg})
                       + $signed({{2{mu_ito_dt_reg[31]}}, mu_ito_dt_reg})
-                      + $signed({{2{diffusion[31]}}, diffusion});
+                      + $signed({{2{diffusion[31]}}, diffusion})
+                      + $signed({{2{mr_term[31]}}, mr_term});
 
     // Instantiates the exp-LUT M10K ROM.
     `ifdef SYNTHESIS
@@ -140,6 +152,8 @@ module gbm_logspace #(
             alpha_reg         <= ALPHA_FP_DEF;
             one_m_alpha_reg   <= (1 << SIGMA_FRAC) - ALPHA_FP_DEF;
             p0_recip_reg      <= P0_RECIP_DEF;
+            theta_reg         <= THETA_DEF;
+            L_target_reg      <= L_TARGET_DEF;
         end else if (param_load) begin
             mu_ito_dt_reg     <= mu_ito_dt_in;
             sigma_sqrt_dt_reg <= sigma_sqrt_dt_in;
@@ -147,6 +161,8 @@ module gbm_logspace #(
             alpha_reg         <= alpha_in;
             one_m_alpha_reg   <= (1 << SIGMA_FRAC) - alpha_in;
             p0_recip_reg      <= p0_recip_in;
+            theta_reg         <= theta_in;
+            L_target_reg      <= L_target_in;
         end
     end
 
@@ -163,6 +179,8 @@ module gbm_logspace #(
             z_latch           <= 16'sd0;
             diff_full         <= 64'sd0;
             diffusion         <= 32'sd0;
+            mr_full           <= 64'sd0;
+            mr_term           <= 32'sd0;
             L_new             <= 32'sh049AEC6F;
             lut_addr          <= 13'd0;
             P_new             <= 32'h64000000;
@@ -186,11 +204,13 @@ module gbm_logspace #(
 
                 S_LATCH: begin
                     diff_full <= $signed(sigma_sqrt_dt_reg) * $signed(z_latch);
+                    mr_full   <= $signed({1'b0, theta_reg}) * $signed(L_target_reg - L_reg);
                     state     <= S_DIFF_MUL;
                 end
 
                 S_DIFF_MUL: begin
                     diffusion <= ($signed(diff_full) + 64'sh800) >>> 12;
+                    mr_term   <= ($signed(mr_full) + 64'sh800000) >>> 24;
                     state     <= S_DIFF_SHF;
                 end
 
