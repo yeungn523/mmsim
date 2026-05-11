@@ -32,7 +32,6 @@ htmlcov/
 # Output Log Files 
 *.csv
 *.json
-*.png
 *.tex
 
 # ---- ModelSim / Questa ----
