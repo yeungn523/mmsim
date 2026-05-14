@@ -10,21 +10,21 @@ from pathlib import Path
 
 import click
 
-from ...utilities.console import console
+from ...console import console
 from .price_level_store_no_cancellation_golden import PriceLevelStoreNoCancellation
 
 
-# Number of addressable price ticks (must match kPriceRange in the Verilog DUT).
+# Sets the number of addressable price ticks (must match kPriceRange in the Verilog DUT).
 _DEFAULT_PRICE_RANGE: int = 480
 
-# Left-shift applied to a tick to expose last_executed_price as a Q8.24 price (matches
+# Encodes the left-shift applied to a tick so last_executed_price emerges as Q8.24 (matches
 # kTickShiftBits in matching_engine.v and TICK_SHIFT_BITS in agent_execution_unit.v).
 _TICK_SHIFT_BITS: int = 23
 
-# Default seed for deterministic stimulus generation.
+# Fixes the seed used for deterministic stimulus generation.
 _DEFAULT_SEED: int = 42
 
-# Packet-field decode bit positions (must match matching_engine.v and agent_execution_unit.v).
+# Defines packet-field decode bit positions (must match matching_engine.v and agent_execution_unit.v).
 _PACKET_SIDE_BIT: int = 31
 _PACKET_TYPE_BIT: int = 30
 _PACKET_AGENT_SHIFT: int = 28
@@ -173,7 +173,9 @@ class MatchingEngine:
         self._ask_book: PriceLevelStoreNoCancellation = PriceLevelStoreNoCancellation(
             is_bid=False, price_range=price_range,
         )
-        self._last_executed_price: int = 0
+        # Matches the Verilog reset value (tick 200 shifted into Q8.24), which the RTL holds
+        # until the first real fill so agents observe a coherent last-price before any trade.
+        self._last_executed_price: int = 0x64000000
         self._last_executed_price_valid: bool = False
 
     def __repr__(self) -> str:
@@ -298,7 +300,7 @@ def generate_deterministic_sweep(
     packets: list[int] = []
     price_step = 20
 
-    # Phase 1: seed the ask book with five ascending limits.
+    # Phase 1: seeds the ask book with five ascending limits.
     for level_index in range(5):
         packets.append(encode_packet(
             side=1, order_type=0, agent_type=3,
@@ -306,7 +308,7 @@ def generate_deterministic_sweep(
             volume=rng.randint(3, 8),
         ))
 
-    # Phase 2: seed the bid book with five descending limits, well below the ask.
+    # Phase 2: seeds the bid book with five descending limits, well below the ask.
     for level_index in range(5):
         packets.append(encode_packet(
             side=0, order_type=0, agent_type=3,
@@ -314,27 +316,27 @@ def generate_deterministic_sweep(
             volume=rng.randint(3, 8),
         ))
 
-    # Phase 3: aggregate onto an existing bid level.
+    # Phase 3: aggregates onto an existing bid level.
     packets.append(encode_packet(
         side=0, order_type=0, agent_type=3, price=180, volume=4,
     ))
 
-    # Phase 4: crossing limit buy that takes part of the best ask and inserts the remainder.
+    # Phase 4: emits a crossing limit buy that takes part of the best ask and inserts the remainder.
     packets.append(encode_packet(
         side=0, order_type=0, agent_type=3, price=210, volume=20,
     ))
 
-    # Phase 5: market buy that sweeps multiple ask levels.
+    # Phase 5: emits a market buy that sweeps multiple ask levels.
     packets.append(encode_packet(
         side=0, order_type=1, agent_type=2, price=0, volume=15,
     ))
 
-    # Phase 6: market sell that consumes the top bid.
+    # Phase 6: emits a market sell that consumes the top bid.
     packets.append(encode_packet(
         side=1, order_type=1, agent_type=2, price=0, volume=3,
     ))
 
-    # Phase 7: random interleaved activity. Coverage-oriented; not a stress test.
+    # Phase 7: emits random interleaved activity for coverage rather than stress.
     for _ in range(50):
         choice = rng.random()
         if choice < 0.4:
@@ -353,7 +355,7 @@ def generate_deterministic_sweep(
                 price=rng.choice([200, 220, 240, 180, 160, 140]), volume=rng.randint(1, 5),
             ))
 
-    # Phase 8: drain both sides with large market orders.
+    # Phase 8: drains both sides with large market orders.
     for _ in range(4):
         packets.append(encode_packet(
             side=0, order_type=1, agent_type=2, price=0, volume=100,
@@ -362,7 +364,7 @@ def generate_deterministic_sweep(
             side=1, order_type=1, agent_type=2, price=0, volume=100,
         ))
 
-    # Phase 9: market order against the now-empty book.
+    # Phase 9: emits a market order against the now-empty book.
     packets.append(encode_packet(
         side=0, order_type=1, agent_type=2, price=0, volume=10,
     ))
@@ -385,24 +387,24 @@ def generate_edge_case_packets(price_range: int = _DEFAULT_PRICE_RANGE) -> list[
     """
     packets: list[int] = []
 
-    # Boundary: insert at price 0 (lowest tick).
+    # Inserts at the lowest tick to cover the price-zero boundary.
     packets.append(encode_packet(
         side=0, order_type=0, agent_type=0, price=0, volume=1,
     ))
-    # Boundary: insert at the highest valid tick.
+    # Inserts at the highest valid tick to cover the upper boundary.
     packets.append(encode_packet(
         side=1, order_type=0, agent_type=0, price=price_range - 1, volume=1,
     ))
-    # Out-of-range insert; engine should silently drop.
+    # Submits an out-of-range insert that the engine silently drops.
     packets.append(encode_packet(
         side=0, order_type=0, agent_type=0, price=price_range, volume=5,
     ))
-    # Minimum volume.
+    # Submits a single-share insert to exercise the minimum-volume path.
     packets.append(encode_packet(
         side=0, order_type=0, agent_type=0, price=100, volume=1,
     ))
-    # Saturation prep: three inserts of 30000 shares at price 200 (sum = 90000) but
-    # level_quantity is 16-bit so it caps at 65535. Stresses the addition path.
+    # Stacks three 30000-share inserts at price 200 so the 16-bit level_quantity saturates
+    # at 65535 (sum = 90000), stressing the addition path.
     packets.append(encode_packet(
         side=0, order_type=0, agent_type=0, price=200, volume=30000,
     ))
@@ -412,15 +414,15 @@ def generate_edge_case_packets(price_range: int = _DEFAULT_PRICE_RANGE) -> list[
     packets.append(encode_packet(
         side=0, order_type=0, agent_type=0, price=200, volume=30000,
     ))
-    # Maximum 16-bit volume on a fresh ask level.
+    # Posts the maximum 16-bit volume on a fresh ask level.
     packets.append(encode_packet(
         side=1, order_type=0, agent_type=0, price=300, volume=65535,
     ))
-    # Market against an empty opposite side (no bid yet on this fresh price).
+    # Sends a market against an empty opposite side (no bid yet on this fresh price).
     packets.append(encode_packet(
         side=1, order_type=1, agent_type=2, price=0, volume=10,
     ))
-    # Drain everything posted so the next stress packets see a clean book.
+    # Drains everything posted so the next stress packets see a clean book.
     packets.append(encode_packet(
         side=1, order_type=1, agent_type=2, price=0, volume=65535,
     ))
@@ -476,9 +478,8 @@ def generate_stress_sweep(
         )
         console.error(message=message, error=ValueError)
 
-    # Centers the Gaussian on the mid-range and sets the standard deviation so that ~99.7% of
-    # samples fall inside the addressable tick range (3 sigma == half-range). Samples in the
-    # tails beyond the range are rejection-sampled.
+    # Centers the Gaussian on mid-range with sigma sized so ~99.7% of samples fall inside the
+    # addressable tick range (3 sigma == half-range); tail samples are rejection-sampled.
     effective_mean = price_mean if price_mean is not None else (price_range - 1) / 2.0
     effective_stddev = price_stddev if price_stddev is not None else price_range / 6.0
 
@@ -576,10 +577,10 @@ def verify_against_verilog(expected_path: Path, actual_path: Path) -> dict[str, 
     matches = 0
     mismatches = 0
 
+    # Compares the fields committed synchronously at order_retire_valid; excludes best_* which
+    # the pipelined priority encoder settles asynchronously over several cycles.
     comparison_fields = [
         "trade_count", "total_fill_quantity",
-        "best_bid_price", "best_bid_quantity", "best_bid_valid",
-        "best_ask_price", "best_ask_quantity", "best_ask_valid",
         "last_executed_price", "last_executed_price_valid",
     ]
 

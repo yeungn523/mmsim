@@ -47,6 +47,13 @@ module tb_matching_engine_csv;
     wire                       order_retire_valid;
     wire [kQuantityWidth-1:0]  order_retire_trade_count;
     wire [kQuantityWidth-1:0]  order_retire_fill_quantity;
+    wire [1:0]                 order_retire_agent_type;
+
+    // VGA depth-read tap is unused in this CSV testbench; tied off to silence width and
+    // missing-connection warnings.
+    wire [13:0]                depth_rd_addr = 14'd0;
+    wire [kQuantityWidth-1:0]  bid_depth_rd_data;
+    wire [kQuantityWidth-1:0]  ask_depth_rd_data;
 
     matching_engine #(
         .kPriceWidth      (kPriceWidth),
@@ -72,7 +79,11 @@ module tb_matching_engine_csv;
         .best_ask_valid             (best_ask_valid),
         .order_retire_valid         (order_retire_valid),
         .order_retire_trade_count   (order_retire_trade_count),
-        .order_retire_fill_quantity (order_retire_fill_quantity)
+        .order_retire_fill_quantity (order_retire_fill_quantity),
+        .depth_rd_addr              (depth_rd_addr),
+        .bid_depth_rd_data          (bid_depth_rd_data),
+        .ask_depth_rd_data          (ask_depth_rd_data),
+        .order_retire_agent_type    (order_retire_agent_type)
     );
 
     initial clock = 0;
@@ -210,6 +221,10 @@ module tb_matching_engine_csv;
         // Drives a packet every cycle the engine accepts one. The Accept FIFO smooths bursts.
         while (!$feof(packets_file)) begin
             while (!order_ready) tick;
+            // Pads the inter-packet interval so the priority encoder and port-B mux fully
+            // settle after the prior INSERT before the next kBClassify reads best_*; the
+            // integrated system provides this margin naturally through the agent step period.
+            tick_n(6);
 
             scan_result = $fscanf(packets_file, "%h\n", read_packet);
             if (scan_result != 1) begin

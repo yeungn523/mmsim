@@ -10,18 +10,18 @@ from pathlib import Path
 
 import click
 
-from ...utilities.console import console
+from ...console import console
 
 
-# Number of addressable price ticks (must match kPriceRange in the Verilog DUT).
+# Sets the number of addressable price ticks (must match kPriceRange in the Verilog DUT).
 _DEFAULT_PRICE_RANGE: int = 480
 
-# Command codes matching the Verilog localparam encoding for the no-cancellation variant.
+# Defines the command codes matching the Verilog localparam encoding for the no-cancellation variant.
 _COMMAND_NOP: int = 0
 _COMMAND_INSERT: int = 1
 _COMMAND_CONSUME: int = 2
 
-# Default seed for deterministic stimulus generation.
+# Fixes the seed used for deterministic stimulus generation.
 _DEFAULT_SEED: int = 42
 
 
@@ -185,10 +185,10 @@ def generate_deterministic_sweep(
     """
     rng = random.Random(seed)
     commands: list[dict[str, int]] = []
-    # Price tick step kept small enough that eight distinct levels fit under kPriceRange=480.
+    # Keeps the price tick step small enough that eight distinct levels fit under kPriceRange=480.
     price_step = 50
 
-    # Phase 1: eight distinct price levels.
+    # Phase 1: posts eight distinct price levels.
     for level_index in range(8):
         commands.append({
             "command": _COMMAND_INSERT,
@@ -196,7 +196,7 @@ def generate_deterministic_sweep(
             "quantity": rng.randint(3, 8),
         })
 
-    # Phase 2: four aggregations onto existing levels.
+    # Phase 2: aggregates four inserts onto existing levels.
     for _ in range(4):
         commands.append({
             "command": _COMMAND_INSERT,
@@ -204,20 +204,20 @@ def generate_deterministic_sweep(
             "quantity": rng.randint(1, 5),
         })
 
-    # Phase 3: out-of-range insert (rejected).
+    # Phase 3: submits an out-of-range insert that the store rejects.
     commands.append({
         "command": _COMMAND_INSERT,
         "price": price_range + 100,
         "quantity": 5,
     })
 
-    # Phase 4: partial consume from the best level.
+    # Phase 4: partially consumes from the best level.
     commands.append({"command": _COMMAND_CONSUME, "price": 0, "quantity": 3})
 
-    # Phase 5: large consume that fully drains the best level and rolls over to the next.
+    # Phase 5: issues a large consume that drains the best level and rolls over to the next.
     commands.append({"command": _COMMAND_CONSUME, "price": 0, "quantity": 50})
 
-    # Phase 6: randomly interleaved inserts and consumes.
+    # Phase 6: interleaves random inserts and consumes.
     for _ in range(20):
         if rng.random() < 0.6:
             commands.append({
@@ -232,11 +232,11 @@ def generate_deterministic_sweep(
                 "quantity": rng.randint(1, 10),
             })
 
-    # Phase 7: drain the book completely.
+    # Phase 7: drains the book completely.
     for _ in range(10):
         commands.append({"command": _COMMAND_CONSUME, "price": 0, "quantity": 50})
 
-    # Phase 8: consume from an empty book.
+    # Phase 8: consumes from an empty book.
     commands.append({"command": _COMMAND_CONSUME, "price": 0, "quantity": 10})
 
     return commands
