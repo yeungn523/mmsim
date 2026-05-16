@@ -18,7 +18,7 @@ a limit order book. The system targets the Terasic DE1-SoC development board (In
 Verilog block is paired with a Python golden model and a ModelSim testbench so behavior
 can be verified deterministically before hardware deployment.
 
-A more detailed write-up of the project can be found here: [View on Github](https://github.com/yeungn523/mmsim_website).
+A more detailed write-up of the project can be found here: [View Website](https://yeungn523.github.io/mmsim_website/).
 ___
 
 ## Features
