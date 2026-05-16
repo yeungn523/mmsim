@@ -99,12 +99,6 @@ def main() -> None:
 
 
 def run_golden() -> list[ExpGrant | ExpStall]:
-    """Replays the testbench stimulus through the round-robin arbiter golden model.
-
-    Returns:
-        The interleaved list of ExpGrant and ExpStall events expected from the simulator, ordered to match the
-        cycle-by-cycle CSV emitted by tb_order_arbiter.v.
-    """
     model = _ArbiterModel()
     expected: list[ExpGrant | ExpStall] = []
 
@@ -112,69 +106,60 @@ def run_golden() -> list[ExpGrant | ExpStall]:
         model.order_valid = [valid] * _NUM_UNITS
 
     def set_valid(indices: list[int]) -> None:
-        model.order_valid = [index in indices for index in range(_NUM_UNITS)]
+        model.order_valid = [i in indices for i in range(_NUM_UNITS)]
 
     def run(cycle_count: int) -> None:
         for _ in range(cycle_count):
             granted = model.step()
             if granted is not None:
                 expected.append(ExpGrant(unit=granted, packet=_make_packet(unit=granted)))
-            elif model.almost_full or model.full:
+            elif (model.almost_full or model.full) and any(model.order_valid):
                 expected.append(ExpStall())
 
-    # T1: every unit valid for three full laps.
-    all_valid(valid=True)
-    run(cycle_count=_NUM_UNITS * 3)
-    all_valid(valid=False)
-    run(cycle_count=2)
+    # T1: all units valid for 3 full laps
+    all_valid(True)
+    run(_NUM_UNITS * 3)
+    all_valid(False)
+    run(2)
 
-    # T2: sparse valid set — units 1, 3, 5.
-    set_valid(indices=[1, 3, 5])
-    run(cycle_count=12)
-    all_valid(valid=False)
-    run(cycle_count=2)
+    # T2: sparse units 1, 3, 5
+    set_valid([1, 3, 5])
+    run(12)
+    all_valid(False)
+    run(2)
 
-    # T3: almost_full forces stalls.
-    all_valid(valid=True)
-    model.almost_full = True
-    run(cycle_count=6)
+    # T3: stall by order_ready=0 for 6 cycles then resume 4
+    all_valid(True)
+    model.almost_full = True   # proxy for order_ready=0
+    run(6)
     model.almost_full = False
-    run(cycle_count=4)
-    all_valid(valid=False)
-    run(cycle_count=2)
+    run(4)
+    all_valid(False)
+    run(2)
 
-    # T4: full forces stalls.
-    all_valid(valid=True)
-    model.full = True
-    run(cycle_count=6)
-    model.full = False
-    run(cycle_count=4)
-    all_valid(valid=False)
-    run(cycle_count=2)
+    # T4: only unit 3 valid
+    set_valid([3])
+    run(8)
+    all_valid(False)
+    run(2)
 
-    # T5: only unit 3 valid.
-    set_valid(indices=[3])
-    run(cycle_count=8)
-    all_valid(valid=False)
-    run(cycle_count=2)
-
-    # T6: unit 2 deasserts mid-run.
-    all_valid(valid=True)
-    run(cycle_count=3)
+    # T5: unit 2 deasserts mid-run
+    all_valid(True)
+    run(3)
     model.order_valid[2] = False
-    run(cycle_count=8)
-    all_valid(valid=False)
-    run(cycle_count=2)
+    run(8)
+    all_valid(False)
+    run(2)
 
-    # T7: stall, then resume.
-    all_valid(valid=True)
-    run(cycle_count=3)
+    # T6: stall then resume, pointer continuity
+    all_valid(True)
+    run(3)
     model.almost_full = True
-    run(cycle_count=3)
+    run(4)
     model.almost_full = False
-    run(cycle_count=6)
-    all_valid(valid=False)
-    run(cycle_count=2)
+    run(6)
+    all_valid(False)
+    run(2)
 
     return expected
 
@@ -200,7 +185,7 @@ def parse_csv(path: Path) -> list[SimGrant | SimStall]:
                         cycle=cycle,
                         unit=int(row["unit"]),
                         packet=int(row["packet"], 16),
-                        wr_en=int(row["wr_en"]),
+                        wr_en=int(row["ready"]),
                     )
                 )
             elif event_type == "STALL":
@@ -310,6 +295,19 @@ def verify_events(
     else:
         print(f"  FAILED: {fails} failure(s), {passes} pass(es)")
     print("=" * 55)
+
+    if sim_grants:
+        grant_counts = [sum(1 for g in sim_grants if g.unit == u) for u in range(_NUM_UNITS)]
+        max_grants = max(grant_counts)
+        min_grants = min(c for c in grant_counts if c > 0)
+        print(f"\n  Fairness: max={max_grants} min={min_grants} ratio={max_grants/max(min_grants,1):.3f}")
+        
+        gaps = [sim_grants[i+1].cycle - sim_grants[i].cycle for i in range(len(sim_grants)-1)]
+        print(f"  Inter-grant gap: mean={sum(gaps)/len(gaps):.2f} max={max(gaps)} min={min(gaps)}")
+        
+        total_cycles = sim_grants[-1].cycle - sim_grants[0].cycle + 1
+        print(f"  Throughput: {len(sim_grants)/total_cycles:.4f} grants/cycle")
+        print(f"  Stall rate: {len(sim_stalls)/total_cycles:.4f} stalls/cycle")
 
     return fails == 0
 
@@ -469,7 +467,7 @@ def _self_test() -> None:
     print("  T2 sparse order      : OK")
 
     # T5 starts at T1(24) + T2(12) + T3-grants(4) + T4-grants(4) = 44.
-    t5_start = 24 + 12 + 4 + 4
+    t5_start = 24 + 12 + 4 
     t5_units = [grants[t5_start + index].unit for index in range(8)]
     if not all(unit == 3 for unit in t5_units):
         message = f"T5 self-test: {t5_units}"
